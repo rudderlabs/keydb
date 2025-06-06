@@ -1,6 +1,6 @@
 # KeyDB
 
-KeyDB is a KV store designed to be fast and scalable and eventually consistent.
+KeyDB is a Key store (not a KV store) designed to be fast and scalable and eventually consistent.
 
 ## Summary
 
