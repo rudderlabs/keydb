@@ -24,6 +24,7 @@ const (
 	NodeService_GetNodeInfo_FullMethodName    = "/keydb.NodeService/GetNodeInfo"
 	NodeService_CreateSnapshot_FullMethodName = "/keydb.NodeService/CreateSnapshot"
 	NodeService_Scale_FullMethodName          = "/keydb.NodeService/Scale"
+	NodeService_ScaleComplete_FullMethodName  = "/keydb.NodeService/ScaleComplete"
 )
 
 // NodeServiceClient is the client API for NodeService service.
@@ -42,6 +43,8 @@ type NodeServiceClient interface {
 	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error)
 	// Scale changes the number of nodes in the cluster
 	Scale(ctx context.Context, in *ScaleRequest, opts ...grpc.CallOption) (*ScaleResponse, error)
+	// ScaleComplete is used by the operator to notify all nodes that the scale is complete and they can now start serving traffic again
+	ScaleComplete(ctx context.Context, in *ScaleCompleteRequest, opts ...grpc.CallOption) (*ScaleCompleteResponse, error)
 }
 
 type nodeServiceClient struct {
@@ -102,6 +105,16 @@ func (c *nodeServiceClient) Scale(ctx context.Context, in *ScaleRequest, opts ..
 	return out, nil
 }
 
+func (c *nodeServiceClient) ScaleComplete(ctx context.Context, in *ScaleCompleteRequest, opts ...grpc.CallOption) (*ScaleCompleteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ScaleCompleteResponse)
+	err := c.cc.Invoke(ctx, NodeService_ScaleComplete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeServiceServer is the server API for NodeService service.
 // All implementations must embed UnimplementedNodeServiceServer
 // for forward compatibility.
@@ -118,6 +131,8 @@ type NodeServiceServer interface {
 	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error)
 	// Scale changes the number of nodes in the cluster
 	Scale(context.Context, *ScaleRequest) (*ScaleResponse, error)
+	// ScaleComplete is used by the operator to notify all nodes that the scale is complete and they can now start serving traffic again
+	ScaleComplete(context.Context, *ScaleCompleteRequest) (*ScaleCompleteResponse, error)
 	mustEmbedUnimplementedNodeServiceServer()
 }
 
@@ -142,6 +157,9 @@ func (UnimplementedNodeServiceServer) CreateSnapshot(context.Context, *CreateSna
 }
 func (UnimplementedNodeServiceServer) Scale(context.Context, *ScaleRequest) (*ScaleResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Scale not implemented")
+}
+func (UnimplementedNodeServiceServer) ScaleComplete(context.Context, *ScaleCompleteRequest) (*ScaleCompleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ScaleComplete not implemented")
 }
 func (UnimplementedNodeServiceServer) mustEmbedUnimplementedNodeServiceServer() {}
 func (UnimplementedNodeServiceServer) testEmbeddedByValue()                     {}
@@ -254,6 +272,24 @@ func _NodeService_Scale_Handler(srv interface{}, ctx context.Context, dec func(i
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeService_ScaleComplete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ScaleCompleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeServiceServer).ScaleComplete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeService_ScaleComplete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeServiceServer).ScaleComplete(ctx, req.(*ScaleCompleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NodeService_ServiceDesc is the grpc.ServiceDesc for NodeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -280,6 +316,10 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Scale",
 			Handler:    _NodeService_Scale_Handler,
+		},
+		{
+			MethodName: "ScaleComplete",
+			Handler:    _NodeService_ScaleComplete_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

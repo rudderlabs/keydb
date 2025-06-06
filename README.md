@@ -26,12 +26,7 @@ The `cachettl` library will be configured with `config.refreshTTL=false` so that
 * Being a distributed system each node will handle only a set of hash ranges. There are going to be X hash ranges in
   total (default 128). Each node will know which hash ranges it will handle at a given time by knowing its own node 
   number and how many nodes the cluster is comprised of. The hashing functions need to be deterministic and as efficient
-  as possible. We will need two hashing functions:
-  1. one function that given the number of nodes in the cluster and a node index it will tell us which
-     hash ranges the node with that index serves. 
-  2. one function that given a key it will tell you in which hash range it falls into. this function combined with the
-     other function above (bullet point 1) we should be able to handle all cases in the nodes, 
-     `Client` and `Operator` (explained later).
+  as possible.
 * Every X seconds (configurable, default 60s) each node will autonomously create one snapshot per hash range that is 
   handling on S3 Express One Zone (or another CloudStorage of choice) using a custom data format to save the content of 
   the double linked-list sorted by TTL. This way upon recovering we can read the file and repopulate the 
