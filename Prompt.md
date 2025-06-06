@@ -1,10 +1,10 @@
-# HelmDB
+# KeyDB
 
-HelmDB is a KV store designed to be fast and scalable and eventually consistent.
+KeyDB is a KV store designed to be fast and scalable and eventually consistent.
 
 ## Summary
 
-HelmDB is a distributed system written in Golang that follows the Effective Go best-practices and the SOLID principles 
+KeyDB is a distributed system written in Golang that follows the Effective Go best-practices and the SOLID principles 
 that will work as a distributed KV store with TTL support.
 Code quality and test coverage are of the utmost importance. 
 All scenarios need to be covered. The repository will include unit tests but also tests that will create a cluster of 
