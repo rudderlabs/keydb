@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package keydb;
+
+option go_package = "github.com/rudderlabs/keydb/proto";
+
+// KeyDB service definitions
+
+// NodeService handles the core key-value operations
+service NodeService {
+  // Get retrieves values for multiple keys
+  rpc Get(GetRequest) returns (GetResponse) {}
+
+  // Put stores multiple key-value pairs with TTL
+  rpc Put(PutRequest) returns (PutResponse) {}
+
+  // GetNodeInfo returns information about the node and the cluster
+  rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse) {}
+
+  // CreateSnapshot forces the creation of snapshots for all hash ranges
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse) {}
+
+  // Scale changes the number of nodes in the cluster
+  rpc Scale(ScaleRequest) returns (ScaleResponse) {}
+}
+
+// NodeService message definitions
+
+// GetRequest contains multiple keys to retrieve
+message GetRequest {
+  repeated string keys = 1;
+}
+
+// GetResponse contains the retrieved values and cluster information
+message GetResponse {
+  repeated bool exists = 1; // This list should be populated in the same order as the "keys" field in GetRequest
+  uint32 cluster_size = 2; // Number of nodes in the cluster
+  ErrorCode error_code = 3; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
+}
+
+// PutRequest contains multiple key-value pairs to store
+// The client will automatically split PutRequest into multiple ones, one per node depending on the keys and hash-ranges
+// Then the requests are sent in parallel to all the concerned nodes and put back into a single PutResponse
+message PutRequest {
+  repeated KeyWithTTL items = 1;
+}
+
+// PutResponse contains the operation result and cluster information
+message PutResponse {
+  bool success = 1;
+  uint32 cluster_size = 2; // Number of nodes in the cluster
+  ErrorCode error_code = 3; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
+}
+
+// KeyWithTTL represents a key with its time to live
+message KeyWithTTL {
+  string key = 1;
+  uint64 ttl_seconds = 2;
+}
+
+// ErrorCode enum for different types of errors
+enum ErrorCode {
+  NO_ERROR = 0;
+  WRONG_NODE = 1; // Key should be handled by a different node
+  SCALING = 2; // There is a scaling operation in progress, the client should retry with an exponential backoff
+  INTERNAL_ERROR = 3;
+}
+
+// GetNodeInfoRequest to retrieve information about a node
+message GetNodeInfoRequest {
+  uint32 node_id = 1; // ID of the node to get info from
+}
+
+// GetNodeInfoResponse contains information about the node and the cluster
+message GetNodeInfoResponse {
+  uint32 node_id = 1; // ID of the node
+  uint32 cluster_size = 2; // Number of nodes in the cluster
+  repeated HashRange hash_ranges = 3; // Hash ranges handled by this node
+  uint64 keys_count = 4; // Number of keys stored in this node
+  uint64 last_snapshot_timestamp = 5; // Unix timestamp of the last snapshot
+}
+
+// HashRange represents a range of hash values
+message HashRange {
+  uint32 range_id = 1;
+  uint32 start = 2; // Start of the hash range (inclusive)
+  uint32 end = 3; // End of the hash range (exclusive)
+}
+
+// CreateSnapshotRequest initiates snapshot creation
+message CreateSnapshotRequest {}
+
+// CreateSnapshotResponse contains the result of the snapshot creation
+message CreateSnapshotResponse {
+  bool success = 1;
+  string error_message = 2; // Error message if the operation failed
+  uint32 node_id = 3; // ID of the node that processed the request
+}
+
+// ScaleRequest changes the number of nodes in the cluster
+message ScaleRequest {
+  uint32 new_cluster_size = 1; // New number of nodes in the cluster
+}
+
+// ScaleResponse contains the result of the scaling operation
+message ScaleResponse {
+  bool success = 1;
+  uint32 previous_cluster_size = 2;
+  uint32 new_cluster_size = 3;
+  string error_message = 4; // Error message if the operation failed
+}
