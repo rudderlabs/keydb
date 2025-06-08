@@ -8,10 +8,11 @@ import (
 	"os"
 	"strconv"
 
+	"google.golang.org/grpc"
+
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/node"
 	pb "github.com/rudderlabs/keydb/proto"
-	"google.golang.org/grpc"
 )
 
 func main() {
@@ -81,7 +82,10 @@ func main() {
 	}
 
 	log.Printf("Starting node %d of %d on port %d", *nodeID, *clusterSize, *port)
-	log.Printf("Handling %d hash ranges out of %d total", len(hash.GetNodeHashRanges(uint32(*nodeID), uint32(*clusterSize), uint32(*hashRanges))), *hashRanges)
+	log.Printf("Handling %d hash ranges out of %d total",
+		len(hash.GetNodeHashRanges(uint32(*nodeID), uint32(*clusterSize), uint32(*hashRanges))),
+		*hashRanges,
+	)
 
 	// Start the server
 	if err := server.Serve(lis); err != nil {

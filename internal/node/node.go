@@ -9,11 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/rudderlabs/keydb/internal/cachettl"
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 const (
@@ -81,7 +82,7 @@ func NewService(config Config) (*Service, error) {
 	}
 
 	// Create snapshot directory if it doesn't exist
-	if err := os.MkdirAll(config.SnapshotDir, 0755); err != nil {
+	if err := os.MkdirAll(config.SnapshotDir, 0o755); err != nil {
 		return nil, fmt.Errorf("failed to create snapshot directory: %w", err)
 	}
 
@@ -97,6 +98,7 @@ func NewService(config Config) (*Service, error) {
 	}
 
 	// Start background snapshot creation
+	// TODO this should be moved also it's missing a context
 	go service.snapshotLoop()
 
 	return service, nil
@@ -174,7 +176,7 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		hashRange := hash.GetHashRangeForKey(key, s.config.TotalHashRanges)
 
 		// Determine which node should handle this key
-		nodeID := hash.HashKey(key, s.config.ClusterSize, s.config.TotalHashRanges)
+		nodeID := hash.GetNodeNumber(key, s.config.ClusterSize, s.config.TotalHashRanges)
 
 		// Check if this node should handle this key
 		if nodeID != s.config.NodeID {
@@ -216,7 +218,7 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		hashRange := hash.GetHashRangeForKey(item.Key, s.config.TotalHashRanges)
 
 		// Determine which node should handle this key
-		nodeID := hash.HashKey(item.Key, s.config.ClusterSize, s.config.TotalHashRanges)
+		nodeID := hash.GetNodeNumber(item.Key, s.config.ClusterSize, s.config.TotalHashRanges)
 
 		// Check if this node should handle this key
 		if nodeID != s.config.NodeID {

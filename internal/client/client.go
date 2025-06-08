@@ -7,10 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rudderlabs/keydb/internal/hash"
-	pb "github.com/rudderlabs/keydb/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/rudderlabs/keydb/internal/hash"
+	pb "github.com/rudderlabs/keydb/proto"
 )
 
 // Config holds the configuration for a client
@@ -160,7 +161,7 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	// Group keys by node
 	keysByNode := make(map[uint32][]string)
 	for _, key := range keys {
-		nodeID := hash.HashKey(key, c.clusterSize, c.config.TotalHashRanges)
+		nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
@@ -241,7 +242,7 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 	// Group items by node
 	itemsByNode := make(map[uint32][]*pb.KeyWithTTL)
 	for _, item := range items {
-		nodeID := hash.HashKey(item.Key, c.clusterSize, c.config.TotalHashRanges)
+		nodeID := hash.GetNodeNumber(item.Key, c.clusterSize, c.config.TotalHashRanges)
 		itemsByNode[nodeID] = append(itemsByNode[nodeID], item)
 	}
 
@@ -375,7 +376,7 @@ func (c *Client) CreateSnapshot(ctx context.Context, nodeID uint32) (*pb.CreateS
 }
 
 // Scale changes the number of nodes in the cluster
-func (c *Client) Scale(ctx context.Context, nodeID uint32, newClusterSize uint32) (*pb.ScaleResponse, error) {
+func (c *Client) Scale(ctx context.Context, nodeID, newClusterSize uint32) (*pb.ScaleResponse, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

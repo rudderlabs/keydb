@@ -4,7 +4,7 @@ import (
 	"hash/fnv"
 )
 
-// HashKey computes the hash of a key and determines which node should handle it
+// GetNodeNumber computes the hash of a key and determines which node should handle it
 // given the total number of nodes and hash ranges.
 //
 // Parameters:
@@ -14,14 +14,14 @@ import (
 //
 // Returns:
 // - The node number (0-based) that should handle this key
-func HashKey(key string, numberOfNodes uint32, totalHashRanges uint32) uint32 {
+func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) uint32 {
 	if numberOfNodes == 0 {
 		return 0
 	}
 
 	// Calculate the hash of the key
 	h := fnv.New32a()
-	h.Write([]byte(key))
+	_, _ = h.Write([]byte(key))
 	hashValue := h.Sum32()
 
 	// Determine which hash range this key belongs to
@@ -65,7 +65,7 @@ func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) []uint32 {
 // - The hash range ID for this key
 func GetHashRangeForKey(key string, totalHashRanges uint32) uint32 {
 	h := fnv.New32a()
-	h.Write([]byte(key))
+	_, _ = h.Write([]byte(key))
 	hashValue := h.Sum32()
 	return hashValue % totalHashRanges
 }

@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-func TestHashKey(t *testing.T) {
+func TestGetNodeNumber(t *testing.T) {
 	tests := []struct {
 		name            string
 		key             string
@@ -31,36 +31,36 @@ func TestHashKey(t *testing.T) {
 			key:             "test-key",
 			numberOfNodes:   3,
 			totalHashRanges: 128,
-			expected:        HashKey("test-key", 3, 128), // Deterministic check
+			expected:        GetNodeNumber("test-key", 3, 128), // Deterministic check
 		},
 		{
 			name:            "Same key should always hash to same node",
 			key:             "consistent-key",
 			numberOfNodes:   5,
 			totalHashRanges: 128,
-			expected:        HashKey("consistent-key", 5, 128), // Deterministic check
+			expected:        GetNodeNumber("consistent-key", 5, 128), // Deterministic check
 		},
 		{
 			name:            "Different keys can hash to different nodes",
 			key:             "key1",
 			numberOfNodes:   10,
 			totalHashRanges: 128,
-			expected:        HashKey("key1", 10, 128), // Deterministic check
+			expected:        GetNodeNumber("key1", 10, 128), // Deterministic check
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := HashKey(tt.key, tt.numberOfNodes, tt.totalHashRanges)
+			result := GetNodeNumber(tt.key, tt.numberOfNodes, tt.totalHashRanges)
 			if result != tt.expected {
-				t.Errorf("HashKey(%s, %d, %d) = %d, want %d",
+				t.Errorf("GetNodeNumber(%s, %d, %d) = %d, want %d",
 					tt.key, tt.numberOfNodes, tt.totalHashRanges, result, tt.expected)
 			}
 
 			// Test determinism - calling again should yield same result
-			result2 := HashKey(tt.key, tt.numberOfNodes, tt.totalHashRanges)
+			result2 := GetNodeNumber(tt.key, tt.numberOfNodes, tt.totalHashRanges)
 			if result != result2 {
-				t.Errorf("HashKey not deterministic: first call = %d, second call = %d",
+				t.Errorf("GetNodeNumber not deterministic: first call = %d, second call = %d",
 					result, result2)
 			}
 		})
@@ -185,13 +185,13 @@ func TestConsistencyBetweenFunctions(t *testing.T) {
 	hashRange := GetHashRangeForKey(key, totalHashRanges)
 
 	// Get the node for the key
-	node := HashKey(key, numberOfNodes, totalHashRanges)
+	node := GetNodeNumber(key, numberOfNodes, totalHashRanges)
 
 	// The node should be the hash range modulo number of nodes
 	expectedNode := hashRange % numberOfNodes
 
 	if node != expectedNode {
-		t.Errorf("Inconsistency: HashKey(%s, %d, %d) = %d, but expected %d (hashRange %% numberOfNodes)",
+		t.Errorf("Inconsistency: GetNodeNumber(%s, %d, %d) = %d, but expected %d (hashRange %% numberOfNodes)",
 			key, numberOfNodes, totalHashRanges, node, expectedNode)
 	}
 
