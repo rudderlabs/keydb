@@ -32,7 +32,7 @@ func TestGetPut(t *testing.T) {
 		SnapshotInterval: 60, // 60 seconds
 	}
 
-	service, err := NewService(config)
+	service, err := NewService(context.TODO(), config)
 	require.NoError(t, err)
 
 	// Create a gRPC server
