@@ -50,11 +50,7 @@ type Service struct {
 	config Config
 
 	// caches is a map of hash range ID to cache
-	caches map[uint32]*cachettl.Cache[string, struct{}]
-
-	// keyMap is a map of hash range ID to a map of keys
-	// This is used to track keys since we can't access the cache's keys directly
-	keyMap map[uint32]map[string]struct{}
+	caches map[uint32]*cachettl.Cache[string, bool]
 
 	// mu protects the caches and scaling operations
 	mu sync.RWMutex
@@ -88,8 +84,7 @@ func NewService(config Config) (*Service, error) {
 
 	service := &Service{
 		config: config,
-		caches: make(map[uint32]*cachettl.Cache[string, struct{}]),
-		keyMap: make(map[uint32]map[string]struct{}),
+		caches: make(map[uint32]*cachettl.Cache[string, bool]),
 	}
 
 	// Initialize caches for all hash ranges this node handles
@@ -120,18 +115,13 @@ func (s *Service) initCaches() error {
 		}
 
 		// Create a new cache with no TTL refresh
-		cache := cachettl.New[string, struct{}](cachettl.WithNoRefreshTTL)
+		cache := cachettl.New[string, bool](cachettl.WithNoRefreshTTL)
 		s.caches[r] = cache
-
-		// Initialize the key map for this range
-		if _, exists := s.keyMap[r]; !exists {
-			s.keyMap[r] = make(map[string]struct{})
-		}
 
 		// Try to load snapshot for this range
 		if err := s.loadSnapshot(r); err != nil {
-			log.Printf("Warning: failed to load snapshot for range %d: %v", r, err)
 			// Continue anyway, we'll start with an empty cache
+			log.Printf("Warning: failed to load snapshot for range %d: %v", r, err)
 		}
 	}
 
@@ -147,7 +137,6 @@ func (s *Service) initCaches() error {
 
 		if !shouldHandle {
 			delete(s.caches, r)
-			delete(s.keyMap, r)
 		}
 	}
 
@@ -172,11 +161,8 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	}
 
 	for i, key := range req.Keys {
-		// Determine which hash range this key belongs to
-		hashRange := hash.GetHashRangeForKey(key, s.config.TotalHashRanges)
-
 		// Determine which node should handle this key
-		nodeID := hash.GetNodeNumber(key, s.config.ClusterSize, s.config.TotalHashRanges)
+		hashRange, nodeID := hash.GetNodeNumber(key, s.config.ClusterSize, s.config.TotalHashRanges)
 
 		// Check if this node should handle this key
 		if nodeID != s.config.NodeID {
@@ -188,13 +174,13 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		cache, exists := s.caches[hashRange]
 		if !exists {
 			// This should not happen if our hash functions are correct
-			return nil, status.Errorf(codes.Internal, "no cache for hash range %d", hashRange)
+			//return nil, status.Errorf(codes.Internal, "no cache for hash range %d", hashRange)
+			response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
+			return response, nil
 		}
 
 		// Check if the key exists in the cache
-		var empty struct{}
-		value := cache.Get(key)
-		response.Exists[i] = value != empty
+		response.Exists[i] = cache.Get(key)
 	}
 
 	return response, nil
@@ -202,8 +188,8 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 
 // Put implements the Put RPC method
 func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	if s.scaling {
 		return &pb.PutResponse{
@@ -214,11 +200,8 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 	}
 
 	for _, item := range req.Items {
-		// Determine which hash range this key belongs to
-		hashRange := hash.GetHashRangeForKey(item.Key, s.config.TotalHashRanges)
-
 		// Determine which node should handle this key
-		nodeID := hash.GetNodeNumber(item.Key, s.config.ClusterSize, s.config.TotalHashRanges)
+		hashRange, nodeID := hash.GetNodeNumber(item.Key, s.config.ClusterSize, s.config.TotalHashRanges)
 
 		// Check if this node should handle this key
 		if nodeID != s.config.NodeID {
@@ -233,15 +216,16 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		cache, exists := s.caches[hashRange]
 		if !exists {
 			// This should not happen if our hash functions are correct
-			return nil, status.Errorf(codes.Internal, "no cache for hash range %d", hashRange)
+			return &pb.PutResponse{
+				Success:     false,
+				ErrorCode:   pb.ErrorCode_INTERNAL_ERROR,
+				ClusterSize: s.config.ClusterSize,
+			}, nil
 		}
 
 		// Store the key in the cache with the specified TTL
 		ttl := time.Duration(item.TtlSeconds) * time.Second
-		cache.Put(item.Key, struct{}{}, ttl)
-
-		// Also store the key in our key map
-		s.keyMap[hashRange][item.Key] = struct{}{}
+		cache.Put(item.Key, true, ttl)
 	}
 
 	return &pb.PutResponse{
@@ -275,10 +259,9 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 
 	// Count total keys
 	var keysCount uint64
-
-	// Count keys from our key map
-	for _, keys := range s.keyMap {
-		keysCount += uint64(len(keys))
+	for _, r := range ranges {
+		cache := s.caches[r]
+		keysCount += uint64(cache.Len())
 	}
 
 	return &pb.GetNodeInfoResponse{
@@ -315,26 +298,6 @@ func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequ
 	return &pb.CreateSnapshotResponse{
 		Success: true,
 		NodeId:  s.config.NodeID,
-	}, nil
-}
-
-// ScaleComplete implements the ScaleComplete RPC method
-func (s *Service) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Check if we're actually in scaling mode
-	if !s.scaling {
-		return &pb.ScaleCompleteResponse{
-			Success: false,
-		}, nil
-	}
-
-	// Clear the scaling flag
-	s.scaling = false
-
-	return &pb.ScaleCompleteResponse{
-		Success: true,
 	}, nil
 }
 
@@ -430,6 +393,26 @@ func (s *Service) snapshotLoop() {
 	}
 }
 
+// ScaleComplete implements the ScaleComplete RPC method
+func (s *Service) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Check if we're actually in scaling mode
+	if !s.scaling {
+		return &pb.ScaleCompleteResponse{
+			Success: false,
+		}, nil
+	}
+
+	// Clear the scaling flag
+	s.scaling = false
+
+	return &pb.ScaleCompleteResponse{
+		Success: true,
+	}, nil
+}
+
 // createSnapshots creates snapshots for all hash ranges this node handles
 func (s *Service) createSnapshots() error {
 	// Get hash ranges for this node
@@ -452,7 +435,7 @@ func (s *Service) createSnapshots() error {
 }
 
 // createSnapshot creates a snapshot for a specific hash range
-func (s *Service) createSnapshot(hashRange uint32, cache *cachettl.Cache[string, struct{}]) error {
+func (s *Service) createSnapshot(hashRange uint32, cache *cachettl.Cache[string, bool]) error {
 	// Create snapshot file
 	snapshotPath := filepath.Join(s.config.SnapshotDir, fmt.Sprintf("node_%d_range_%d.snapshot", s.config.NodeID, hashRange))
 	file, err := os.Create(snapshotPath)
@@ -461,17 +444,19 @@ func (s *Service) createSnapshot(hashRange uint32, cache *cachettl.Cache[string,
 	}
 	defer file.Close()
 
-	// Get all keys from our key map
-	keys := s.keyMap[hashRange]
+	// TODO fix createSnapshot
 
-	// Write each key to the snapshot file
-	for key := range keys {
-		// In a real implementation, we would also save the TTL
-		// For simplicity, we're just saving the key
-		if _, err := fmt.Fprintln(file, key); err != nil {
-			return fmt.Errorf("failed to write to snapshot file: %w", err)
-		}
-	}
+	//// Get all keys from our key map
+	//keys := s.keyMap[hashRange]
+	//
+	//// Write each key to the snapshot file
+	//for key := range keys {
+	//	// In a real implementation, we would also save the TTL
+	//	// For simplicity, we're just saving the key
+	//	if _, err := fmt.Fprintln(file, key); err != nil {
+	//		return fmt.Errorf("failed to write to snapshot file: %w", err)
+	//	}
+	//}
 
 	return nil
 }
@@ -511,10 +496,10 @@ func (s *Service) loadSnapshot(hashRange uint32) error {
 		}
 
 		// Store the key in the cache
-		cache.Put(key, struct{}{}, ttl)
+		cache.Put(key, true, ttl)
 
 		// Also store the key in our key map
-		s.keyMap[hashRange][key] = struct{}{}
+		//s.keyMap[hashRange][key] = struct{}{} // TODO fix
 	}
 
 	return nil

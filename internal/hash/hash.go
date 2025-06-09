@@ -14,9 +14,9 @@ import (
 //
 // Returns:
 // - The node number (0-based) that should handle this key
-func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) uint32 {
+func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, uint32) {
 	if numberOfNodes == 0 {
-		return 0
+		return 0, 0
 	}
 
 	// Calculate the hash of the key
@@ -28,7 +28,7 @@ func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) uint32 {
 	hashRange := hashValue % totalHashRanges
 
 	// Determine which node handles this hash range
-	return hashRange % numberOfNodes
+	return hashRange, hashRange % numberOfNodes
 }
 
 // GetNodeHashRanges returns the hash ranges that a specific node should handle

@@ -161,7 +161,7 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	// Group keys by node
 	keysByNode := make(map[uint32][]string)
 	for _, key := range keys {
-		nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
+		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
@@ -242,7 +242,7 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 	// Group items by node
 	itemsByNode := make(map[uint32][]*pb.KeyWithTTL)
 	for _, item := range items {
-		nodeID := hash.GetNodeNumber(item.Key, c.clusterSize, c.config.TotalHashRanges)
+		_, nodeID := hash.GetNodeNumber(item.Key, c.clusterSize, c.config.TotalHashRanges)
 		itemsByNode[nodeID] = append(itemsByNode[nodeID], item)
 	}
 

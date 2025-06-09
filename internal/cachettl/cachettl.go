@@ -5,13 +5,13 @@ import (
 	"time"
 )
 
-// Cache is a double linked list sorted by expiration time (ascending order)
+// Cache is a double-linked list sorted by expiration time (ascending order)
 // the root (head) node is the node with the lowest expiration time
 // the tail node (end) is the node with the highest expiration time
 // Cleanups are done on Get() calls so if Get() is never invoked then Nodes stay in-memory.
 type Cache[K comparable, V any] struct {
 	root *node[K, V]
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	m    map[K]*node[K, V]
 
 	config    cacheConfig
@@ -46,6 +46,12 @@ func New[K comparable, V any](opts ...Opt) *Cache[K, V] {
 		opt(&c.config)
 	}
 	return c
+}
+
+func (c *Cache[K, V]) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.m)
 }
 
 // Get returns the value associated with the key or nil otherwise.
