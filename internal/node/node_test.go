@@ -6,12 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rudderlabs/keydb/internal/client"
-
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/rudderlabs/keydb/internal/client"
 	pb "github.com/rudderlabs/keydb/proto"
 )
 

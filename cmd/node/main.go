@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 
 	"google.golang.org/grpc"
 
@@ -16,6 +19,14 @@ import (
 )
 
 func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM)
+
+	if err := run(ctx, cancel); err != nil {
+		log.Fatalf("Failed to run: %v", err)
+	}
+}
+
+func run(ctx context.Context, cancel func()) error {
 	// Parse command-line flags
 	var (
 		port             = flag.Int("port", 50051, "The server port")
@@ -66,10 +77,12 @@ func main() {
 		SnapshotInterval: *snapshotInterval,
 	}
 
-	service, err := node.NewService(config)
+	service, err := node.NewService(ctx, config)
 	if err != nil {
-		log.Fatalf("Failed to create node service: %v", err)
+		return fmt.Errorf("failed to create node service: %w", err)
 	}
+	defer service.Close() // TODO test graceful shutdown
+	defer cancel()
 
 	// Create a gRPC server
 	server := grpc.NewServer()
@@ -78,7 +91,7 @@ func main() {
 	// Start listening
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		return fmt.Errorf("failed to listen: %w", err)
 	}
 
 	log.Printf("Starting node %d of %d on port %d", *nodeID, *clusterSize, *port)
@@ -89,6 +102,8 @@ func main() {
 
 	// Start the server
 	if err := server.Serve(lis); err != nil {
-		log.Fatalf("Failed to serve: %v", err)
+		return fmt.Errorf("failed to serve: %w", err)
 	}
+
+	return ctx.Err()
 }

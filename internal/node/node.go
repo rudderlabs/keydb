@@ -64,6 +64,8 @@ type Service struct {
 
 	// lastSnapshotTime is the timestamp of the last snapshot
 	lastSnapshotTime time.Time
+
+	waitGroup sync.WaitGroup
 }
 
 // NewService creates a new NodeService
@@ -98,13 +100,18 @@ func NewService(ctx context.Context, config Config) (*Service, error) {
 	}
 
 	// Start background snapshot creation
+	service.waitGroup.Add(1)
 	go service.snapshotLoop(ctx)
 
 	return service, nil
 }
 
+func (s *Service) Close() { s.waitGroup.Wait() }
+
 // snapshotLoop periodically creates snapshots
 func (s *Service) snapshotLoop(ctx context.Context) {
+	defer s.waitGroup.Done()
+
 	ticker := time.NewTicker(time.Duration(s.config.SnapshotInterval) * time.Second)
 	defer ticker.Stop()
 
@@ -201,7 +208,7 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		cache, exists := s.caches[hashRange]
 		if !exists {
 			// This should not happen if our hash functions are correct
-			//return nil, status.Errorf(codes.Internal, "no cache for hash range %d", hashRange)
+			// return nil, status.Errorf(codes.Internal, "no cache for hash range %d", hashRange)
 			response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 			return response, nil
 		}
