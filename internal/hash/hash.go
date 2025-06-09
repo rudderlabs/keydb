@@ -41,15 +41,14 @@ func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, u
 //
 // Returns:
 // - A slice of hash ranges that this node should handle
-func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) []uint32 {
+func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) map[uint32]struct{} {
 	if numberOfNodes == 0 || nodeID >= numberOfNodes {
 		return nil
 	}
-
-	var ranges []uint32
+	ranges := make(map[uint32]struct{})
 	for i := uint32(0); i < totalHashRanges; i++ {
 		if i%numberOfNodes == nodeID {
-			ranges = append(ranges, i)
+			ranges[i] = struct{}{}
 		}
 	}
 	return ranges

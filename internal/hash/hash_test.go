@@ -124,7 +124,7 @@ func TestGetNodeHashRanges(t *testing.T) {
 
 			// Verify each range is assigned to this node
 			if len(ranges) > 0 {
-				for _, r := range ranges {
+				for r := range ranges {
 					if r%tt.numberOfNodes != tt.nodeID {
 						t.Errorf("Range %d incorrectly assigned to node %d", r, tt.nodeID)
 					}
@@ -201,7 +201,7 @@ func TestConsistencyBetweenFunctions(t *testing.T) {
 
 	// The hash range should be in the node's ranges
 	found := false
-	for _, r := range nodeRanges {
+	for r := range nodeRanges {
 		if r == hashRange {
 			found = true
 			break

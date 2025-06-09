@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/rudderlabs/keydb/internal/cachettl"
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
+	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 )
 
 const (
@@ -99,6 +101,22 @@ func NewService(config Config) (*Service, error) {
 	return service, nil
 }
 
+// snapshotLoop periodically creates snapshots
+func (s *Service) snapshotLoop() {
+	ticker := time.NewTicker(time.Duration(s.config.SnapshotInterval) * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.mu.Lock()
+		if !s.scaling {
+			if err := s.createSnapshots(); err != nil {
+				log.Printf("Error creating snapshots: %v", err)
+			}
+		}
+		s.mu.Unlock()
+	}
+}
+
 // initCaches initializes the caches for all hash ranges this node handles
 func (s *Service) initCaches() error {
 	s.mu.Lock()
@@ -107,8 +125,16 @@ func (s *Service) initCaches() error {
 	// Get hash ranges for this node
 	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
 
+	// Remove caches and key maps for ranges this node no longer handles
+	for r := range s.caches {
+		if _, shouldHandle := ranges[r]; !shouldHandle {
+			delete(s.caches, r)
+		}
+	}
+
 	// Create a cache for each hash range
-	for _, r := range ranges {
+	group, _ := kitsync.NewEagerGroup(context.TODO(), len(ranges))
+	for r := range ranges {
 		// Check if we already have a cache for this range
 		if _, exists := s.caches[r]; exists {
 			continue
@@ -118,29 +144,16 @@ func (s *Service) initCaches() error {
 		cache := cachettl.New[string, bool](cachettl.WithNoRefreshTTL)
 		s.caches[r] = cache
 
-		// Try to load snapshot for this range
-		if err := s.loadSnapshot(r); err != nil {
-			// Continue anyway, we'll start with an empty cache
-			log.Printf("Warning: failed to load snapshot for range %d: %v", r, err)
-		}
-	}
-
-	// Remove caches and key maps for ranges this node no longer handles
-	for r := range s.caches {
-		shouldHandle := false
-		for _, nodeRange := range ranges {
-			if r == nodeRange {
-				shouldHandle = true
-				break
+		group.Go(func() error {
+			// Try to load snapshot for this range
+			if err := s.loadSnapshot(r, cache); err != nil {
+				return fmt.Errorf("failed to load snapshot for range %d: %w", r, err)
 			}
-		}
-
-		if !shouldHandle {
-			delete(s.caches, r)
-		}
+			return nil
+		})
 	}
 
-	return nil
+	return group.Wait()
 }
 
 // Get implements the Get RPC method
@@ -249,7 +262,7 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 
 	// Convert to proto hash ranges
 	hashRanges := make([]*pb.HashRange, 0, len(ranges))
-	for _, r := range ranges {
+	for r := range ranges {
 		hashRanges = append(hashRanges, &pb.HashRange{
 			RangeId: r,
 			Start:   r,
@@ -259,7 +272,7 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 
 	// Count total keys
 	var keysCount uint64
-	for _, r := range ranges {
+	for r := range ranges {
 		cache := s.caches[r]
 		keysCount += uint64(cache.Len())
 	}
@@ -301,13 +314,53 @@ func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequ
 	}, nil
 }
 
+// createSnapshots creates snapshots for all hash ranges this node handles
+func (s *Service) createSnapshots() error {
+	// Get hash ranges for this node
+	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+
+	// Create a snapshot for each hash range
+	group, _ := kitsync.NewEagerGroup(context.TODO(), len(ranges))
+	for r := range ranges {
+		group.Go(func() error {
+			cache, exists := s.caches[r]
+			if !exists {
+				return fmt.Errorf("no cache for hash range %d", r)
+			}
+
+			if err := s.createSnapshot(r, cache); err != nil {
+				return fmt.Errorf("failed to create snapshot for range %d: %w", r, err)
+			}
+			return nil
+		})
+	}
+
+	s.lastSnapshotTime = time.Now()
+
+	return group.Wait()
+}
+
+// createSnapshot creates a snapshot for a specific hash range
+func (s *Service) createSnapshot(hashRange uint32, cache *cachettl.Cache[string, bool]) error {
+	// Create snapshot file
+	filename := "node_" + strconv.Itoa(int(s.config.NodeID)) + "_range_" + strconv.Itoa(int(hashRange)) + ".snapshot"
+	snapshotPath := filepath.Join(s.config.SnapshotDir, filename)
+	file, err := os.Create(snapshotPath)
+	if err != nil {
+		return fmt.Errorf("failed to create snapshot file %q: %w", filename, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	return cachettl.CreateSnapshot(file, cache)
+}
+
 // Scale implements the Scale RPC method
 func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.scaling {
-		return &pb.ScaleResponse{
+		return &pb.ScaleResponse{ // TODO we could have auto-healing here easily by attempting the scaling anyway
 			Success:             false,
 			ErrorMessage:        "scaling operation already in progress",
 			PreviousClusterSize: s.config.ClusterSize,
@@ -337,17 +390,6 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	// Set scaling flag
 	s.scaling = true
 
-	// Create snapshots before scaling
-	if err := s.createSnapshots(); err != nil {
-		s.scaling = false
-		return &pb.ScaleResponse{
-			Success:             false,
-			ErrorMessage:        fmt.Sprintf("failed to create snapshots: %v", err),
-			PreviousClusterSize: s.config.ClusterSize,
-			NewClusterSize:      s.config.ClusterSize,
-		}, nil
-	}
-
 	// Save the previous cluster size
 	previousClusterSize := s.config.ClusterSize
 
@@ -367,7 +409,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 		}, nil
 	}
 
-	// Note: We don't clear the scaling flag here anymore.
+	// Note: We don't clear the scaling flag here.
 	// The scaling flag will be cleared when the ScaleComplete RPC is called.
 
 	return &pb.ScaleResponse{
@@ -377,93 +419,20 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	}, nil
 }
 
-// snapshotLoop periodically creates snapshots
-func (s *Service) snapshotLoop() {
-	ticker := time.NewTicker(time.Duration(s.config.SnapshotInterval) * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		s.mu.Lock()
-		if !s.scaling {
-			if err := s.createSnapshots(); err != nil {
-				log.Printf("Error creating snapshots: %v", err)
-			}
-		}
-		s.mu.Unlock()
-	}
-}
-
 // ScaleComplete implements the ScaleComplete RPC method
 func (s *Service) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check if we're actually in scaling mode
-	if !s.scaling {
-		return &pb.ScaleCompleteResponse{
-			Success: false,
-		}, nil
-	}
+	// No need to check the s.scaling value, let's be optimistic and go ahead here for auto-healing purposes
 
-	// Clear the scaling flag
 	s.scaling = false
 
-	return &pb.ScaleCompleteResponse{
-		Success: true,
-	}, nil
-}
-
-// createSnapshots creates snapshots for all hash ranges this node handles
-func (s *Service) createSnapshots() error {
-	// Get hash ranges for this node
-	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
-
-	// Create a snapshot for each hash range
-	for _, r := range ranges {
-		cache, exists := s.caches[r]
-		if !exists {
-			return fmt.Errorf("no cache for hash range %d", r)
-		}
-
-		if err := s.createSnapshot(r, cache); err != nil {
-			return fmt.Errorf("failed to create snapshot for range %d: %w", r, err)
-		}
-	}
-
-	s.lastSnapshotTime = time.Now()
-	return nil
-}
-
-// createSnapshot creates a snapshot for a specific hash range
-func (s *Service) createSnapshot(hashRange uint32, cache *cachettl.Cache[string, bool]) error {
-	// Create snapshot file
-	// TODO avoid reflection for snapshotPath
-	snapshotPath := filepath.Join(s.config.SnapshotDir, fmt.Sprintf("node_%d_range_%d.snapshot", s.config.NodeID, hashRange))
-	file, err := os.Create(snapshotPath)
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot file: %w", err)
-	}
-	defer file.Close()
-
-	// TODO fix createSnapshot
-
-	//// Get all keys from our key map
-	//keys := s.keyMap[hashRange]
-	//
-	//// Write each key to the snapshot file
-	//for key := range keys {
-	//	// In a real implementation, we would also save the TTL
-	//	// For simplicity, we're just saving the key
-	//	if _, err := fmt.Fprintln(file, key); err != nil {
-	//		return fmt.Errorf("failed to write to snapshot file: %w", err)
-	//	}
-	//}
-
-	return nil
+	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
 
 // loadSnapshot loads a snapshot for a specific hash range
-func (s *Service) loadSnapshot(hashRange uint32) error {
+func (s *Service) loadSnapshot(hashRange uint32, cache *cachettl.Cache[string, bool]) error {
 	// Check if snapshot file exists
 	snapshotPath := filepath.Join(s.config.SnapshotDir, fmt.Sprintf("node_%d_range_%d.snapshot", s.config.NodeID, hashRange))
 	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
@@ -476,32 +445,7 @@ func (s *Service) loadSnapshot(hashRange uint32) error {
 	if err != nil {
 		return fmt.Errorf("failed to open snapshot file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
-	// Get the cache for this hash range
-	cache, exists := s.caches[hashRange]
-	if !exists {
-		return fmt.Errorf("no cache for hash range %d", hashRange)
-	}
-
-	// In a real implementation, we would also load the TTL
-	// For simplicity, we're using a default TTL of 1 hour
-	ttl := 1 * time.Hour
-
-	// Read each key from the snapshot file
-	var key string
-	for {
-		_, err := fmt.Fscanln(file, &key)
-		if err != nil {
-			break // End of file or error
-		}
-
-		// Store the key in the cache
-		cache.Put(key, true, ttl)
-
-		// Also store the key in our key map
-		//s.keyMap[hashRange][key] = struct{}{} // TODO fix
-	}
-
-	return nil
+	return cachettl.LoadSnapshot(file, cache)
 }
