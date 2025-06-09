@@ -437,6 +437,7 @@ func (s *Service) createSnapshots() error {
 // createSnapshot creates a snapshot for a specific hash range
 func (s *Service) createSnapshot(hashRange uint32, cache *cachettl.Cache[string, bool]) error {
 	// Create snapshot file
+	// TODO avoid reflection for snapshotPath
 	snapshotPath := filepath.Join(s.config.SnapshotDir, fmt.Sprintf("node_%d_range_%d.snapshot", s.config.NodeID, hashRange))
 	file, err := os.Create(snapshotPath)
 	if err != nil {

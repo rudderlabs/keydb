@@ -1,6 +1,11 @@
 package cachettl
 
 import (
+	"bufio"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -92,7 +97,10 @@ func (c *Cache[K, V]) Get(key K) (zero V) {
 func (c *Cache[K, V]) Put(key K, value V, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.put(key, value, ttl)
+}
 
+func (c *Cache[K, V]) put(key K, value V, ttl time.Duration) {
 	now := c.config.now()
 
 	n, ok := c.m[key]
@@ -152,4 +160,75 @@ func (c *Cache[K, V]) slice() (s []V) {
 		cn = cn.next
 	}
 	return
+}
+
+// TODO using CreateSnapshot and LoadSnapshot without generics for now to simplify the prototype
+
+// CreateSnapshot writes one line per key (without the value) with its expiration time in ms, one line per key
+// e.g.
+// key1:1749455912571\n
+// key2:1749455912573\n
+func CreateSnapshot(w io.Writer, c *Cache[string, bool]) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cn := c.root.next // start from head since we're sorting by expiration with the highest expiration at the tail
+	for cn != nil && cn != c.root {
+		if c.config.now().After(cn.expiration) {
+			cn.remove()             // removes a node from the linked list (leaves the map untouched)
+			delete(c.m, cn.key)     // remove node from map too
+			if c.onEvicted != nil { // call the OnEvicted callback if it's set
+				c.onEvicted(cn.key, cn.value)
+			}
+		} else {
+			_, err := w.Write([]byte(cn.key + ":" + strconv.FormatInt(int64(cn.expiration.UnixMilli()), 10) + "\n"))
+			if err != nil {
+				return fmt.Errorf("failed to write snapshot: %w", err)
+			}
+		}
+
+		cn = cn.next
+	}
+
+	return nil
+}
+
+// LoadSnapshot reads snapshot data from an io.Reader and populates the cache.
+// The format of the snapshot is one line per key in the format "key:ttl\n"
+// where ttl is in milliseconds.
+// Lines with expired TTLs are skipped.
+func LoadSnapshot(r io.Reader, c *Cache[string, bool]) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	scanner := bufio.NewScanner(r)
+
+	for scanner.Scan() {
+		// Split the line into key and ttl
+		parts := strings.Split(scanner.Text(), ":")
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid format: %s", scanner.Text())
+		}
+
+		unixMilli, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid expiration time: %s", parts[1])
+		}
+
+		t := time.UnixMilli(unixMilli)
+
+		// Skip expired entries
+		if c.config.now().After(t) {
+			continue
+		}
+
+		// Add the key to the cache
+		c.put(parts[0], true, t.Sub(c.config.now()))
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	return nil
 }

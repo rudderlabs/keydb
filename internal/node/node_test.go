@@ -77,8 +77,8 @@ func TestGetPut(t *testing.T) {
 	}
 	require.NoError(t, c.Put(ctx, items))
 
-	keys := []string{"key1", "key2", "key3"}
+	keys := []string{"key1", "key2", "key3", "key4"}
 	exists, err := c.Get(ctx, keys)
 	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true}, exists)
+	require.Equal(t, []bool{true, true, true, false}, exists)
 }

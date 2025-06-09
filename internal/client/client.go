@@ -14,6 +14,8 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
+// TODO lots of things can be done in parallel
+
 // Config holds the configuration for a client
 type Config struct {
 	// Addresses is a list of node addresses (host:port)
