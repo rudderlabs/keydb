@@ -4,15 +4,16 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/rudderlabs/keydb/internal/client"
 	"github.com/rudderlabs/keydb/internal/node"
 	pb "github.com/rudderlabs/keydb/proto"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/test/bufconn"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
 const (
@@ -24,24 +25,18 @@ const (
 func startTestNode(t *testing.T, nodeID, clusterSize, totalHashRanges uint32) (*grpc.Server, *bufconn.Listener, func()) {
 	t.Helper()
 
-	// Create a temporary directory for snapshots
-	snapshotDir, err := os.MkdirTemp("", "keydb-test-snapshots")
-	if err != nil {
-		t.Fatalf("Failed to create temporary directory: %v", err)
-	}
+	// TODO use minio for testing snapshots
 
 	// Create the node service
 	config := node.Config{
 		NodeID:           nodeID,
 		ClusterSize:      clusterSize,
 		TotalHashRanges:  totalHashRanges,
-		SnapshotDir:      snapshotDir,
-		SnapshotInterval: 60, // 60 seconds
+		SnapshotInterval: 60 * time.Second,
 	}
 
-	service, err := node.NewService(config)
+	service, err := node.NewService(context.TODO(), config, nil, logger.NOP)
 	if err != nil {
-		os.RemoveAll(snapshotDir)
 		t.Fatalf("Failed to create node service: %v", err)
 	}
 
@@ -62,7 +57,6 @@ func startTestNode(t *testing.T, nodeID, clusterSize, totalHashRanges uint32) (*
 	// Return a cleanup function
 	cleanup := func() {
 		server.Stop()
-		os.RemoveAll(snapshotDir)
 	}
 
 	return server, lis, cleanup

@@ -1,21 +1,26 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"log"
-	"os"
-	"path/filepath"
+	"io"
 	"strconv"
 	"sync"
 	"time"
 
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+
+	"github.com/aws/aws-sdk-go/aws"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/rudderlabs/keydb/internal/cachettl"
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
+	"github.com/rudderlabs/rudder-go-kit/filemanager"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 )
 
@@ -24,7 +29,7 @@ const (
 	DefaultTotalHashRanges = 128
 
 	// DefaultSnapshotInterval is the default interval for creating snapshots (in seconds)
-	DefaultSnapshotInterval = 60
+	DefaultSnapshotInterval = 60 * time.Second
 )
 
 // Config holds the configuration for a node
@@ -39,10 +44,7 @@ type Config struct {
 	TotalHashRanges uint32
 
 	// SnapshotInterval is the interval for creating snapshots (in seconds)
-	SnapshotInterval int
-
-	// SnapshotDir is the directory where snapshots are stored
-	SnapshotDir string
+	SnapshotInterval time.Duration
 }
 
 // Service implements the NodeService gRPC service
@@ -66,10 +68,27 @@ type Service struct {
 	lastSnapshotTime time.Time
 
 	waitGroup sync.WaitGroup
+
+	storage cloudStorage
+
+	logger logger.Logger
+}
+
+type cloudStorageReader interface {
+	Download(ctx context.Context, output io.WriterAt, key string) error
+}
+
+type cloudStorageWriter interface {
+	UploadReader(ctx context.Context, objName string, rdr io.Reader) (filemanager.UploadedFile, error)
+}
+
+type cloudStorage interface {
+	cloudStorageReader
+	cloudStorageWriter
 }
 
 // NewService creates a new NodeService
-func NewService(ctx context.Context, config Config) (*Service, error) {
+func NewService(ctx context.Context, config Config, storage cloudStorage, logger logger.Logger) (*Service, error) {
 	// Set defaults for unspecified config values
 	if config.TotalHashRanges == 0 {
 		config.TotalHashRanges = DefaultTotalHashRanges
@@ -79,19 +98,12 @@ func NewService(ctx context.Context, config Config) (*Service, error) {
 		config.SnapshotInterval = DefaultSnapshotInterval
 	}
 
-	if config.SnapshotDir == "" {
-		config.SnapshotDir = "snapshots"
-	}
-
-	// Create snapshot directory if it doesn't exist
-	if err := os.MkdirAll(config.SnapshotDir, 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create snapshot directory: %w", err)
-	}
-
 	service := &Service{
-		now:    time.Now,
-		config: config,
-		caches: make(map[uint32]*cachettl.Cache[string, bool]),
+		now:     time.Now,
+		config:  config,
+		caches:  make(map[uint32]*cachettl.Cache[string, bool]),
+		storage: storage,
+		logger:  logger,
 	}
 
 	// Initialize caches for all hash ranges this node handles
@@ -112,7 +124,7 @@ func (s *Service) Close() { s.waitGroup.Wait() }
 func (s *Service) snapshotLoop(ctx context.Context) {
 	defer s.waitGroup.Done()
 
-	ticker := time.NewTicker(time.Duration(s.config.SnapshotInterval) * time.Second)
+	ticker := time.NewTicker(s.config.SnapshotInterval)
 	defer ticker.Stop()
 
 	for {
@@ -126,12 +138,12 @@ func (s *Service) snapshotLoop(ctx context.Context) {
 				if s.scaling {
 					return
 				}
-				if s.now().Sub(s.lastSnapshotTime) < time.Duration(s.config.SnapshotInterval) { // TODO write a test for this
+				if s.now().Sub(s.lastSnapshotTime) < s.config.SnapshotInterval { // TODO write a test for this
 					// we created a snapshot already recently due to a scaling operation
 					return
 				}
-				if err := s.createSnapshots(); err != nil {
-					log.Printf("Error creating snapshots: %v", err)
+				if err := s.createSnapshots(ctx); err != nil {
+					s.logger.Errorn("Error creating snapshots", obskit.Error(err))
 				}
 			}()
 		}
@@ -165,9 +177,12 @@ func (s *Service) initCaches(ctx context.Context) error {
 		cache := cachettl.New[string, bool](cachettl.WithNoRefreshTTL)
 		s.caches[r] = cache
 
-		group.Go(func() error {
-			// Try to load snapshot for this range
+		group.Go(func() error { // Try to load snapshot for this range
 			if err := s.loadSnapshot(ctx, r, cache); err != nil {
+				if errors.Is(err, filemanager.ErrKeyNotFound) {
+					s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
+					return nil
+				}
 				return fmt.Errorf("failed to load snapshot for range %d: %w", r, err)
 			}
 			return nil
@@ -321,7 +336,7 @@ func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequ
 	}
 
 	// Create snapshots for all hash ranges this node handles
-	if err := s.createSnapshots(); err != nil {
+	if err := s.createSnapshots(ctx); err != nil {
 		return &pb.CreateSnapshotResponse{
 			Success:      false,
 			ErrorMessage: err.Error(),
@@ -336,12 +351,12 @@ func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequ
 }
 
 // createSnapshots creates snapshots for all hash ranges this node handles
-func (s *Service) createSnapshots() error {
+func (s *Service) createSnapshots(ctx context.Context) error {
 	// Get hash ranges for this node
 	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
 
 	// Create a snapshot for each hash range
-	group, _ := kitsync.NewEagerGroup(context.TODO(), len(ranges))
+	group, ctx := kitsync.NewEagerGroup(context.TODO(), len(ranges))
 	for r := range ranges {
 		group.Go(func() error {
 			cache, exists := s.caches[r]
@@ -349,7 +364,7 @@ func (s *Service) createSnapshots() error {
 				return fmt.Errorf("no cache for hash range %d", r)
 			}
 
-			if err := s.createSnapshot(r, cache); err != nil {
+			if err := s.createSnapshot(ctx, r, cache); err != nil {
 				return fmt.Errorf("failed to create snapshot for range %d: %w", r, err)
 			}
 			return nil
@@ -362,17 +377,26 @@ func (s *Service) createSnapshots() error {
 }
 
 // createSnapshot creates a snapshot for a specific hash range
-func (s *Service) createSnapshot(hashRange uint32, cache *cachettl.Cache[string, bool]) error {
+func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache *cachettl.Cache[string, bool]) error {
 	// Create snapshot file
-	filename := "node_" + strconv.Itoa(int(s.config.NodeID)) + "_range_" + strconv.Itoa(int(hashRange)) + ".snapshot"
-	snapshotPath := filepath.Join(s.config.SnapshotDir, filename)
-	file, err := os.Create(snapshotPath)
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot file %q: %w", filename, err)
-	}
-	defer func() { _ = file.Close() }()
+	filename := getSnapshotFilename(s.config.NodeID, hashRange)
 
-	return cachettl.CreateSnapshot(file, cache)
+	buf := new(bytes.Buffer)
+	err := cachettl.CreateSnapshot(buf, cache)
+	if err != nil {
+		return fmt.Errorf("failed to create snapshot for range %d: %w", hashRange, err)
+	}
+
+	if len(buf.Bytes()) == 0 {
+		return nil // no data to upload
+	}
+
+	_, err = s.storage.UploadReader(ctx, filename, buf)
+	if err != nil {
+		return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
+	}
+
+	return nil
 }
 
 // Scale implements the Scale RPC method
@@ -455,19 +479,18 @@ func (s *Service) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteReques
 
 // loadSnapshot loads a snapshot for a specific hash range
 func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache *cachettl.Cache[string, bool]) error {
-	// Check if snapshot file exists
-	snapshotPath := filepath.Join(s.config.SnapshotDir, fmt.Sprintf("node_%d_range_%d.snapshot", s.config.NodeID, hashRange))
-	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {
-		// No snapshot file, nothing to load
-		return nil
-	}
+	filename := getSnapshotFilename(s.config.NodeID, hashRange)
 
-	// Open snapshot file
-	file, err := os.Open(snapshotPath)
+	buf := aws.NewWriteAtBuffer([]byte{})
+	err := s.storage.Download(ctx, buf, filename)
 	if err != nil {
-		return fmt.Errorf("failed to open snapshot file: %w", err)
+		return fmt.Errorf("failed to download snapshot file %q: %w", filename, err)
 	}
-	defer func() { _ = file.Close() }()
 
-	return cachettl.LoadSnapshot(file, cache)
+	reader := bytes.NewReader(buf.Bytes())
+	return cachettl.LoadSnapshot(reader, cache)
+}
+
+func getSnapshotFilename(nodeID, hashRange uint32) string {
+	return "node_" + strconv.Itoa(int(nodeID)) + "_range_" + strconv.Itoa(int(hashRange)) + ".snapshot"
 }

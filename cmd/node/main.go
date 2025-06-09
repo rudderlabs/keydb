@@ -2,82 +2,61 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 
+	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/node"
 	pb "github.com/rudderlabs/keydb/proto"
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM)
 
-	if err := run(ctx, cancel); err != nil {
-		log.Fatalf("Failed to run: %v", err)
+	conf := config.New(config.WithEnvPrefix("KEYDB"))
+	logFactory := logger.NewFactory(conf)
+	defer logFactory.Sync()
+	log := logFactory.NewLogger()
+
+	if err := run(ctx, cancel, conf, log); err != nil {
+		log.Fataln("failed to run", obskit.Error(err))
+		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, cancel func()) error {
-	// Parse command-line flags
-	var (
-		port             = flag.Int("port", 50051, "The server port")
-		nodeID           = flag.Uint("node-id", 0, "The ID of this node (0-based)")
-		clusterSize      = flag.Uint("cluster-size", 1, "The total number of nodes in the cluster")
-		hashRanges       = flag.Uint("hash-ranges", 128, "The total number of hash ranges")
-		snapshotDir      = flag.String("snapshot-dir", "snapshots", "The directory where snapshots are stored")
-		snapshotInterval = flag.Int("snapshot-interval", 60, "The interval for creating snapshots (in seconds)")
+func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Logger) error {
+	cloudStorage, err := cloudstorage.GetCloudStorage(conf, log)
+	if err != nil {
+		return fmt.Errorf("failed to create cloud storage: %w", err)
+	}
+
+	nodeConfig := node.Config{
+		NodeID:           uint32(conf.GetInt("nodeId", 0)),
+		ClusterSize:      uint32(conf.GetInt("clusterSize", 1)),
+		TotalHashRanges:  uint32(conf.GetInt("hashRanges", 128)),
+		SnapshotInterval: conf.GetDuration("snapshotInterval", 60, time.Second),
+	}
+
+	port := conf.GetInt("port", 50051)
+	log = log.Withn(
+		logger.NewIntField("port", int64(port)),
+		logger.NewIntField("nodeID", int64(nodeConfig.NodeID)),
+		logger.NewIntField("clusterSize", int64(nodeConfig.ClusterSize)),
+		logger.NewIntField("hashRanges", int64(nodeConfig.TotalHashRanges)),
+		logger.NewDurationField("snapshotInterval", nodeConfig.SnapshotInterval),
 	)
-	flag.Parse()
 
-	// Override with environment variables if provided
-	if envPort := os.Getenv("NODE_PORT"); envPort != "" {
-		if p, err := strconv.Atoi(envPort); err == nil {
-			*port = p
-		}
-	}
-	if envNodeID := os.Getenv("NODE_ID"); envNodeID != "" {
-		if id, err := strconv.ParseUint(envNodeID, 10, 32); err == nil {
-			*nodeID = uint(id)
-		}
-	}
-	if envClusterSize := os.Getenv("CLUSTER_SIZE"); envClusterSize != "" {
-		if size, err := strconv.ParseUint(envClusterSize, 10, 32); err == nil {
-			*clusterSize = uint(size)
-		}
-	}
-	if envHashRanges := os.Getenv("HASH_RANGES"); envHashRanges != "" {
-		if ranges, err := strconv.ParseUint(envHashRanges, 10, 32); err == nil {
-			*hashRanges = uint(ranges)
-		}
-	}
-	if envSnapshotDir := os.Getenv("SNAPSHOT_DIR"); envSnapshotDir != "" {
-		*snapshotDir = envSnapshotDir
-	}
-	if envSnapshotInterval := os.Getenv("SNAPSHOT_INTERVAL"); envSnapshotInterval != "" {
-		if interval, err := strconv.Atoi(envSnapshotInterval); err == nil {
-			*snapshotInterval = interval
-		}
-	}
-
-	// Create the node service
-	config := node.Config{
-		NodeID:           uint32(*nodeID),
-		ClusterSize:      uint32(*clusterSize),
-		TotalHashRanges:  uint32(*hashRanges),
-		SnapshotDir:      *snapshotDir,
-		SnapshotInterval: *snapshotInterval,
-	}
-
-	service, err := node.NewService(ctx, config)
+	service, err := node.NewService(ctx, nodeConfig, cloudStorage, log.Child("service"))
 	if err != nil {
 		return fmt.Errorf("failed to create node service: %w", err)
 	}
@@ -89,15 +68,15 @@ func run(ctx context.Context, cancel func()) error {
 	pb.RegisterNodeServiceServer(server, service)
 
 	// Start listening
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	log.Printf("Starting node %d of %d on port %d", *nodeID, *clusterSize, *port)
-	log.Printf("Handling %d hash ranges out of %d total",
-		len(hash.GetNodeHashRanges(uint32(*nodeID), uint32(*clusterSize), uint32(*hashRanges))),
-		*hashRanges,
+	log.Infon("Starting node",
+		logger.NewIntField("hashRanges", int64(len(
+			hash.GetNodeHashRanges(nodeConfig.NodeID, nodeConfig.ClusterSize, nodeConfig.TotalHashRanges),
+		))),
 	)
 
 	// Start the server
