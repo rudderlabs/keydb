@@ -49,6 +49,8 @@ type Config struct {
 type Service struct {
 	pb.UnimplementedNodeServiceServer
 
+	now func() time.Time
+
 	config Config
 
 	// caches is a map of hash range ID to cache
@@ -65,7 +67,7 @@ type Service struct {
 }
 
 // NewService creates a new NodeService
-func NewService(config Config) (*Service, error) {
+func NewService(ctx context.Context, config Config) (*Service, error) {
 	// Set defaults for unspecified config values
 	if config.TotalHashRanges == 0 {
 		config.TotalHashRanges = DefaultTotalHashRanges
@@ -85,40 +87,52 @@ func NewService(config Config) (*Service, error) {
 	}
 
 	service := &Service{
+		now:    time.Now,
 		config: config,
 		caches: make(map[uint32]*cachettl.Cache[string, bool]),
 	}
 
 	// Initialize caches for all hash ranges this node handles
-	if err := service.initCaches(); err != nil {
+	if err := service.initCaches(ctx); err != nil {
 		return nil, err
 	}
 
 	// Start background snapshot creation
-	// TODO this should be moved also it's missing a context
-	go service.snapshotLoop()
+	go service.snapshotLoop(ctx)
 
 	return service, nil
 }
 
 // snapshotLoop periodically creates snapshots
-func (s *Service) snapshotLoop() {
+func (s *Service) snapshotLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Duration(s.config.SnapshotInterval) * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		s.mu.Lock()
-		if !s.scaling {
-			if err := s.createSnapshots(); err != nil {
-				log.Printf("Error creating snapshots: %v", err)
-			}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if s.scaling {
+					return
+				}
+				if s.now().Sub(s.lastSnapshotTime) < time.Duration(s.config.SnapshotInterval) { // TODO write a test for this
+					// we created a snapshot already recently due to a scaling operation
+					return
+				}
+				if err := s.createSnapshots(); err != nil {
+					log.Printf("Error creating snapshots: %v", err)
+				}
+			}()
 		}
-		s.mu.Unlock()
 	}
 }
 
 // initCaches initializes the caches for all hash ranges this node handles
-func (s *Service) initCaches() error {
+func (s *Service) initCaches(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -133,7 +147,7 @@ func (s *Service) initCaches() error {
 	}
 
 	// Create a cache for each hash range
-	group, _ := kitsync.NewEagerGroup(context.TODO(), len(ranges))
+	group, _ := kitsync.NewEagerGroup(ctx, len(ranges))
 	for r := range ranges {
 		// Check if we already have a cache for this range
 		if _, exists := s.caches[r]; exists {
@@ -146,7 +160,7 @@ func (s *Service) initCaches() error {
 
 		group.Go(func() error {
 			// Try to load snapshot for this range
-			if err := s.loadSnapshot(r, cache); err != nil {
+			if err := s.loadSnapshot(ctx, r, cache); err != nil {
 				return fmt.Errorf("failed to load snapshot for range %d: %w", r, err)
 			}
 			return nil
@@ -397,7 +411,8 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	s.config.ClusterSize = req.NewClusterSize
 
 	// Reinitialize caches for the new cluster size
-	if err := s.initCaches(); err != nil {
+	// TODO check this ctx, a client cancellation from the Operator client might leave the node in a unwanted state
+	if err := s.initCaches(ctx); err != nil {
 		// Revert to previous cluster size on error
 		s.config.ClusterSize = previousClusterSize
 		s.scaling = false
@@ -432,7 +447,7 @@ func (s *Service) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteReques
 }
 
 // loadSnapshot loads a snapshot for a specific hash range
-func (s *Service) loadSnapshot(hashRange uint32, cache *cachettl.Cache[string, bool]) error {
+func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache *cachettl.Cache[string, bool]) error {
 	// Check if snapshot file exists
 	snapshotPath := filepath.Join(s.config.SnapshotDir, fmt.Sprintf("node_%d_range_%d.snapshot", s.config.NodeID, hashRange))
 	if _, err := os.Stat(snapshotPath); os.IsNotExist(err) {

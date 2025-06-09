@@ -170,8 +170,6 @@ func (c *Cache[K, V]) slice() (s []V) {
 // key2:1749455912573\n
 func CreateSnapshot(w io.Writer, c *Cache[string, bool]) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	cn := c.root.next // start from head since we're sorting by expiration with the highest expiration at the tail
 	for cn != nil && cn != c.root {
 		if c.config.now().After(cn.expiration) {
@@ -181,12 +179,25 @@ func CreateSnapshot(w io.Writer, c *Cache[string, bool]) error {
 				c.onEvicted(cn.key, cn.value)
 			}
 		} else {
-			_, err := w.Write([]byte(cn.key + ":" + strconv.FormatInt(int64(cn.expiration.UnixMilli()), 10) + "\n"))
-			if err != nil {
-				return fmt.Errorf("failed to write snapshot: %w", err)
-			}
+			break
 		}
+		cn = cn.next
+	}
+	c.mu.Unlock()
 
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for cn != nil && cn != c.root {
+		if c.config.now().After(cn.expiration) { // checking again since we had to release and re-get the lock
+			// let's not remove these, we'll remove them at the next snapshot, now we want to focus on performance
+			// meaning we just operate with a read lock now
+			cn = cn.next
+			continue
+		}
+		_, err := w.Write([]byte(cn.key + ":" + strconv.FormatInt(cn.expiration.UnixMilli(), 10) + "\n"))
+		if err != nil {
+			return fmt.Errorf("failed to write snapshot: %w", err)
+		}
 		cn = cn.next
 	}
 
