@@ -318,18 +318,17 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 	// Get the client for this node
 	client, ok := c.clients[int(nodeID)]
 	if !ok {
+		// this should never happen unless clusterSize is updated and the c.clients map isn't
+		// or if there is a bug in the hashing function
 		return nil, fmt.Errorf("no client for node %d", nodeID)
 	}
 
 	// Create the request
-	req := &pb.GetNodeInfoRequest{
-		NodeId: nodeID,
-	}
+	req := &pb.GetNodeInfoRequest{NodeId: nodeID}
 
 	// Send the request with retries
-	var resp *pb.GetNodeInfoResponse
 	var err error
-
+	var resp *pb.GetNodeInfoResponse
 	for i := 0; i <= c.config.RetryCount; i++ {
 		resp, err = client.GetNodeInfo(ctx, req)
 		if err == nil {
@@ -342,7 +341,17 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 		}
 
 		// Wait before retrying
-		time.Sleep(c.config.RetryDelay)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(c.config.RetryDelay):
+		}
+	}
+
+	if c.clusterSize != resp.ClusterSize {
+		if err = c.updateClusterSize(resp.NodesAddresses); err != nil {
+			return nil, fmt.Errorf("failed to update cluster size: %w", err)
+		}
 	}
 
 	return resp, nil
