@@ -358,39 +358,45 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 }
 
 // CreateSnapshot forces the creation of snapshots on a node
-func (c *Client) CreateSnapshot(ctx context.Context, nodeID uint32) (*pb.CreateSnapshotResponse, error) {
+func (c *Client) CreateSnapshot(ctx context.Context) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// Get the client for this node
-	client, ok := c.clients[int(nodeID)]
-	if !ok {
-		return nil, fmt.Errorf("no client for node %d", nodeID)
+	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
+	for nodeID, client := range c.clients {
+		group.Go(func() error {
+			req := &pb.CreateSnapshotRequest{}
+
+			var err error
+			var resp *pb.CreateSnapshotResponse
+			for i := 0; i <= c.config.RetryCount; i++ {
+				resp, err = client.CreateSnapshot(ctx, req)
+				if err == nil {
+					break
+				}
+
+				// If this is the last retry, return the error
+				if i == c.config.RetryCount {
+					return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
+				}
+
+				// Wait before retrying
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(c.config.RetryDelay):
+				}
+			}
+
+			if !resp.Success {
+				return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
+			}
+
+			return nil
+		})
 	}
 
-	// Create the request
-	req := &pb.CreateSnapshotRequest{}
-
-	// Send the request with retries
-	var resp *pb.CreateSnapshotResponse
-	var err error
-
-	for i := 0; i <= c.config.RetryCount; i++ {
-		resp, err = client.CreateSnapshot(ctx, req)
-		if err == nil {
-			break
-		}
-
-		// If this is the last retry, return the error
-		if i == c.config.RetryCount {
-			return nil, fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
-		}
-
-		// Wait before retrying
-		time.Sleep(c.config.RetryDelay)
-	}
-
-	return resp, nil
+	return group.Wait()
 }
 
 // Scale changes the number of nodes in the cluster
@@ -431,6 +437,42 @@ func (c *Client) Scale(ctx context.Context, nodeID, newClusterSize uint32) (*pb.
 	// Update cluster size
 	if resp.Success {
 		c.clusterSize = resp.NewClusterSize
+	}
+
+	return resp, nil
+}
+
+// ScaleComplete notifies a node that the scaling operation is complete
+func (c *Client) ScaleComplete(ctx context.Context, nodeID uint32) (*pb.ScaleCompleteResponse, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Get the client for this node
+	client, ok := c.clients[int(nodeID)]
+	if !ok {
+		return nil, fmt.Errorf("no client for node %d", nodeID)
+	}
+
+	// Create the request
+	req := &pb.ScaleCompleteRequest{}
+
+	// Send the request with retries
+	var resp *pb.ScaleCompleteResponse
+	var err error
+
+	for i := 0; i <= c.config.RetryCount; i++ {
+		resp, err = client.ScaleComplete(ctx, req)
+		if err == nil {
+			break
+		}
+
+		// If this is the last retry, return the error
+		if i == c.config.RetryCount {
+			return nil, fmt.Errorf("failed to complete scale operation on node %d: %w", nodeID, err)
+		}
+
+		// Wait before retrying
+		time.Sleep(c.config.RetryDelay)
 	}
 
 	return resp, nil
@@ -490,40 +532,4 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 	}
 
 	return nil
-}
-
-// ScaleComplete notifies a node that the scaling operation is complete
-func (c *Client) ScaleComplete(ctx context.Context, nodeID uint32) (*pb.ScaleCompleteResponse, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// Get the client for this node
-	client, ok := c.clients[int(nodeID)]
-	if !ok {
-		return nil, fmt.Errorf("no client for node %d", nodeID)
-	}
-
-	// Create the request
-	req := &pb.ScaleCompleteRequest{}
-
-	// Send the request with retries
-	var resp *pb.ScaleCompleteResponse
-	var err error
-
-	for i := 0; i <= c.config.RetryCount; i++ {
-		resp, err = client.ScaleComplete(ctx, req)
-		if err == nil {
-			break
-		}
-
-		// If this is the last retry, return the error
-		if i == c.config.RetryCount {
-			return nil, fmt.Errorf("failed to complete scale operation on node %d: %w", nodeID, err)
-		}
-
-		// Wait before retrying
-		time.Sleep(c.config.RetryDelay)
-	}
-
-	return resp, nil
 }

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/test/bufconn"
 
@@ -145,14 +146,8 @@ func TestSingleNode(t *testing.T) {
 	}
 
 	// Test CreateSnapshot
-	resp, err := c.CreateSnapshot(ctx, 0)
-	if err != nil {
-		t.Fatalf("Failed to create snapshot: %v", err)
-	}
-
-	if !resp.Success {
-		t.Errorf("CreateSnapshot failed: %s", resp.ErrorMessage)
-	}
+	err = c.CreateSnapshot(ctx)
+	require.NoError(t, err)
 }
 
 // TestScaleUp tests scaling up from 1 to 3 nodes

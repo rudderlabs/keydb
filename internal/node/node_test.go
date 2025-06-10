@@ -30,7 +30,6 @@ import (
 )
 
 const (
-	bufSize = 1024 * 1024
 	testTTL = 10
 )
 
@@ -85,9 +84,8 @@ func TestNode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, true, true, false}, exists)
 
-	resp, err := c.CreateSnapshot(ctx, 0)
+	err = c.CreateSnapshot(ctx)
 	require.NoError(t, err)
-	require.True(t, resp.Success)
 
 	files, err := getContents(ctx, bucket, "", minioClient)
 	require.NoError(t, err)
