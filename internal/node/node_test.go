@@ -34,7 +34,7 @@ const (
 	testTTL = 10
 )
 
-func TestGetPut(t *testing.T) {
+func TestNode(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
@@ -67,42 +67,10 @@ func TestGetPut(t *testing.T) {
 		SnapshotInterval: 60 * time.Second,
 	}
 
-	ctx := context.TODO()
-	service, err := NewService(ctx, nodeConfig, cloudStorage, logger.NOP)
-	require.NoError(t, err)
 	now := time.Now()
-	service.now = func() time.Time { return now }
-
-	// Create a gRPC server
-	server := grpc.NewServer()
-	pb.RegisterNodeServiceServer(server, service)
-
-	// Create a bufconn listener
-	lis := bufconn.Listen(bufSize)
-
-	// Start the server
-	go func() {
-		require.NoError(t, server.Serve(lis))
-	}()
-	defer server.Stop()
-
-	// Create a client
-	dialer := func(ctx context.Context, _ string) (net.Conn, error) {
-		return lis.DialContext(ctx)
-	}
-
-	clientConfig := client.Config{
-		Addresses:       []string{"localhost"},
-		TotalHashRanges: 128,
-		RetryCount:      3,
-		RetryDelay:      100 * time.Millisecond,
-	}
-
-	c, err := client.NewClientWithDialers(clientConfig, []func(context.Context, string) (net.Conn, error){dialer})
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, c.Close())
-	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	service, c := getServiceAndClient(ctx, t, nodeConfig, cloudStorage, now)
 
 	// Test Put
 	items := []*pb.KeyWithTTL{
@@ -128,7 +96,61 @@ func TestGetPut(t *testing.T) {
 	requireTTLInSnapshot(t, 0, 122, files[1], "key2", now)
 	requireTTLInSnapshot(t, 0, 13, files[2], "key3", now)
 
-	// TODO test load snapshot!!!
+	cancel()
+	service.Close()
+
+	// Let's start again from scratch to see if the data is properly loaded from the snapshots
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	service, c = getServiceAndClient(ctx, t, nodeConfig, cloudStorage, now)
+
+	exists, err = c.Get(ctx, keys)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true, true, false}, exists)
+
+	cancel()
+	service.Close()
+}
+
+func getServiceAndClient(
+	ctx context.Context, t testing.TB, nodeConfig Config, cs cloudStorage, now time.Time,
+) (
+	*Service, *client.Client,
+) {
+	service, err := NewService(ctx, nodeConfig, cs, logger.NOP)
+	require.NoError(t, err)
+	service.now = func() time.Time { return now }
+
+	// Create a gRPC server
+	server := grpc.NewServer()
+	pb.RegisterNodeServiceServer(server, service)
+
+	// Create a bufconn listener
+	lis := bufconn.Listen(bufSize)
+
+	// Start the server
+	go func() {
+		require.NoError(t, server.Serve(lis))
+	}()
+	t.Cleanup(server.GracefulStop)
+
+	clientConfig := client.Config{
+		Addresses:       []string{"localhost"},
+		TotalHashRanges: 128,
+		RetryCount:      3,
+		RetryDelay:      100 * time.Millisecond,
+	}
+
+	// Create a client
+	dialer := func(ctx context.Context, _ string) (net.Conn, error) {
+		return lis.DialContext(ctx)
+	}
+
+	c, err := client.NewClientWithDialers(clientConfig, []func(context.Context, string) (net.Conn, error){dialer})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	return service, c
 }
 
 func requireTTLInSnapshot(t testing.TB, nodeNumber, hashRange int64, file File, key string, now time.Time) {
