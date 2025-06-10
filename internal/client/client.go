@@ -160,6 +160,19 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 
 				// TODO add some logging and metrics here
 
+				if c.clusterSize != resp.ClusterSize {
+					// TODO we need to update the cluster size in a race condition safe manner (beware that this method
+					// got a read lock so we might need to release that and acquire an actual lock and by the time we do
+					// acquire the write lock the cluster size might have been updated by someone else along with the
+					// connections so this needs to be taken into consideration as well).
+					// we also need to close the clients that are not needed if any (in case the cluster is smaller)
+					// or create new clients if the cluster is bigger.
+					// this needs to happen without duplicating code since multiple methods (e.g Get/Put...) need to do the
+					// same thing.
+					// it is also important that if we successfully got some data that we don't fetch it again but that
+					// we only fetch the ones that is missing.
+				}
+
 				// If this is the last retry, return the error
 				if i == c.config.RetryCount {
 					return fmt.Errorf("failed to get keys from node %d: %w", nodeID, err)
@@ -179,6 +192,20 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 				results[key] = resp.Exists[i]
 			}
 			resultsMu.Unlock()
+
+			if c.clusterSize != resp.ClusterSize {
+				// TODO we need to update the cluster size in a race condition safe manner (beware that this method
+				// got a read lock so we might need to release that and acquire an actual lock and by the time we do
+				// acquire the write lock the cluster size might have been updated by someone else along with the
+				// connections so this needs to be taken into consideration as well).
+				// we also need to close the clients that are not needed if any (in case the cluster is smaller)
+				// or create new clients if the cluster is bigger.
+				// this needs to happen without duplicating code since multiple methods (e.g Get/Put...) need to do the
+				// same thing.
+				// it is also important that if we successfully got some data that we don't fetch it again but that
+				// we only fetch the ones that is missing.
+			}
+
 			return nil
 		})
 	}
@@ -211,56 +238,77 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 		itemsByNode[nodeID] = append(itemsByNode[nodeID], item)
 	}
 
-	// Send requests to each node
+	// Send requests to each node in parallel
+	group, ctx := kitsync.NewEagerGroup(ctx, len(itemsByNode))
 	for nodeID, nodeItems := range itemsByNode {
-		// Get the client for this node
-		client, ok := c.clients[int(nodeID)]
-		if !ok {
-			return fmt.Errorf("no client for node %d", nodeID)
-		}
-
-		// Create the request
-		req := &pb.PutRequest{
-			Items: nodeItems,
-		}
-
-		// Send the request with retries
-		var resp *pb.PutResponse
-		var err error
-
-		for i := 0; i <= c.config.RetryCount; i++ {
-			resp, err = client.Put(ctx, req)
-			if err == nil {
-				break
+		group.Go(func() error {
+			// Get the client for this node
+			client, ok := c.clients[int(nodeID)]
+			if !ok {
+				return fmt.Errorf("no client for node %d", nodeID)
 			}
 
-			// If this is the last retry, return the error
-			if i == c.config.RetryCount {
-				return fmt.Errorf("failed to put items to node %d: %w", nodeID, err)
+			// Create the request
+			req := &pb.PutRequest{Items: nodeItems}
+
+			// Send the request with retries
+			var err error
+			var resp *pb.PutResponse
+			for i := 0; i <= c.config.RetryCount; i++ {
+				resp, err = client.Put(ctx, req)
+				if err == nil && resp != nil {
+					if resp.Success && resp.ErrorCode == pb.ErrorCode_NO_ERROR {
+						break // for internal errors, scaling or wrong code we retry
+					}
+				}
+
+				// TODO add some logging and metrics here
+
+				if c.clusterSize != resp.ClusterSize {
+					// TODO we need to update the cluster size in a race condition safe manner (beware that this method
+					// got a read lock so we might need to release that and acquire an actual lock and by the time we do
+					// acquire the write lock the cluster size might have been updated by someone else along with the
+					// connections so this needs to be taken into consideration as well).
+					// we also need to close the clients that are not needed if any (in case the cluster is smaller)
+					// or create new clients if the cluster is bigger.
+					// this needs to happen without duplicating code since multiple methods (e.g Get/Put...) need to do the
+					// same thing.
+					// it is also important that if we successfully got some data that we don't fetch it again but that
+					// we only fetch the ones that is missing.
+				}
+
+				// If this is the last retry, return the error
+				if i == c.config.RetryCount {
+					return fmt.Errorf("failed to put items to node %d: %w", nodeID, err)
+				}
+
+				// Wait before retrying
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(c.config.RetryDelay):
+				}
 			}
 
-			// Wait before retrying
-			time.Sleep(c.config.RetryDelay)
-		}
-
-		// Check for errors in the response
-		if !resp.Success || resp.ErrorCode != pb.ErrorCode_NO_ERROR {
-			// Handle wrong node error
-			if resp.ErrorCode == pb.ErrorCode_WRONG_NODE {
-				// Update cluster size and retry
-				c.clusterSize = resp.ClusterSize
-				return c.Put(ctx, items)
+			if c.clusterSize != resp.ClusterSize {
+				// TODO we need to update the cluster size in a race condition safe manner (beware that this method
+				// got a read lock so we might need to release that and acquire an actual lock and by the time we do
+				// acquire the write lock the cluster size might have been updated by someone else along with the
+				// connections so this needs to be taken into consideration as well).
+				// we also need to close the clients that are not needed if any (in case the cluster is smaller)
+				// or create new clients if the cluster is bigger.
+				// this needs to happen without duplicating code since multiple methods (e.g Get/Put...) need to do the
+				// same thing.
+				// it is also important that if we successfully got some data that we don't fetch it again but that
+				// we only fetch the ones that is missing.
 			}
 
-			// Handle scaling error
-			if resp.ErrorCode == pb.ErrorCode_SCALING {
-				// Wait and retry
-				time.Sleep(c.config.RetryDelay)
-				return c.Put(ctx, items)
-			}
+			return nil
+		})
+	}
 
-			return fmt.Errorf("error from node %d: %v", nodeID, resp.ErrorCode)
-		}
+	if err := group.Wait(); err != nil {
+		return err
 	}
 
 	return nil
