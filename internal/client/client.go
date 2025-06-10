@@ -237,6 +237,12 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 		itemsByNode[nodeID] = append(itemsByNode[nodeID], item)
 	}
 
+	return c.put(ctx, items, itemsByNode)
+}
+
+func (c *Client) put(
+	ctx context.Context, items []*pb.KeyWithTTL, itemsByNode map[uint32][]*pb.KeyWithTTL,
+) error {
 	// Send requests to each node in parallel
 	group, ctx := kitsync.NewEagerGroup(ctx, len(itemsByNode))
 	for nodeID, nodeItems := range itemsByNode {
@@ -244,6 +250,8 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 			// Get the client for this node
 			client, ok := c.clients[int(nodeID)]
 			if !ok {
+				// this should never happen unless clusterSize is updated and the c.clients map isn't
+				// or if there is a bug in the hashing function
 				return fmt.Errorf("no client for node %d", nodeID)
 			}
 
@@ -264,40 +272,7 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 				// TODO add some logging and metrics here
 
 				if c.clusterSize != resp.ClusterSize {
-					// Extract keys from items for refetching calculation
-					keys := make([]string, len(nodeItems))
-					for j, item := range nodeItems {
-						keys[j] = item.Key
-					}
-
-					// Update cluster size and get keys that need to be fetched again
-					keysToFetch := c.updateClusterSize(resp.ClusterSize, keys)
-
-					// If we have keys that need to be fetched again, create a new request with only those items
-					if len(keysToFetch) > 0 {
-						// Create a map for quick lookup
-						keyMap := make(map[string]bool)
-						for _, key := range keysToFetch {
-							keyMap[key] = true
-						}
-
-						// Filter items that need to be fetched again
-						itemsToFetch := make([]*pb.KeyWithTTL, 0, len(keysToFetch))
-						for _, item := range nodeItems {
-							if keyMap[item.Key] {
-								itemsToFetch = append(itemsToFetch, item)
-							}
-						}
-
-						// Create a new request with only the items that need to be fetched again
-						req = &pb.PutRequest{Items: itemsToFetch}
-
-						// Reset the retry counter to give us a fresh set of retries for the new request
-						i = 0
-
-						// Continue to the next iteration to retry with the new request
-						continue
-					}
+					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
 
 				// If this is the last retry, return the error
@@ -314,9 +289,7 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 			}
 
 			if c.clusterSize != resp.ClusterSize {
-				// We've already successfully processed all items for this node,
-				// so we just need to update the cluster size without refetching any keys
-				_ = c.updateClusterSize(resp.ClusterSize, nil)
+				return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 			}
 
 			return nil
@@ -324,6 +297,13 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 	}
 
 	if err := group.Wait(); err != nil {
+		var clusterSizeErr *errClusterSizeChanged
+		if errors.As(err, &clusterSizeErr) {
+			if err = c.updateClusterSize(clusterSizeErr.nodesAddresses); err != nil {
+				return fmt.Errorf("failed to update cluster size: %w", err)
+			}
+			return c.put(ctx, items, itemsByNode)
+		}
 		return err
 	}
 
