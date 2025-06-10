@@ -358,6 +358,7 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 }
 
 // CreateSnapshot forces the creation of snapshots on a node
+// This method is meant to be used by an Operator process only!
 func (c *Client) CreateSnapshot(ctx context.Context) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -400,82 +401,141 @@ func (c *Client) CreateSnapshot(ctx context.Context) error {
 }
 
 // Scale changes the number of nodes in the cluster
-func (c *Client) Scale(ctx context.Context, nodeID, newClusterSize uint32) (*pb.ScaleResponse, error) {
+// This method is meant to be used by an Operator process only!
+func (c *Client) Scale(ctx context.Context, addresses []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Get the client for this node
-	client, ok := c.clients[int(nodeID)]
-	if !ok {
-		return nil, fmt.Errorf("no client for node %d", nodeID)
+	newClusterSize := uint32(len(addresses))
+	if newClusterSize == c.clusterSize {
+		return nil // No change needed
 	}
 
-	// Create the request
-	req := &pb.ScaleRequest{
-		NewClusterSize: newClusterSize,
-	}
+	// Handle case when newClusterSize is bigger
+	if newClusterSize > c.clusterSize {
+		// Establish new connections to the new nodes
+		for i := int(c.clusterSize); i < int(newClusterSize); i++ {
+			addr := addresses[i]
+			conn, err := grpc.NewClient(addr,
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "tcp", addr)
+				}),
+			)
+			if err != nil {
+				// Close any new connections we've made so far
+				for j := int(c.clusterSize); j < i; j++ {
+					if conn, ok := c.connections[j]; ok {
+						_ = conn.Close()
+						delete(c.connections, j)
+						delete(c.clients, j)
+					}
+				}
+				return fmt.Errorf("failed to connect to node %d at %s: %w", i, addr, err)
+			}
 
-	// Send the request with retries
-	var resp *pb.ScaleResponse
-	var err error
-
-	for i := 0; i <= c.config.RetryCount; i++ {
-		resp, err = client.Scale(ctx, req)
-		if err == nil {
-			break
+			c.connections[i] = conn
+			c.clients[i] = pb.NewNodeServiceClient(conn)
 		}
-
-		// If this is the last retry, return the error
-		if i == c.config.RetryCount {
-			return nil, fmt.Errorf("failed to scale cluster from node %d: %w", nodeID, err)
+	} else {
+		// Handle case when newClusterSize is smaller
+		// Close unnecessary connections
+		for i := int(newClusterSize); i < int(c.clusterSize); i++ {
+			if conn, ok := c.connections[i]; ok {
+				_ = conn.Close() // Ignore errors during close
+				delete(c.connections, i)
+				delete(c.clients, i)
+			}
 		}
-
-		// Wait before retrying
-		time.Sleep(c.config.RetryDelay)
 	}
 
-	// Update cluster size
-	if resp.Success {
-		c.clusterSize = resp.NewClusterSize
+	// Send ScaleRequest to all nodes
+	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
+	for nodeID, client := range c.clients {
+		group.Go(func() error {
+			req := &pb.ScaleRequest{NewClusterSize: newClusterSize}
+
+			var err error
+			var resp *pb.ScaleResponse
+			for i := 0; i <= c.config.RetryCount; i++ {
+				resp, err = client.Scale(ctx, req)
+				if err == nil && resp != nil && resp.Success {
+					break
+				}
+
+				// If this is the last retry, save the error
+				if i == c.config.RetryCount {
+					errMsg := "unknown error"
+					if err != nil {
+						errMsg = err.Error()
+					} else if resp != nil {
+						errMsg = resp.ErrorMessage
+					}
+					return fmt.Errorf("failed to scale node %d: %s", nodeID, errMsg)
+				}
+
+				// Wait before retrying
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(c.config.RetryDelay):
+				}
+			}
+
+			return nil
+		})
 	}
 
-	return resp, nil
+	err := group.Wait()
+	if err != nil {
+		return err
+	}
+
+	c.config.Addresses = addresses
+	c.clusterSize = newClusterSize
+
+	return nil
 }
 
 // ScaleComplete notifies a node that the scaling operation is complete
-func (c *Client) ScaleComplete(ctx context.Context, nodeID uint32) (*pb.ScaleCompleteResponse, error) {
+// This method is meant to be used by an Operator process only!
+func (c *Client) ScaleComplete(ctx context.Context) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// Get the client for this node
-	client, ok := c.clients[int(nodeID)]
-	if !ok {
-		return nil, fmt.Errorf("no client for node %d", nodeID)
+	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
+	for nodeID, client := range c.clients {
+		group.Go(func() error {
+			req := &pb.ScaleCompleteRequest{}
+
+			// Send the request with retries
+			var err error
+			var resp *pb.ScaleCompleteResponse
+			for i := 0; i <= c.config.RetryCount; i++ {
+				resp, err = client.ScaleComplete(ctx, req)
+				if err == nil && resp != nil && resp.Success {
+					break
+				}
+
+				// If this is the last retry, return the error
+				if i == c.config.RetryCount {
+					return fmt.Errorf("failed to complete scale operation on node %d: %w", nodeID, err)
+				}
+
+				// Wait before retrying
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(c.config.RetryDelay):
+				}
+			}
+
+			return nil
+		})
 	}
 
-	// Create the request
-	req := &pb.ScaleCompleteRequest{}
-
-	// Send the request with retries
-	var resp *pb.ScaleCompleteResponse
-	var err error
-
-	for i := 0; i <= c.config.RetryCount; i++ {
-		resp, err = client.ScaleComplete(ctx, req)
-		if err == nil {
-			break
-		}
-
-		// If this is the last retry, return the error
-		if i == c.config.RetryCount {
-			return nil, fmt.Errorf("failed to complete scale operation on node %d: %w", nodeID, err)
-		}
-
-		// Wait before retrying
-		time.Sleep(c.config.RetryDelay)
-	}
-
-	return resp, nil
+	return group.Wait()
 }
 
 // updateClusterSize updates the cluster size in a race-condition safe manner.
@@ -498,6 +558,7 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 		return nil // No need to update or refetch
 	}
 
+	c.config.Addresses = nodesAddresses
 	oldClusterSize := c.clusterSize
 	c.clusterSize = newClusterSize
 
