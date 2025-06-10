@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net"
 	"testing"
 	"time"
 
@@ -15,6 +14,8 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
+
+// TODO fix test, it shouldn't use listeners but freeport with NewClient
 
 const (
 	bufSize = 1024 * 1024
@@ -66,15 +67,6 @@ func startTestNode(t *testing.T, nodeID, clusterSize, totalHashRanges uint32) (*
 func createTestClient(t *testing.T, listeners []*bufconn.Listener, totalHashRanges uint32) *client.Client {
 	t.Helper()
 
-	// Create a dialer for each listener
-	dialers := make([]func(context.Context, string) (net.Conn, error), len(listeners))
-	for i, lis := range listeners {
-		i, lis := i, lis // Capture loop variables
-		dialers[i] = func(context.Context, string) (net.Conn, error) {
-			return lis.Dial()
-		}
-	}
-
 	// Create addresses for each node
 	addresses := make([]string, len(listeners))
 	for i := range listeners {
@@ -90,7 +82,7 @@ func createTestClient(t *testing.T, listeners []*bufconn.Listener, totalHashRang
 	}
 
 	// Create a client with custom dialers
-	c, err := client.NewClientWithDialers(config, dialers)
+	c, err := client.NewClient(config)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}

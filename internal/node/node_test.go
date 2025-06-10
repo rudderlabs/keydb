@@ -19,7 +19,6 @@ import (
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/rudderlabs/keydb/internal/client"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
@@ -27,6 +26,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/testhelper"
 )
 
 const (
@@ -126,7 +126,11 @@ func getServiceAndClient(
 	pb.RegisterNodeServiceServer(server, service)
 
 	// Create a bufconn listener
-	lis := bufconn.Listen(bufSize)
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	port := strconv.Itoa(freePort)
+	lis, err := net.Listen("tcp", "localhost:"+port)
+	require.NoError(t, err)
 
 	// Start the server
 	go func() {
@@ -135,18 +139,13 @@ func getServiceAndClient(
 	t.Cleanup(server.GracefulStop)
 
 	clientConfig := client.Config{
-		Addresses:       []string{"localhost"},
+		Addresses:       []string{"localhost:" + port},
 		TotalHashRanges: 128,
 		RetryCount:      3,
 		RetryDelay:      100 * time.Millisecond,
 	}
 
-	// Create a client
-	dialer := func(ctx context.Context, _ string) (net.Conn, error) {
-		return lis.DialContext(ctx)
-	}
-
-	c, err := client.NewClientWithDialers(clientConfig, []func(context.Context, string) (net.Conn, error){dialer})
+	c, err := client.NewClient(clientConfig)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 

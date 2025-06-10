@@ -12,6 +12,7 @@ import (
 
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
+	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 )
 
 // TODO lots of things can be done in parallel
@@ -35,16 +36,16 @@ type Config struct {
 type Client struct {
 	config Config
 
+	// clusterSize is the number of nodes in the cluster
+	clusterSize uint32
+
 	// connections is a map of node index to connection
 	connections map[int]*grpc.ClientConn
 
 	// clients is a map of node index to client
 	clients map[int]pb.NodeServiceClient
 
-	// clusterSize is the number of nodes in the cluster
-	clusterSize uint32
-
-	// mu protects the connections and clients maps
+	// mu protects connections, clients and clusterSize
 	mu sync.RWMutex
 }
 
@@ -75,58 +76,16 @@ func NewClient(config Config) (*Client, error) {
 
 	// Connect to all nodes
 	for i, addr := range config.Addresses {
-		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+				var dialer net.Dialer
+				return dialer.DialContext(ctx, "tcp", addr)
+			}),
+		)
 		if err != nil {
 			// Close all connections on error
-			client.Close()
-			return nil, fmt.Errorf("failed to connect to node %d at %s: %w", i, addr, err)
-		}
-
-		client.connections[i] = conn
-		client.clients[i] = pb.NewNodeServiceClient(conn)
-	}
-
-	return client, nil
-}
-
-// NewClientWithDialers creates a new KeyDB client with custom dialers for testing
-func NewClientWithDialers(config Config, dialers []func(context.Context, string) (net.Conn, error)) (*Client, error) {
-	if len(config.Addresses) == 0 {
-		return nil, fmt.Errorf("no addresses provided")
-	}
-
-	if len(dialers) != len(config.Addresses) {
-		return nil, fmt.Errorf("number of dialers (%d) does not match number of addresses (%d)", len(dialers), len(config.Addresses))
-	}
-
-	if config.TotalHashRanges == 0 {
-		config.TotalHashRanges = 128
-	}
-
-	if config.RetryCount == 0 {
-		config.RetryCount = 3
-	}
-
-	if config.RetryDelay == 0 {
-		config.RetryDelay = 100 * time.Millisecond
-	}
-
-	client := &Client{
-		config:      config,
-		connections: make(map[int]*grpc.ClientConn),
-		clients:     make(map[int]pb.NodeServiceClient),
-		clusterSize: uint32(len(config.Addresses)),
-	}
-
-	// Connect to all nodes using the provided dialers
-	for i, addr := range config.Addresses {
-		// Create a custom dialer option
-		dialOption := grpc.WithContextDialer(dialers[i])
-
-		conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()), dialOption)
-		if err != nil {
-			// Close all connections on error
-			client.Close()
+			_ = client.Close()
 			return nil, fmt.Errorf("failed to connect to node %d at %s: %w", i, addr, err)
 		}
 
@@ -151,6 +110,7 @@ func (c *Client) Close() error {
 
 	c.connections = make(map[int]*grpc.ClientConn)
 	c.clients = make(map[int]pb.NodeServiceClient)
+	c.clusterSize = 0
 
 	return lastErr
 }
@@ -161,6 +121,9 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	defer c.mu.RUnlock()
 
 	// Group keys by node
+	// TODO the hashing can be done by a few routines that push into a channel, then a single routine reads from the ch
+	// and populates the slice. It might be overkilling for a few keys but we could do it for big batches if we see
+	// that the hashing takes time - TODO add metrics to measure latency of hashing and requests
 	keysByNode := make(map[uint32][]string)
 	for _, key := range keys {
 		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
@@ -169,62 +132,59 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 
 	// Create a map to store results
 	results := make(map[string]bool)
+	resultsMu := sync.Mutex{}
 
-	// Send requests to each node
+	group, ctx := kitsync.NewEagerGroup(ctx, len(keysByNode))
 	for nodeID, nodeKeys := range keysByNode {
-		// Get the client for this node
-		client, ok := c.clients[int(nodeID)]
-		if !ok {
-			return nil, fmt.Errorf("no client for node %d", nodeID)
-		}
-
-		// Create the request
-		req := &pb.GetRequest{
-			Keys: nodeKeys,
-		}
-
-		// Send the request with retries
-		var resp *pb.GetResponse
-		var err error
-
-		for i := 0; i <= c.config.RetryCount; i++ {
-			resp, err = client.Get(ctx, req)
-			if err == nil {
-				break
+		group.Go(func() error {
+			// Get the client for this node
+			client, ok := c.clients[int(nodeID)]
+			if !ok {
+				return fmt.Errorf("no client for node %d", nodeID)
 			}
 
-			// If this is the last retry, return the error
-			if i == c.config.RetryCount {
-				return nil, fmt.Errorf("failed to get keys from node %d: %w", nodeID, err)
+			// Create the request
+			req := &pb.GetRequest{Keys: nodeKeys}
+
+			// Send the request with retries
+			var err error
+			var resp *pb.GetResponse
+
+			for i := 0; i <= c.config.RetryCount; i++ {
+				resp, err = client.Get(ctx, req)
+				if err == nil && resp != nil {
+					if resp.ErrorCode == pb.ErrorCode_NO_ERROR {
+						break // for internal errors, scaling or wrong code we retry
+					}
+				}
+
+				// TODO add some logging and metrics here
+
+				// If this is the last retry, return the error
+				if i == c.config.RetryCount {
+					return fmt.Errorf("failed to get keys from node %d: %w", nodeID, err)
+				}
+
+				// Wait before retrying
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(c.config.RetryDelay):
+				}
 			}
 
-			// Wait before retrying
-			time.Sleep(c.config.RetryDelay)
-		}
-
-		// Check for errors in the response
-		if resp.ErrorCode != pb.ErrorCode_NO_ERROR {
-			// Handle wrong node error
-			if resp.ErrorCode == pb.ErrorCode_WRONG_NODE {
-				// Update cluster size and retry
-				c.clusterSize = resp.ClusterSize
-				return c.Get(ctx, keys)
+			// Store results
+			resultsMu.Lock()
+			for i, key := range nodeKeys {
+				results[key] = resp.Exists[i]
 			}
+			resultsMu.Unlock()
+			return nil
+		})
+	}
 
-			// Handle scaling error
-			if resp.ErrorCode == pb.ErrorCode_SCALING {
-				// Wait and retry
-				time.Sleep(c.config.RetryDelay)
-				return c.Get(ctx, keys)
-			}
-
-			return nil, fmt.Errorf("error from node %d: %v", nodeID, resp.ErrorCode)
-		}
-
-		// Store results
-		for i, key := range nodeKeys {
-			results[key] = resp.Exists[i]
-		}
+	if err := group.Wait(); err != nil {
+		return nil, err
 	}
 
 	// Convert results map to slice in the same order as input keys
@@ -242,6 +202,9 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 	defer c.mu.RUnlock()
 
 	// Group items by node
+	// TODO the hashing can be done by a few routines that push into a channel, then a single routine reads from the ch
+	// and populates the slice. It might be overkilling for a few keys but we could do it for big batches if we see
+	// that the hashing takes time - TODO add metrics to measure latency of hashing and requests
 	itemsByNode := make(map[uint32][]*pb.KeyWithTTL)
 	for _, item := range items {
 		_, nodeID := hash.GetNodeNumber(item.Key, c.clusterSize, c.config.TotalHashRanges)
