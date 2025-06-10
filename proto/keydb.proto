@@ -38,7 +38,8 @@ message GetRequest {
 message GetResponse {
   repeated bool exists = 1; // This list should be populated in the same order as the "keys" field in GetRequest
   uint32 cluster_size = 2; // Number of nodes in the cluster
-  ErrorCode error_code = 3; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
+  repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
+  ErrorCode error_code = 4; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
 }
 
 // PutRequest contains multiple key-value pairs to store
@@ -52,7 +53,8 @@ message PutRequest {
 message PutResponse {
   bool success = 1;
   uint32 cluster_size = 2; // Number of nodes in the cluster
-  ErrorCode error_code = 3; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
+  repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
+  ErrorCode error_code = 4; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
 }
 
 // KeyWithTTL represents a key with its time to live
@@ -78,9 +80,10 @@ message GetNodeInfoRequest {
 message GetNodeInfoResponse {
   uint32 node_id = 1; // ID of the node
   uint32 cluster_size = 2; // Number of nodes in the cluster
-  repeated HashRange hash_ranges = 3; // Hash ranges handled by this node
-  uint64 keys_count = 4; // Number of keys stored in this node
-  uint64 last_snapshot_timestamp = 5; // Unix timestamp of the last snapshot
+  repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
+  repeated HashRange hash_ranges = 4; // Hash ranges handled by this node
+  uint64 keys_count = 5; // Number of keys stored in this node
+  uint64 last_snapshot_timestamp = 6; // Unix timestamp of the last snapshot
 }
 
 // HashRange represents a range of hash values

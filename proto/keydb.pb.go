@@ -121,12 +121,13 @@ func (x *GetRequest) GetKeys() []string {
 
 // GetResponse contains the retrieved values and cluster information
 type GetResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Exists        []bool                 `protobuf:"varint,1,rep,packed,name=exists,proto3" json:"exists,omitempty"`                                      // This list should be populated in the same order as the "keys" field in GetRequest
-	ClusterSize   uint32                 `protobuf:"varint,2,opt,name=cluster_size,json=clusterSize,proto3" json:"cluster_size,omitempty"`                // Number of nodes in the cluster
-	ErrorCode     ErrorCode              `protobuf:"varint,3,opt,name=error_code,json=errorCode,proto3,enum=keydb.ErrorCode" json:"error_code,omitempty"` // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Exists         []bool                 `protobuf:"varint,1,rep,packed,name=exists,proto3" json:"exists,omitempty"`                                      // This list should be populated in the same order as the "keys" field in GetRequest
+	ClusterSize    uint32                 `protobuf:"varint,2,opt,name=cluster_size,json=clusterSize,proto3" json:"cluster_size,omitempty"`                // Number of nodes in the cluster
+	NodesAddresses []string               `protobuf:"bytes,3,rep,name=nodesAddresses,proto3" json:"nodesAddresses,omitempty"`                              // When the cluster_size changes the client can use this variable to connect to the new nodes
+	ErrorCode      ErrorCode              `protobuf:"varint,4,opt,name=error_code,json=errorCode,proto3,enum=keydb.ErrorCode" json:"error_code,omitempty"` // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GetResponse) Reset() {
@@ -171,6 +172,13 @@ func (x *GetResponse) GetClusterSize() uint32 {
 		return x.ClusterSize
 	}
 	return 0
+}
+
+func (x *GetResponse) GetNodesAddresses() []string {
+	if x != nil {
+		return x.NodesAddresses
+	}
+	return nil
 }
 
 func (x *GetResponse) GetErrorCode() ErrorCode {
@@ -229,12 +237,13 @@ func (x *PutRequest) GetItems() []*KeyWithTTL {
 
 // PutResponse contains the operation result and cluster information
 type PutResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
-	ClusterSize   uint32                 `protobuf:"varint,2,opt,name=cluster_size,json=clusterSize,proto3" json:"cluster_size,omitempty"`                // Number of nodes in the cluster
-	ErrorCode     ErrorCode              `protobuf:"varint,3,opt,name=error_code,json=errorCode,proto3,enum=keydb.ErrorCode" json:"error_code,omitempty"` // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Success        bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ClusterSize    uint32                 `protobuf:"varint,2,opt,name=cluster_size,json=clusterSize,proto3" json:"cluster_size,omitempty"`                // Number of nodes in the cluster
+	NodesAddresses []string               `protobuf:"bytes,3,rep,name=nodesAddresses,proto3" json:"nodesAddresses,omitempty"`                              // When the cluster_size changes the client can use this variable to connect to the new nodes
+	ErrorCode      ErrorCode              `protobuf:"varint,4,opt,name=error_code,json=errorCode,proto3,enum=keydb.ErrorCode" json:"error_code,omitempty"` // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PutResponse) Reset() {
@@ -279,6 +288,13 @@ func (x *PutResponse) GetClusterSize() uint32 {
 		return x.ClusterSize
 	}
 	return 0
+}
+
+func (x *PutResponse) GetNodesAddresses() []string {
+	if x != nil {
+		return x.NodesAddresses
+	}
+	return nil
 }
 
 func (x *PutResponse) GetErrorCode() ErrorCode {
@@ -391,9 +407,10 @@ type GetNodeInfoResponse struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
 	NodeId                uint32                 `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`                                                // ID of the node
 	ClusterSize           uint32                 `protobuf:"varint,2,opt,name=cluster_size,json=clusterSize,proto3" json:"cluster_size,omitempty"`                                 // Number of nodes in the cluster
-	HashRanges            []*HashRange           `protobuf:"bytes,3,rep,name=hash_ranges,json=hashRanges,proto3" json:"hash_ranges,omitempty"`                                     // Hash ranges handled by this node
-	KeysCount             uint64                 `protobuf:"varint,4,opt,name=keys_count,json=keysCount,proto3" json:"keys_count,omitempty"`                                       // Number of keys stored in this node
-	LastSnapshotTimestamp uint64                 `protobuf:"varint,5,opt,name=last_snapshot_timestamp,json=lastSnapshotTimestamp,proto3" json:"last_snapshot_timestamp,omitempty"` // Unix timestamp of the last snapshot
+	NodesAddresses        []string               `protobuf:"bytes,3,rep,name=nodesAddresses,proto3" json:"nodesAddresses,omitempty"`                                               // When the cluster_size changes the client can use this variable to connect to the new nodes
+	HashRanges            []*HashRange           `protobuf:"bytes,4,rep,name=hash_ranges,json=hashRanges,proto3" json:"hash_ranges,omitempty"`                                     // Hash ranges handled by this node
+	KeysCount             uint64                 `protobuf:"varint,5,opt,name=keys_count,json=keysCount,proto3" json:"keys_count,omitempty"`                                       // Number of keys stored in this node
+	LastSnapshotTimestamp uint64                 `protobuf:"varint,6,opt,name=last_snapshot_timestamp,json=lastSnapshotTimestamp,proto3" json:"last_snapshot_timestamp,omitempty"` // Unix timestamp of the last snapshot
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -440,6 +457,13 @@ func (x *GetNodeInfoResponse) GetClusterSize() uint32 {
 		return x.ClusterSize
 	}
 	return 0
+}
+
+func (x *GetNodeInfoResponse) GetNodesAddresses() []string {
+	if x != nil {
+		return x.NodesAddresses
+	}
+	return nil
 }
 
 func (x *GetNodeInfoResponse) GetHashRanges() []*HashRange {
@@ -823,35 +847,38 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\x11proto/keydb.proto\x12\x05keydb\" \n" +
 	"\n" +
 	"GetRequest\x12\x12\n" +
-	"\x04keys\x18\x01 \x03(\tR\x04keys\"y\n" +
+	"\x04keys\x18\x01 \x03(\tR\x04keys\"\xa1\x01\n" +
 	"\vGetResponse\x12\x16\n" +
 	"\x06exists\x18\x01 \x03(\bR\x06exists\x12!\n" +
-	"\fcluster_size\x18\x02 \x01(\rR\vclusterSize\x12/\n" +
+	"\fcluster_size\x18\x02 \x01(\rR\vclusterSize\x12&\n" +
+	"\x0enodesAddresses\x18\x03 \x03(\tR\x0enodesAddresses\x12/\n" +
 	"\n" +
-	"error_code\x18\x03 \x01(\x0e2\x10.keydb.ErrorCodeR\terrorCode\"5\n" +
+	"error_code\x18\x04 \x01(\x0e2\x10.keydb.ErrorCodeR\terrorCode\"5\n" +
 	"\n" +
 	"PutRequest\x12'\n" +
-	"\x05items\x18\x01 \x03(\v2\x11.keydb.KeyWithTTLR\x05items\"{\n" +
+	"\x05items\x18\x01 \x03(\v2\x11.keydb.KeyWithTTLR\x05items\"\xa3\x01\n" +
 	"\vPutResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12!\n" +
-	"\fcluster_size\x18\x02 \x01(\rR\vclusterSize\x12/\n" +
+	"\fcluster_size\x18\x02 \x01(\rR\vclusterSize\x12&\n" +
+	"\x0enodesAddresses\x18\x03 \x03(\tR\x0enodesAddresses\x12/\n" +
 	"\n" +
-	"error_code\x18\x03 \x01(\x0e2\x10.keydb.ErrorCodeR\terrorCode\"?\n" +
+	"error_code\x18\x04 \x01(\x0e2\x10.keydb.ErrorCodeR\terrorCode\"?\n" +
 	"\n" +
 	"KeyWithTTL\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x1f\n" +
 	"\vttl_seconds\x18\x02 \x01(\x04R\n" +
 	"ttlSeconds\"-\n" +
 	"\x12GetNodeInfoRequest\x12\x17\n" +
-	"\anode_id\x18\x01 \x01(\rR\x06nodeId\"\xdb\x01\n" +
+	"\anode_id\x18\x01 \x01(\rR\x06nodeId\"\x83\x02\n" +
 	"\x13GetNodeInfoResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\rR\x06nodeId\x12!\n" +
-	"\fcluster_size\x18\x02 \x01(\rR\vclusterSize\x121\n" +
-	"\vhash_ranges\x18\x03 \x03(\v2\x10.keydb.HashRangeR\n" +
+	"\fcluster_size\x18\x02 \x01(\rR\vclusterSize\x12&\n" +
+	"\x0enodesAddresses\x18\x03 \x03(\tR\x0enodesAddresses\x121\n" +
+	"\vhash_ranges\x18\x04 \x03(\v2\x10.keydb.HashRangeR\n" +
 	"hashRanges\x12\x1d\n" +
 	"\n" +
-	"keys_count\x18\x04 \x01(\x04R\tkeysCount\x126\n" +
-	"\x17last_snapshot_timestamp\x18\x05 \x01(\x04R\x15lastSnapshotTimestamp\"N\n" +
+	"keys_count\x18\x05 \x01(\x04R\tkeysCount\x126\n" +
+	"\x17last_snapshot_timestamp\x18\x06 \x01(\x04R\x15lastSnapshotTimestamp\"N\n" +
 	"\tHashRange\x12\x19\n" +
 	"\brange_id\x18\x01 \x01(\rR\arangeId\x12\x14\n" +
 	"\x05start\x18\x02 \x01(\rR\x05start\x12\x10\n" +

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -15,7 +16,11 @@ import (
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 )
 
-// TODO lots of things can be done in parallel
+type errClusterSizeChanged struct {
+	nodesAddresses []string
+}
+
+func (e *errClusterSizeChanged) Error() string { return "cluster size changed" }
 
 // Config holds the configuration for a client
 type Config struct {
@@ -121,9 +126,6 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	defer c.mu.RUnlock()
 
 	// Group keys by node
-	// TODO the hashing can be done by a few routines that push into a channel, then a single routine reads from the ch
-	// and populates the slice. It might be overkilling for a few keys but we could do it for big batches if we see
-	// that the hashing takes time - TODO add metrics to measure latency of hashing and requests
 	keysByNode := make(map[uint32][]string)
 	for _, key := range keys {
 		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
@@ -134,12 +136,23 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	results := make(map[string]bool)
 	resultsMu := sync.Mutex{}
 
+	return c.get(ctx, keys, keysByNode, results, &resultsMu)
+}
+
+func (c *Client) get(
+	ctx context.Context, keys []string, keysByNode map[uint32][]string,
+	results map[string]bool, resultsMu *sync.Mutex,
+) (
+	[]bool, error,
+) {
 	group, ctx := kitsync.NewEagerGroup(ctx, len(keysByNode))
 	for nodeID, nodeKeys := range keysByNode {
 		group.Go(func() error {
 			// Get the client for this node
 			client, ok := c.clients[int(nodeID)]
 			if !ok {
+				// this should never happen unless clusterSize is updated and the c.clients map isn't
+				// or if there is a bug in the hashing function
 				return fmt.Errorf("no client for node %d", nodeID)
 			}
 
@@ -161,16 +174,7 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 				// TODO add some logging and metrics here
 
 				if c.clusterSize != resp.ClusterSize {
-					// TODO we need to update the cluster size in a race condition safe manner (beware that this method
-					// got a read lock so we might need to release that and acquire an actual lock and by the time we do
-					// acquire the write lock the cluster size might have been updated by someone else along with the
-					// connections so this needs to be taken into consideration as well).
-					// we also need to close the clients that are not needed if any (in case the cluster is smaller)
-					// or create new clients if the cluster is bigger.
-					// this needs to happen without duplicating code since multiple methods (e.g Get/Put...) need to do the
-					// same thing.
-					// it is also important that if we successfully got some data that we don't fetch it again but that
-					// we only fetch the ones that is missing.
+					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
 
 				// If this is the last retry, return the error
@@ -186,6 +190,10 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 				}
 			}
 
+			if c.clusterSize != resp.ClusterSize {
+				return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
+			}
+
 			// Store results
 			resultsMu.Lock()
 			for i, key := range nodeKeys {
@@ -193,24 +201,18 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 			}
 			resultsMu.Unlock()
 
-			if c.clusterSize != resp.ClusterSize {
-				// TODO we need to update the cluster size in a race condition safe manner (beware that this method
-				// got a read lock so we might need to release that and acquire an actual lock and by the time we do
-				// acquire the write lock the cluster size might have been updated by someone else along with the
-				// connections so this needs to be taken into consideration as well).
-				// we also need to close the clients that are not needed if any (in case the cluster is smaller)
-				// or create new clients if the cluster is bigger.
-				// this needs to happen without duplicating code since multiple methods (e.g Get/Put...) need to do the
-				// same thing.
-				// it is also important that if we successfully got some data that we don't fetch it again but that
-				// we only fetch the ones that is missing.
-			}
-
 			return nil
 		})
 	}
 
 	if err := group.Wait(); err != nil {
+		var clusterSizeErr *errClusterSizeChanged
+		if errors.As(err, &clusterSizeErr) {
+			if err = c.updateClusterSize(clusterSizeErr.nodesAddresses); err != nil {
+				return nil, fmt.Errorf("failed to update cluster size: %w", err)
+			}
+			return c.get(ctx, keys, keysByNode, results, resultsMu)
+		}
 		return nil, err
 	}
 
@@ -229,9 +231,6 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 	defer c.mu.RUnlock()
 
 	// Group items by node
-	// TODO the hashing can be done by a few routines that push into a channel, then a single routine reads from the ch
-	// and populates the slice. It might be overkilling for a few keys but we could do it for big batches if we see
-	// that the hashing takes time - TODO add metrics to measure latency of hashing and requests
 	itemsByNode := make(map[uint32][]*pb.KeyWithTTL)
 	for _, item := range items {
 		_, nodeID := hash.GetNodeNumber(item.Key, c.clusterSize, c.config.TotalHashRanges)
@@ -265,16 +264,40 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 				// TODO add some logging and metrics here
 
 				if c.clusterSize != resp.ClusterSize {
-					// TODO we need to update the cluster size in a race condition safe manner (beware that this method
-					// got a read lock so we might need to release that and acquire an actual lock and by the time we do
-					// acquire the write lock the cluster size might have been updated by someone else along with the
-					// connections so this needs to be taken into consideration as well).
-					// we also need to close the clients that are not needed if any (in case the cluster is smaller)
-					// or create new clients if the cluster is bigger.
-					// this needs to happen without duplicating code since multiple methods (e.g Get/Put...) need to do the
-					// same thing.
-					// it is also important that if we successfully got some data that we don't fetch it again but that
-					// we only fetch the ones that is missing.
+					// Extract keys from items for refetching calculation
+					keys := make([]string, len(nodeItems))
+					for j, item := range nodeItems {
+						keys[j] = item.Key
+					}
+
+					// Update cluster size and get keys that need to be fetched again
+					keysToFetch := c.updateClusterSize(resp.ClusterSize, keys)
+
+					// If we have keys that need to be fetched again, create a new request with only those items
+					if len(keysToFetch) > 0 {
+						// Create a map for quick lookup
+						keyMap := make(map[string]bool)
+						for _, key := range keysToFetch {
+							keyMap[key] = true
+						}
+
+						// Filter items that need to be fetched again
+						itemsToFetch := make([]*pb.KeyWithTTL, 0, len(keysToFetch))
+						for _, item := range nodeItems {
+							if keyMap[item.Key] {
+								itemsToFetch = append(itemsToFetch, item)
+							}
+						}
+
+						// Create a new request with only the items that need to be fetched again
+						req = &pb.PutRequest{Items: itemsToFetch}
+
+						// Reset the retry counter to give us a fresh set of retries for the new request
+						i = 0
+
+						// Continue to the next iteration to retry with the new request
+						continue
+					}
 				}
 
 				// If this is the last retry, return the error
@@ -291,16 +314,9 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 			}
 
 			if c.clusterSize != resp.ClusterSize {
-				// TODO we need to update the cluster size in a race condition safe manner (beware that this method
-				// got a read lock so we might need to release that and acquire an actual lock and by the time we do
-				// acquire the write lock the cluster size might have been updated by someone else along with the
-				// connections so this needs to be taken into consideration as well).
-				// we also need to close the clients that are not needed if any (in case the cluster is smaller)
-				// or create new clients if the cluster is bigger.
-				// this needs to happen without duplicating code since multiple methods (e.g Get/Put...) need to do the
-				// same thing.
-				// it is also important that if we successfully got some data that we don't fetch it again but that
-				// we only fetch the ones that is missing.
+				// We've already successfully processed all items for this node,
+				// so we just need to update the cluster size without refetching any keys
+				_ = c.updateClusterSize(resp.ClusterSize, nil)
 			}
 
 			return nil
@@ -429,6 +445,62 @@ func (c *Client) Scale(ctx context.Context, nodeID, newClusterSize uint32) (*pb.
 	}
 
 	return resp, nil
+}
+
+// updateClusterSize updates the cluster size in a race-condition safe manner.
+// It takes a new cluster size and the current keys being processed.
+// It returns a slice of keys that need to be fetched again.
+func (c *Client) updateClusterSize(nodesAddresses []string) error {
+	// Release read lock and acquire write lock
+	c.mu.RUnlock()
+	c.mu.Lock()
+	defer func() {
+		// Release write lock and reacquire read lock
+		c.mu.Unlock()
+		c.mu.RLock()
+	}()
+
+	newClusterSize := uint32(len(nodesAddresses))
+
+	// Check if cluster size has already been updated by someone else
+	if c.clusterSize == newClusterSize {
+		return nil // No need to update or refetch
+	}
+
+	oldClusterSize := c.clusterSize
+	c.clusterSize = newClusterSize
+
+	// If cluster is smaller, close connections that are not needed
+	if newClusterSize < oldClusterSize {
+		for i := int(newClusterSize); i < int(oldClusterSize); i++ {
+			if conn, ok := c.connections[i]; ok {
+				_ = conn.Close() // Ignore errors during close
+				delete(c.connections, i)
+				delete(c.clients, i)
+			}
+		}
+	} else { // we get here if newClusterSize > oldClusterSize
+		// The cluster is bigger, create new connections
+		// But we can only do this if we have addresses for the new nodes
+		for i := int(oldClusterSize); i < int(newClusterSize); i++ {
+			addr := nodesAddresses[i]
+			conn, err := grpc.NewClient(addr,
+				grpc.WithTransportCredentials(insecure.NewCredentials()),
+				grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+					var dialer net.Dialer
+					return dialer.DialContext(ctx, "tcp", addr)
+				}),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to connect to node %d at %s: %w", i, addr, err)
+			}
+
+			c.connections[i] = conn
+			c.clients[i] = pb.NewNodeServiceClient(conn)
+		}
+	}
+
+	return nil
 }
 
 // ScaleComplete notifies a node that the scaling operation is complete
