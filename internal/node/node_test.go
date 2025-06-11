@@ -197,6 +197,81 @@ func TestScaleUpAndDown(t *testing.T) {
 	node2.Close()
 }
 
+func TestGetAddressBroadcast(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	minioClient, cloudStorage := getCloudStorage(t, pool)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create the node service
+	now := time.Now()
+	totalHashRanges := uint32(3)
+	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	})
+	c := getClient(t, totalHashRanges, node1Address)
+
+	// Test Put
+	items := []*pb.KeyWithTTL{
+		{Key: "key1", TtlSeconds: testTTL},
+		{Key: "key2", TtlSeconds: testTTL},
+		{Key: "key3", TtlSeconds: testTTL},
+	}
+	require.NoError(t, c.Put(ctx, items))
+
+	keys := []string{"key1", "key2", "key3", "key4"}
+	exists, err := c.Get(ctx, keys)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true, true, false}, exists)
+
+	operator := getClient(t, totalHashRanges, node1Address)
+	require.NoError(t, operator.CreateSnapshot(ctx))
+
+	files, err := getContents(ctx, bucket, "", minioClient)
+	require.NoError(t, err)
+	require.Len(t, files, 3)
+	requireTTLInSnapshot(t, 0, 2, files[2], "key1", now)
+	requireTTLInSnapshot(t, 0, 1, files[1], "key2", now)
+	requireTTLInSnapshot(t, 0, 0, files[0], "key3", now)
+
+	node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
+		NodeID:           1,
+		ClusterSize:      2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		Addresses:        []string{node1Address},
+	})
+	require.NoError(t, operator.Scale(ctx, node1Address, node2Address))
+	require.NoError(t, operator.ScaleComplete(ctx))
+
+	require.Equal(t, 1, c.ClusterSize())
+	exists, err = c.Get(context.Background(), keys)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true, true, false}, exists)
+
+	// Scale down by removing node2. Then node1 should pick up all keys.
+	// WARNING: when scaling up you can only add nodes to the right e.g. clusterSize = 2, if you add a node then it will be node2
+	// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
+	require.NoError(t, operator.CreateSnapshot(ctx))
+	require.NoError(t, operator.Scale(ctx, node1Address))
+	require.NoError(t, operator.ScaleComplete(ctx))
+
+	exists, err = c.Get(ctx, keys)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true, true, false}, exists)
+
+	cancel()
+	node1.Close()
+	node2.Close()
+}
+
 func getCloudStorage(t testing.TB, pool *dockertest.Pool) (*minio.Client, cloudStorage) {
 	t.Helper()
 

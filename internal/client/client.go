@@ -2,10 +2,10 @@ package client
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -120,11 +120,29 @@ func (c *Client) Close() error {
 	return lastErr
 }
 
+func (c *Client) ClusterSize() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return int(c.clusterSize)
+}
+
 // Get retrieves values for multiple keys
 func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	// Create a map to store results
+	results := make(map[string]bool)
+	resultsMu := sync.Mutex{}
+
+	return c.get(ctx, keys, results, &resultsMu)
+}
+
+func (c *Client) get(
+	ctx context.Context, keys []string, results map[string]bool, resultsMu *sync.Mutex,
+) (
+	[]bool, error,
+) {
 	// Group keys by node
 	keysByNode := make(map[uint32][]string)
 	for _, key := range keys {
@@ -132,20 +150,13 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
-	// Create a map to store results
-	results := make(map[string]bool)
-	resultsMu := sync.Mutex{}
+	hasClusterSizeChanged := atomic.Value{}
 
-	return c.get(ctx, keys, keysByNode, results, &resultsMu)
-}
+	cancellableCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-func (c *Client) get(
-	ctx context.Context, keys []string, keysByNode map[uint32][]string,
-	results map[string]bool, resultsMu *sync.Mutex,
-) (
-	[]bool, error,
-) {
-	group, ctx := kitsync.NewEagerGroup(ctx, len(keysByNode))
+	group, gCtx := kitsync.NewEagerGroup(cancellableCtx, len(keysByNode))
+
 	for nodeID, nodeKeys := range keysByNode {
 		group.Go(func() error {
 			// Get the client for this node
@@ -153,6 +164,7 @@ func (c *Client) get(
 			if !ok {
 				// this should never happen unless clusterSize is updated and the c.clients map isn't
 				// or if there is a bug in the hashing function
+				cancel()
 				return fmt.Errorf("no client for node %d", nodeID)
 			}
 
@@ -164,7 +176,7 @@ func (c *Client) get(
 			var resp *pb.GetResponse
 
 			for i := 0; i <= c.config.RetryCount; i++ {
-				resp, err = client.Get(ctx, req)
+				resp, err = client.Get(gCtx, req)
 				if err == nil && resp != nil {
 					if resp.ErrorCode == pb.ErrorCode_NO_ERROR {
 						break // for internal errors, scaling or wrong code we retry
@@ -174,23 +186,28 @@ func (c *Client) get(
 				// TODO add some logging and metrics here
 
 				if c.clusterSize != resp.ClusterSize {
+					hasClusterSizeChanged.Store(resp.NodesAddresses)
+					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
 
 				// If this is the last retry, return the error
 				if i == c.config.RetryCount {
-					return fmt.Errorf("failed to get keys from node %d: %w", nodeID, err)
+					cancel()
+					return fmt.Errorf("failed to get keys from node %d: no retries left", nodeID)
 				}
 
 				// Wait before retrying
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-gCtx.Done():
+					return gCtx.Err()
 				case <-time.After(c.config.RetryDelay):
 				}
 			}
 
 			if c.clusterSize != resp.ClusterSize {
+				hasClusterSizeChanged.Store(resp.NodesAddresses)
+				cancel()
 				return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 			}
 
@@ -206,12 +223,12 @@ func (c *Client) get(
 	}
 
 	if err := group.Wait(); err != nil {
-		var clusterSizeErr *errClusterSizeChanged
-		if errors.As(err, &clusterSizeErr) {
-			if err = c.updateClusterSize(clusterSizeErr.nodesAddresses); err != nil {
+		nodesAddresses, ok := hasClusterSizeChanged.Load().([]string)
+		if ok && len(nodesAddresses) > 0 {
+			if err = c.updateClusterSize(nodesAddresses); err != nil {
 				return nil, fmt.Errorf("failed to update cluster size: %w", err)
 			}
-			return c.get(ctx, keys, keysByNode, results, resultsMu)
+			return c.get(ctx, keys, results, resultsMu)
 		}
 		return nil, err
 	}
@@ -230,6 +247,10 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	return c.put(ctx, items)
+}
+
+func (c *Client) put(ctx context.Context, items []*pb.KeyWithTTL) error {
 	// Group items by node
 	itemsByNode := make(map[uint32][]*pb.KeyWithTTL)
 	for _, item := range items {
@@ -237,14 +258,12 @@ func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
 		itemsByNode[nodeID] = append(itemsByNode[nodeID], item)
 	}
 
-	return c.put(ctx, items, itemsByNode)
-}
+	hasClusterSizeChanged := atomic.Value{}
 
-func (c *Client) put(
-	ctx context.Context, items []*pb.KeyWithTTL, itemsByNode map[uint32][]*pb.KeyWithTTL,
-) error {
-	// Send requests to each node in parallel
-	group, ctx := kitsync.NewEagerGroup(ctx, len(itemsByNode))
+	cancellableCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	group, gCtx := kitsync.NewEagerGroup(cancellableCtx, len(itemsByNode))
 	for nodeID, nodeItems := range itemsByNode {
 		group.Go(func() error {
 			// Get the client for this node
@@ -252,6 +271,7 @@ func (c *Client) put(
 			if !ok {
 				// this should never happen unless clusterSize is updated and the c.clients map isn't
 				// or if there is a bug in the hashing function
+				cancel()
 				return fmt.Errorf("no client for node %d", nodeID)
 			}
 
@@ -262,7 +282,7 @@ func (c *Client) put(
 			var err error
 			var resp *pb.PutResponse
 			for i := 0; i <= c.config.RetryCount; i++ {
-				resp, err = client.Put(ctx, req)
+				resp, err = client.Put(gCtx, req)
 				if err == nil && resp != nil {
 					if resp.Success && resp.ErrorCode == pb.ErrorCode_NO_ERROR {
 						break // for internal errors, scaling or wrong code we retry
@@ -272,23 +292,28 @@ func (c *Client) put(
 				// TODO add some logging and metrics here
 
 				if c.clusterSize != resp.ClusterSize {
+					hasClusterSizeChanged.Store(resp.NodesAddresses)
+					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
 
 				// If this is the last retry, return the error
 				if i == c.config.RetryCount {
-					return fmt.Errorf("failed to put items to node %d: %w", nodeID, err)
+					cancel()
+					return fmt.Errorf("failed to get keys from node %d: no retries left", nodeID)
 				}
 
 				// Wait before retrying
 				select {
-				case <-ctx.Done():
-					return ctx.Err()
+				case <-gCtx.Done():
+					return gCtx.Err()
 				case <-time.After(c.config.RetryDelay):
 				}
 			}
 
 			if c.clusterSize != resp.ClusterSize {
+				hasClusterSizeChanged.Store(resp.NodesAddresses)
+				cancel()
 				return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 			}
 
@@ -297,12 +322,12 @@ func (c *Client) put(
 	}
 
 	if err := group.Wait(); err != nil {
-		var clusterSizeErr *errClusterSizeChanged
-		if errors.As(err, &clusterSizeErr) {
-			if err = c.updateClusterSize(clusterSizeErr.nodesAddresses); err != nil {
+		nodesAddresses, ok := hasClusterSizeChanged.Load().([]string)
+		if ok && len(nodesAddresses) > 0 {
+			if err = c.updateClusterSize(nodesAddresses); err != nil {
 				return fmt.Errorf("failed to update cluster size: %w", err)
 			}
-			return c.put(ctx, items, itemsByNode)
+			return c.put(ctx, items)
 		}
 		return err
 	}
