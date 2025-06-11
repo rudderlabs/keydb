@@ -402,7 +402,7 @@ func (c *Client) CreateSnapshot(ctx context.Context) error {
 
 // Scale changes the number of nodes in the cluster
 // This method is meant to be used by an Operator process only!
-func (c *Client) Scale(ctx context.Context, addresses []string) error {
+func (c *Client) Scale(ctx context.Context, addresses ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -438,7 +438,7 @@ func (c *Client) Scale(ctx context.Context, addresses []string) error {
 			c.connections[i] = conn
 			c.clients[i] = pb.NewNodeServiceClient(conn)
 		}
-	} else {
+	} else if newClusterSize < c.clusterSize {
 		// Handle case when newClusterSize is smaller
 		// Close unnecessary connections
 		for i := int(newClusterSize); i < int(c.clusterSize); i++ {

@@ -88,7 +88,7 @@ type cloudStorage interface {
 }
 
 // NewService creates a new NodeService
-func NewService(ctx context.Context, config Config, storage cloudStorage, logger logger.Logger) (*Service, error) {
+func NewService(ctx context.Context, config Config, storage cloudStorage, log logger.Logger) (*Service, error) {
 	// Set defaults for unspecified config values
 	if config.TotalHashRanges == 0 {
 		config.TotalHashRanges = DefaultTotalHashRanges
@@ -103,7 +103,11 @@ func NewService(ctx context.Context, config Config, storage cloudStorage, logger
 		config:  config,
 		caches:  make(map[uint32]*cachettl.Cache[string, bool]),
 		storage: storage,
-		logger:  logger,
+		logger: log.Withn(
+			logger.NewIntField("nodeId", int64(config.NodeID)),
+			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
+			logger.NewIntField("snapshotInterval", int64(config.SnapshotInterval.Seconds())),
+		),
 	}
 
 	// Initialize caches for all hash ranges this node handles
@@ -152,9 +156,6 @@ func (s *Service) snapshotLoop(ctx context.Context) {
 
 // initCaches initializes the caches for all hash ranges this node handles
 func (s *Service) initCaches(ctx context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// Get hash ranges for this node
 	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
 
@@ -404,7 +405,11 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	log := s.logger.Withn(logger.NewIntField("newClusterSize", int64(req.NewClusterSize)))
+	log.Debugn("Scale request received")
+
 	if s.scaling {
+		log.Debugn("Scaling operation already in progress")
 		return &pb.ScaleResponse{ // TODO we could have auto-healing here easily by attempting the scaling anyway
 			Success:             false,
 			ErrorMessage:        "scaling operation already in progress",
@@ -415,6 +420,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	// Validate new cluster size
 	if req.NewClusterSize == 0 {
+		log.Debugn("New cluster size must be greater than 0")
 		return &pb.ScaleResponse{
 			Success:             false,
 			ErrorMessage:        "new cluster size must be greater than 0",
@@ -425,6 +431,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	// If the cluster size is not changing, do nothing
 	if req.NewClusterSize == s.config.ClusterSize {
+		log.Debugn("Cluster size is already set to the requested value")
 		return &pb.ScaleResponse{
 			Success:             true,
 			PreviousClusterSize: s.config.ClusterSize,
@@ -443,8 +450,8 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	// Reinitialize caches for the new cluster size
 	// TODO check this ctx, a client cancellation from the Operator client might leave the node in a unwanted state
-	if err := s.initCaches(ctx); err != nil {
-		// Revert to previous cluster size on error
+	if err := s.initCaches(ctx); err != nil { // Revert to previous cluster size on error
+		log.Errorn("Failed to initialize caches", obskit.Error(err))
 		s.config.ClusterSize = previousClusterSize
 		s.scaling = false
 		return &pb.ScaleResponse{
@@ -455,8 +462,10 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 		}, nil
 	}
 
-	// Note: We don't clear the scaling flag here.
+	// WARNING: We don't clear the scaling flag here.
 	// The scaling flag will be cleared when the ScaleComplete RPC is called.
+
+	log.Infon("Scale complete")
 
 	return &pb.ScaleResponse{
 		Success:             true,

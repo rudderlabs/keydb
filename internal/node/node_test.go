@@ -30,7 +30,11 @@ import (
 )
 
 const (
-	testTTL = 10
+	testTTL         = 10
+	accessKeyId     = "MYACCESSKEYID"
+	secretAccessKey = "MYSECRETACCESSKEY"
+	region          = "MYREGION"
+	bucket          = "bucket-name"
 )
 
 func TestNode(t *testing.T) {
@@ -38,38 +42,21 @@ func TestNode(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	var (
-		accessKeyId                = "MYACCESSKEYID"
-		secretAccessKey            = "MYSECRETACCESSKEY"
-		region                     = "MYREGION"
-		bucket                     = "bucket-name"
-		minioEndpoint, minioClient = createMinioResource(t, pool, accessKeyId, secretAccessKey, region, bucket)
-	)
-	conf := config.New(config.WithEnvPrefix("KEYDB"))
-	conf.Set("Storage.Bucket", bucket)
-	conf.Set("Storage.Endpoint", minioEndpoint)
-	conf.Set("Storage.AccessKeyId", accessKeyId)
-	conf.Set("Storage.AccessKey", secretAccessKey)
-	conf.Set("Storage.Region", region)
-	conf.Set("Storage.DisableSsl", true)
-	conf.Set("Storage.S3ForcePathStyle", true)
-	conf.Set("Storage.UseGlue", true)
+	minioClient, cloudStorage := getCloudStorage(t, pool)
 
-	cloudStorage, err := cloudstorage.GetCloudStorage(conf, logger.NOP)
-	require.NoError(t, err)
-
-	// Create the node service
-	nodeConfig := Config{
-		NodeID:           0,
-		ClusterSize:      1,
-		TotalHashRanges:  128,
-		SnapshotInterval: 60 * time.Second,
-	}
-
-	now := time.Now()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	service, c := getServiceAndClient(ctx, t, nodeConfig, cloudStorage, now)
+
+	// Create the node service
+	now := time.Now()
+	totalHashRanges := uint32(128)
+	service, serviceAddress := getService(ctx, t, cloudStorage, now, Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	})
+	c := getClient(t, totalHashRanges, serviceAddress)
 
 	// Test Put
 	items := []*pb.KeyWithTTL{
@@ -100,7 +87,13 @@ func TestNode(t *testing.T) {
 	// Let's start again from scratch to see if the data is properly loaded from the snapshots
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
-	service, c = getServiceAndClient(ctx, t, nodeConfig, cloudStorage, now)
+	service, serviceAddress = getService(ctx, t, cloudStorage, now, Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	})
+	c = getClient(t, totalHashRanges, serviceAddress)
 
 	exists, err = c.Get(ctx, keys)
 	require.NoError(t, err)
@@ -110,11 +103,91 @@ func TestNode(t *testing.T) {
 	service.Close()
 }
 
-func getServiceAndClient(
-	ctx context.Context, t testing.TB, nodeConfig Config, cs cloudStorage, now time.Time,
-) (
-	*Service, *client.Client,
-) {
+func TestScaleUp(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	minioClient, cloudStorage := getCloudStorage(t, pool)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create the node service
+	now := time.Now()
+	totalHashRanges := uint32(3)
+	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	})
+	c := getClient(t, totalHashRanges, node1Address)
+
+	// Test Put
+	items := []*pb.KeyWithTTL{
+		{Key: "key1", TtlSeconds: testTTL},
+		{Key: "key2", TtlSeconds: testTTL},
+		{Key: "key3", TtlSeconds: testTTL},
+	}
+	require.NoError(t, c.Put(ctx, items))
+
+	keys := []string{"key1", "key2", "key3", "key4"}
+	exists, err := c.Get(ctx, keys)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true, true, false}, exists)
+
+	operator := getClient(t, totalHashRanges, node1Address)
+	require.NoError(t, operator.CreateSnapshot(ctx))
+
+	files, err := getContents(ctx, bucket, "", minioClient)
+	require.NoError(t, err)
+	require.Len(t, files, 3)
+	requireTTLInSnapshot(t, 0, 2, files[2], "key1", now)
+	requireTTLInSnapshot(t, 0, 1, files[1], "key2", now)
+	requireTTLInSnapshot(t, 0, 0, files[0], "key3", now)
+
+	node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
+		NodeID:           1,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	})
+	require.NoError(t, operator.Scale(ctx, node1Address, node2Address))
+	require.NoError(t, operator.ScaleComplete(ctx))
+
+	resp, err := c.GetNodeInfo(ctx, 0)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, resp.ClusterSize)
+
+	cancel()
+	node1.Close()
+	node2.Close()
+}
+
+func getCloudStorage(t testing.TB, pool *dockertest.Pool) (*minio.Client, cloudStorage) {
+	t.Helper()
+
+	minioEndpoint, minioClient := createMinioResource(t, pool, accessKeyId, secretAccessKey, region, bucket)
+	conf := config.New(config.WithEnvPrefix("KEYDB"))
+	conf.Set("Storage.Bucket", bucket)
+	conf.Set("Storage.Endpoint", minioEndpoint)
+	conf.Set("Storage.AccessKeyId", accessKeyId)
+	conf.Set("Storage.AccessKey", secretAccessKey)
+	conf.Set("Storage.Region", region)
+	conf.Set("Storage.DisableSsl", true)
+	conf.Set("Storage.S3ForcePathStyle", true)
+	conf.Set("Storage.UseGlue", true)
+
+	cloudStorage, err := cloudstorage.GetCloudStorage(conf, logger.NOP)
+	require.NoError(t, err)
+
+	return minioClient, cloudStorage
+}
+
+func getService(ctx context.Context, t testing.TB, cs cloudStorage, now time.Time, nodeConfig Config) (*Service, string) {
+	t.Helper()
+
 	service, err := NewService(ctx, nodeConfig, cs, logger.NOP)
 	require.NoError(t, err)
 	service.now = func() time.Time { return now }
@@ -126,19 +199,27 @@ func getServiceAndClient(
 	// Create a bufconn listener
 	freePort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
-	port := strconv.Itoa(freePort)
-	lis, err := net.Listen("tcp", "localhost:"+port)
+	address := "localhost:" + strconv.Itoa(freePort)
+
+	lis, err := net.Listen("tcp", address)
 	require.NoError(t, err)
 
 	// Start the server
 	go func() {
 		require.NoError(t, server.Serve(lis))
 	}()
-	t.Cleanup(server.GracefulStop)
+	t.Cleanup(func() {
+		server.GracefulStop()
+		_ = lis.Close()
+	})
 
+	return service, address
+}
+
+func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *client.Client {
 	clientConfig := client.Config{
-		Addresses:       []string{"localhost:" + port},
-		TotalHashRanges: 128,
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
 		RetryCount:      3,
 		RetryDelay:      100 * time.Millisecond,
 	}
@@ -147,10 +228,11 @@ func getServiceAndClient(
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 
-	return service, c
+	return c
 }
 
 func requireTTLInSnapshot(t testing.TB, nodeNumber, hashRange int64, file File, key string, now time.Time) {
+	t.Helper()
 	expectedFilename := "node_" + strconv.FormatInt(nodeNumber, 10) + "_range_" + strconv.FormatInt(hashRange, 10) + ".snapshot"
 	require.Equal(t, expectedFilename, file.Key)
 	require.Contains(t, file.Content, key+":")
@@ -163,6 +245,7 @@ func createMinioResource(
 	t testing.TB,
 	pool *dockertest.Pool, accessKeyId, secretAccessKey, region, bucket string,
 ) (string, *minio.Client) {
+	t.Helper()
 	// running minio container on docker
 	minioResource, err := pool.RunWithOptions(&dockertest.RunOptions{
 		Repository: "minio/minio",
