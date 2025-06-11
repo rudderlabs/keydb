@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
-
 	"github.com/aws/aws-sdk-go/aws"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,6 +20,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
 const (
