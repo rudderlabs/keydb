@@ -1,132 +1,91 @@
 package hash
 
 import (
+	"math/rand"
+	"strconv"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	kitrand "github.com/rudderlabs/rudder-go-kit/testhelper/rand"
 )
 
-func TestGetNodeNumber(t *testing.T) {
-	tests := []struct {
-		name            string
+// testIterations controls how many times each test runs to ensure consistency
+const testIterations = 100
+
+// TestGetNodeNumberConsistency verifies that GetNodeNumber is deterministically consistent
+func TestGetNodeNumberConsistency(t *testing.T) {
+	// Test with various keys, node counts, and hash ranges
+	testCases := []struct {
 		key             string
 		numberOfNodes   uint32
 		totalHashRanges uint32
-		expected        uint32
 	}{
-		{
-			name:            "Single node",
-			key:             "test-key",
-			numberOfNodes:   1,
-			totalHashRanges: 128,
-			expected:        0,
-		},
-		{
-			name:            "Zero nodes (edge case)",
-			key:             "test-key",
-			numberOfNodes:   0,
-			totalHashRanges: 128,
-			expected:        0,
-		},
-		// TODO update GetNodeNumber that now returns the hashRange as well
-		//{
-		//	name:            "Multiple nodes",
-		//	key:             "test-key",
-		//	numberOfNodes:   3,
-		//	totalHashRanges: 128,
-		//	expected:        GetNodeNumber("test-key", 3, 128), // Deterministic check
-		//},
-		//{
-		//	name:            "Same key should always hash to same node",
-		//	key:             "consistent-key",
-		//	numberOfNodes:   5,
-		//	totalHashRanges: 128,
-		//	expected:        GetNodeNumber("consistent-key", 5, 128), // Deterministic check
-		//},
-		//{
-		//	name:            "Different keys can hash to different nodes",
-		//	key:             "key1",
-		//	numberOfNodes:   10,
-		//	totalHashRanges: 128,
-		//	expected:        GetNodeNumber("key1", 10, 128), // Deterministic check
-		//},
+		{"key1", 10, 128},
+		{"key2", 5, 128},
+		{"key3", 20, 256},
+		{"longerkeywithalotofcharacters", 15, 128},
+		{"", 10, 128},    // Empty key
+		{"key4", 1, 128}, // Single node
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, result := GetNodeNumber(tt.key, tt.numberOfNodes, tt.totalHashRanges)
-			if result != tt.expected {
-				t.Errorf("GetNodeNumber(%s, %d, %d) = %d, want %d",
-					tt.key, tt.numberOfNodes, tt.totalHashRanges, result, tt.expected)
-			}
+	for _, tc := range testCases {
+		t.Run(tc.key, func(t *testing.T) {
+			// Get initial result
+			initialHashRange, initialNodeID := GetNodeNumber(tc.key, tc.numberOfNodes, tc.totalHashRanges)
 
-			// Test determinism - calling again should yield same result
-			_, result2 := GetNodeNumber(tt.key, tt.numberOfNodes, tt.totalHashRanges)
-			if result != result2 {
-				t.Errorf("GetNodeNumber not deterministic: first call = %d, second call = %d",
-					result, result2)
+			// Run multiple iterations to verify consistency
+			for i := 0; i < testIterations; i++ {
+				hashRange, nodeID := GetNodeNumber(tc.key, tc.numberOfNodes, tc.totalHashRanges)
+
+				if hashRange != initialHashRange || nodeID != initialNodeID {
+					t.Errorf("Iteration %d: GetNodeNumber not consistent for key %q. Expected (%d, %d), got (%d, %d)",
+						i, tc.key, initialHashRange, initialNodeID, hashRange, nodeID)
+				}
 			}
 		})
 	}
 }
 
-func TestGetNodeHashRanges(t *testing.T) {
-	tests := []struct {
-		name            string
+// TestGetNodeHashRangesConsistency verifies that GetNodeHashRanges is deterministically consistent
+func TestGetNodeHashRangesConsistency(t *testing.T) {
+	// Test with various node IDs, node counts, and hash ranges
+	testCases := []struct {
 		nodeID          uint32
 		numberOfNodes   uint32
 		totalHashRanges uint32
-		expectedCount   int
 	}{
-		{
-			name:            "Single node gets all ranges",
-			nodeID:          0,
-			numberOfNodes:   1,
-			totalHashRanges: 128,
-			expectedCount:   128,
-		},
-		{
-			name:            "Invalid node ID",
-			nodeID:          5,
-			numberOfNodes:   3,
-			totalHashRanges: 128,
-			expectedCount:   0, // Should return nil
-		},
-		{
-			name:            "Zero nodes (edge case)",
-			nodeID:          0,
-			numberOfNodes:   0,
-			totalHashRanges: 128,
-			expectedCount:   0, // Should return nil
-		},
-		{
-			name:            "Even distribution with 2 nodes",
-			nodeID:          0,
-			numberOfNodes:   2,
-			totalHashRanges: 128,
-			expectedCount:   64, // Should get half the ranges
-		},
-		{
-			name:            "Even distribution with 4 nodes",
-			nodeID:          2,
-			numberOfNodes:   4,
-			totalHashRanges: 128,
-			expectedCount:   32, // Should get quarter of the ranges
-		},
+		{0, 10, 128},
+		{4, 5, 128},
+		{10, 20, 256},
+		{0, 1, 128}, // Single node
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ranges := GetNodeHashRanges(tt.nodeID, tt.numberOfNodes, tt.totalHashRanges)
+	for _, tc := range testCases {
+		testName := "nodeID=" + strconv.Itoa(int(tc.nodeID)) +
+			"_nodes=" + strconv.Itoa(int(tc.numberOfNodes)) +
+			"_ranges=" + strconv.Itoa(int(tc.totalHashRanges))
+		t.Run(testName, func(t *testing.T) {
+			// Get initial result
+			initialRanges := GetNodeHashRanges(tc.nodeID, tc.numberOfNodes, tc.totalHashRanges)
 
-			if len(ranges) != tt.expectedCount {
-				t.Errorf("GetNodeHashRanges(%d, %d, %d) returned %d ranges, want %d",
-					tt.nodeID, tt.numberOfNodes, tt.totalHashRanges, len(ranges), tt.expectedCount)
-			}
+			// Run multiple iterations to verify consistency
+			for i := 0; i < testIterations; i++ {
+				ranges := GetNodeHashRanges(tc.nodeID, tc.numberOfNodes, tc.totalHashRanges)
 
-			// Verify each range is assigned to this node
-			if len(ranges) > 0 {
-				for r := range ranges {
-					if r%tt.numberOfNodes != tt.nodeID {
-						t.Errorf("Range %d incorrectly assigned to node %d", r, tt.nodeID)
+				// Check that the maps have the same size
+				if len(ranges) != len(initialRanges) {
+					t.Errorf("Iteration %d: GetNodeHashRanges not consistent. Expected %d ranges, got %d ranges",
+						i, len(initialRanges), len(ranges))
+					continue
+				}
+
+				// Check that all keys in initialRanges are in ranges
+				for hashRange := range initialRanges {
+					if _, exists := ranges[hashRange]; !exists {
+						t.Errorf("Iteration %d: GetNodeHashRanges not consistent. Hash range %d missing",
+							i, hashRange)
 					}
 				}
 			}
@@ -134,82 +93,64 @@ func TestGetNodeHashRanges(t *testing.T) {
 	}
 }
 
-func TestGetHashRangeForKey(t *testing.T) {
-	tests := []struct {
-		name            string
-		key             string
-		totalHashRanges uint32
-	}{
-		{
-			name:            "Standard case",
-			key:             "test-key",
-			totalHashRanges: 128,
-		},
-		{
-			name:            "Empty key",
-			key:             "",
-			totalHashRanges: 128,
-		},
-		{
-			name:            "Single hash range",
-			key:             "test-key",
-			totalHashRanges: 1,
-		},
+// TestHashRangeInNodeHashRanges verifies that for random keys, the hashRange from GetNodeNumber
+// is always present in the map returned by GetNodeHashRanges for the same nodeID
+func TestHashRangeInNodeHashRanges(t *testing.T) {
+	// Number of random keys to test
+	const numRandomKeys = 10
+	const numOfRandomNodeIDs = 10
+
+	// Initialize random number generator
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+	randomNodeIDs := make([]uint32, 0, numOfRandomNodeIDs)
+	for i := 0; i < numOfRandomNodeIDs; i++ {
+		randomNodeIDs = append(randomNodeIDs, uint32(i))
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := GetHashRangeForKey(tt.key, tt.totalHashRanges)
+	// Test with different random nodeIDs
+	for _, nodeID := range randomNodeIDs {
+		// we add the nodeID to make sure the nodeID is always <= clusterSize
+		numberOfNodes := uint32(rnd.Intn(20) + int(nodeID) + 1)
+		// we add the numberOfNodes to make sure that totalHashRanges is always >= clusterSize
+		totalHashRanges := uint32(rnd.Intn(128) + int(numberOfNodes) + 1)
 
-			// Check range is valid
-			if result >= tt.totalHashRanges {
-				t.Errorf("GetHashRangeForKey(%s, %d) = %d, which is outside valid range [0,%d)",
-					tt.key, tt.totalHashRanges, result, tt.totalHashRanges)
-			}
+		testName := "nodeID=" + strconv.Itoa(int(nodeID)) +
+			"_nodes=" + strconv.Itoa(int(numberOfNodes)) +
+			"_ranges=" + strconv.Itoa(int(totalHashRanges))
+		t.Run(testName, func(t *testing.T) {
+			for i := 0; i < testIterations; i++ {
+				// Get hash ranges for this node
+				nodeHashRanges := GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges)
+				hashResultsForNodeID := getKeysForNodeID(numRandomKeys, nodeID, numberOfNodes, totalHashRanges)
 
-			// Test determinism
-			result2 := GetHashRangeForKey(tt.key, tt.totalHashRanges)
-			if result != result2 {
-				t.Errorf("GetHashRangeForKey not deterministic: first call = %d, second call = %d",
-					result, result2)
+				// Run multiple iterations to verify consistency
+				for _, hres := range hashResultsForNodeID {
+					if _, exists := nodeHashRanges[hres.hashRange]; !exists {
+						t.Fatalf("Hash range %d missing for nodeID %d", hres.hashRange, nodeID)
+					}
+					hr, nid := GetNodeNumber(hres.key, numberOfNodes, totalHashRanges)
+					require.Equalf(t, nodeID, nid, "NodeID mismatch for key %q", hres.key)
+					require.Equalf(t, hres.hashRange, hr, "HashRange mismatch for key %q", hres.key)
+				}
 			}
 		})
 	}
 }
 
-func TestConsistencyBetweenFunctions(t *testing.T) {
-	key := "test-key"
-	totalHashRanges := uint32(128)
-	numberOfNodes := uint32(3)
+type hashResult struct {
+	key       string
+	hashRange uint32
+	nodeID    uint32
+}
 
-	// Get the hash range for the key
-	hashRange := GetHashRangeForKey(key, totalHashRanges)
-
-	// Get the node for the key
-	_, node := GetNodeNumber(key, numberOfNodes, totalHashRanges)
-
-	// The node should be the hash range modulo number of nodes
-	expectedNode := hashRange % numberOfNodes
-
-	if node != expectedNode {
-		t.Errorf("Inconsistency: GetNodeNumber(%s, %d, %d) = %d, but expected %d (hashRange %% numberOfNodes)",
-			key, numberOfNodes, totalHashRanges, node, expectedNode)
-	}
-
-	// Get all hash ranges for the node
-	nodeRanges := GetNodeHashRanges(node, numberOfNodes, totalHashRanges)
-
-	// The hash range should be in the node's ranges
-	found := false
-	for r := range nodeRanges {
-		if r == hashRange {
-			found = true
-			break
+func getKeysForNodeID(noOfKeys int, nodeID, numberOfNodes, totalHashRanges uint32) []hashResult {
+	keys := make([]hashResult, 0, noOfKeys)
+	for len(keys) < noOfKeys {
+		key := kitrand.String(20)
+		hr, nn := GetNodeNumber(key, numberOfNodes, totalHashRanges)
+		if nn == nodeID {
+			keys = append(keys, hashResult{key, hr, nn})
 		}
 	}
-
-	if !found {
-		t.Errorf("Inconsistency: Hash range %d for key %s should be handled by node %d, but it's not in the node's ranges",
-			hashRange, key, node)
-	}
+	return keys
 }

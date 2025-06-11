@@ -454,7 +454,10 @@ func (c *Client) Scale(ctx context.Context, addresses ...string) error {
 	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
 	for nodeID, client := range c.clients {
 		group.Go(func() error {
-			req := &pb.ScaleRequest{NewClusterSize: newClusterSize}
+			req := &pb.ScaleRequest{
+				NewClusterSize: newClusterSize,
+				NodesAddresses: addresses,
+			}
 
 			var err error
 			var resp *pb.ScaleResponse

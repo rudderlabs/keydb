@@ -1,6 +1,8 @@
 package hash
 
 import (
+	"hash/crc32"
+	"hash/fnv"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +17,7 @@ func BenchmarkHashing(b *testing.B) {
 	}
 }
 
-func TestMeasureLatency(t *testing.T) {
+func TestSequentialVsParallel(t *testing.T) {
 	noOfKeys := 10_000
 	keys := make([]string, 0, noOfKeys)
 	for range noOfKeys {
@@ -70,4 +72,29 @@ func TestMeasureLatency(t *testing.T) {
 			keysByNode[kv.nodeID] = append(keysByNode[kv.nodeID], kv.key)
 		}
 	})
+}
+
+func BenchmarkHashingFnv(b *testing.B) {
+	b.Run("fnv", func(b *testing.B) {
+		key := uuid.New().String()
+		for i := 0; i < b.N; i++ {
+			fnvTest(key)
+		}
+	})
+	b.Run("crc32", func(b *testing.B) {
+		key := uuid.New().String()
+		for i := 0; i < b.N; i++ {
+			crc32Test(key)
+		}
+	})
+}
+
+func fnvTest(key string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return h.Sum32()
+}
+
+func crc32Test(key string) uint32 {
+	return crc32.ChecksumIEEE([]byte(key))
 }

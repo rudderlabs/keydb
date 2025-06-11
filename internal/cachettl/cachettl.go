@@ -59,6 +59,21 @@ func (c *Cache[K, V]) Len() int {
 	return len(c.m)
 }
 
+func (c *Cache[K, V]) String() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	sb := strings.Builder{}
+	sb.WriteString("{")
+	for n := c.root.next; n != nil && n != c.root; n = n.next {
+		sb.WriteString(fmt.Sprintf("%v:%v", n.key, n.value))
+		if n.next != nil && n.next != c.root {
+			sb.WriteString(",")
+		}
+	}
+	sb.WriteString("}")
+	return sb.String()
+}
+
 // Get returns the value associated with the key or nil otherwise.
 // Additionally, Get() will refresh the TTL by default and cleanup expired nodes.
 func (c *Cache[K, V]) Get(key K) (zero V) {

@@ -16,7 +16,10 @@ import (
 // - The node number (0-based) that should handle this key
 func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, uint32) {
 	if numberOfNodes == 0 {
-		return 0, 0
+		panic("numberOfNodes must be greater than 0")
+	}
+	if totalHashRanges < numberOfNodes {
+		panic("totalHashRanges must be greater than or equal to numberOfNodes")
 	}
 
 	// Calculate the hash of the key
@@ -42,8 +45,14 @@ func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, u
 // Returns:
 // - A slice of hash ranges that this node should handle
 func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) map[uint32]struct{} {
-	if numberOfNodes == 0 || nodeID >= numberOfNodes {
-		return nil
+	if numberOfNodes == 0 {
+		panic("numberOfNodes must be greater than 0")
+	}
+	if totalHashRanges < numberOfNodes {
+		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	}
+	if nodeID >= numberOfNodes {
+		panic("nodeID must be less than numberOfNodes")
 	}
 	ranges := make(map[uint32]struct{})
 	for i := uint32(0); i < totalHashRanges; i++ {
@@ -52,19 +61,4 @@ func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) map[uint32
 		}
 	}
 	return ranges
-}
-
-// GetHashRangeForKey returns the hash range ID for a given key
-//
-// Parameters:
-// - key: The key to hash
-// - totalHashRanges: The total number of hash ranges (default 128)
-//
-// Returns:
-// - The hash range ID for this key
-func GetHashRangeForKey(key string, totalHashRanges uint32) uint32 {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	hashValue := h.Sum32()
-	return hashValue % totalHashRanges
 }

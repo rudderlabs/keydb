@@ -45,6 +45,9 @@ type Config struct {
 
 	// SnapshotInterval is the interval for creating snapshots (in seconds)
 	SnapshotInterval time.Duration
+
+	// Addresses is a list of node addresses that this node will advertise to clients
+	Addresses []string
 }
 
 // Service implements the NodeService gRPC service
@@ -198,17 +201,17 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.scaling {
-		return &pb.GetResponse{
-			ErrorCode:   pb.ErrorCode_SCALING,
-			ClusterSize: s.config.ClusterSize,
-		}, nil
+	response := &pb.GetResponse{
+		ClusterSize:    s.config.ClusterSize,
+		NodesAddresses: s.config.Addresses,
 	}
 
-	response := &pb.GetResponse{
-		Exists:      make([]bool, len(req.Keys)),
-		ClusterSize: s.config.ClusterSize,
+	if s.scaling {
+		response.ErrorCode = pb.ErrorCode_SCALING
+		return response, nil
 	}
+
+	response.Exists = make([]bool, len(req.Keys))
 
 	for i, key := range req.Keys {
 		// Determine which node should handle this key
@@ -241,12 +244,15 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	resp := &pb.PutResponse{
+		Success:        false,
+		ClusterSize:    s.config.ClusterSize,
+		NodesAddresses: s.config.Addresses,
+	}
+
 	if s.scaling {
-		return &pb.PutResponse{
-			Success:     false,
-			ErrorCode:   pb.ErrorCode_SCALING,
-			ClusterSize: s.config.ClusterSize,
-		}, nil
+		resp.ErrorCode = pb.ErrorCode_SCALING
+		return resp, nil
 	}
 
 	for _, item := range req.Items {
@@ -255,22 +261,16 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 
 		// Check if this node should handle this key
 		if nodeID != s.config.NodeID {
-			return &pb.PutResponse{
-				Success:     false,
-				ErrorCode:   pb.ErrorCode_WRONG_NODE,
-				ClusterSize: s.config.ClusterSize,
-			}, nil
+			resp.ErrorCode = pb.ErrorCode_WRONG_NODE
+			return resp, nil
 		}
 
 		// Get the cache for this hash range
 		cache, exists := s.caches[hashRange]
 		if !exists {
 			// This should not happen if our hash functions are correct
-			return &pb.PutResponse{
-				Success:     false,
-				ErrorCode:   pb.ErrorCode_INTERNAL_ERROR,
-				ClusterSize: s.config.ClusterSize,
-			}, nil
+			resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
+			return resp, nil
 		}
 
 		// Store the key in the cache with the specified TTL
@@ -278,10 +278,8 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		cache.Put(item.Key, true, ttl)
 	}
 
-	return &pb.PutResponse{
-		Success:     true,
-		ClusterSize: s.config.ClusterSize,
-	}, nil
+	resp.Success = true
+	return resp, nil
 }
 
 // GetNodeInfo implements the GetNodeInfo RPC method
@@ -317,6 +315,7 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 	return &pb.GetNodeInfoResponse{
 		NodeId:                s.config.NodeID,
 		ClusterSize:           s.config.ClusterSize,
+		NodesAddresses:        s.config.Addresses,
 		HashRanges:            hashRanges,
 		KeysCount:             keysCount,
 		LastSnapshotTimestamp: uint64(s.lastSnapshotTime.Unix()),
@@ -380,7 +379,7 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 // createSnapshot creates a snapshot for a specific hash range
 func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache *cachettl.Cache[string, bool]) error {
 	// Create snapshot file
-	filename := getSnapshotFilename(s.config.NodeID, hashRange)
+	filename := getSnapshotFilename(hashRange)
 
 	buf := new(bytes.Buffer)
 	err := cachettl.CreateSnapshot(buf, cache)
@@ -447,6 +446,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	// Update cluster size
 	s.config.ClusterSize = req.NewClusterSize
+	s.config.Addresses = req.NodesAddresses
 
 	// Reinitialize caches for the new cluster size
 	// TODO check this ctx, a client cancellation from the Operator client might leave the node in a unwanted state
@@ -475,12 +475,11 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 }
 
 // ScaleComplete implements the ScaleComplete RPC method
-func (s *Service) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
+func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// No need to check the s.scaling value, let's be optimistic and go ahead here for auto-healing purposes
-
 	s.scaling = false
 
 	return &pb.ScaleCompleteResponse{Success: true}, nil
@@ -488,7 +487,7 @@ func (s *Service) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteReques
 
 // loadSnapshot loads a snapshot for a specific hash range
 func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache *cachettl.Cache[string, bool]) error {
-	filename := getSnapshotFilename(s.config.NodeID, hashRange)
+	filename := getSnapshotFilename(hashRange)
 
 	buf := aws.NewWriteAtBuffer([]byte{})
 	err := s.storage.Download(ctx, buf, filename)
@@ -500,6 +499,6 @@ func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache *cac
 	return cachettl.LoadSnapshot(reader, cache)
 }
 
-func getSnapshotFilename(nodeID, hashRange uint32) string {
-	return "node_" + strconv.Itoa(int(nodeID)) + "_range_" + strconv.Itoa(int(hashRange)) + ".snapshot"
+func getSnapshotFilename(hashRange uint32) string {
+	return "range_" + strconv.Itoa(int(hashRange)) + ".snapshot"
 }

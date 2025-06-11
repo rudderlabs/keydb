@@ -103,7 +103,7 @@ func TestNode(t *testing.T) {
 	service.Close()
 }
 
-func TestScaleUp(t *testing.T) {
+func TestScaleUpAndDown(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
@@ -149,16 +149,48 @@ func TestScaleUp(t *testing.T) {
 
 	node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           1,
-		ClusterSize:      1,
+		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
+		Addresses:        []string{node1Address},
 	})
 	require.NoError(t, operator.Scale(ctx, node1Address, node2Address))
 	require.NoError(t, operator.ScaleComplete(ctx))
 
-	resp, err := c.GetNodeInfo(ctx, 0)
+	respNode1, err := c.GetNodeInfo(ctx, 0)
 	require.NoError(t, err)
-	require.EqualValues(t, 2, resp.ClusterSize)
+	require.EqualValues(t, 2, respNode1.ClusterSize)
+	require.Len(t, respNode1.HashRanges, 2)
+	require.EqualValues(t, 2, respNode1.KeysCount)
+	require.Equal(t, `{key3:true}`, node1.caches[0].String())
+	require.Equal(t, `{key1:true}`, node1.caches[2].String())
+
+	respNode2, err := c.GetNodeInfo(ctx, 1)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, respNode2.ClusterSize)
+	require.Len(t, respNode2.HashRanges, 1)
+	require.EqualValues(t, 1, respNode2.KeysCount)
+	require.Equal(t, `{key2:true}`, node2.caches[1].String())
+
+	exists, err = c.Get(ctx, keys)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true, true, false}, exists)
+
+	// Scale down by removing node2. Then node1 should pick up all keys.
+	// WARNING: when scaling up you can only add nodes to the right e.g. clusterSize = 2, if you add a node then it will be node2
+	// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
+	require.NoError(t, operator.CreateSnapshot(ctx))
+	require.NoError(t, operator.Scale(ctx, node1Address))
+	require.NoError(t, operator.ScaleComplete(ctx))
+
+	respNode1, err = c.GetNodeInfo(ctx, 0)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, respNode1.ClusterSize)
+	require.Len(t, respNode1.HashRanges, 3)
+	require.EqualValues(t, 3, respNode1.KeysCount)
+	require.Equal(t, `{key3:true}`, node1.caches[0].String())
+	require.Equal(t, `{key2:true}`, node1.caches[1].String())
+	require.Equal(t, `{key1:true}`, node1.caches[2].String())
 
 	cancel()
 	node1.Close()
@@ -188,6 +220,11 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool) (*minio.Client, cloudS
 func getService(ctx context.Context, t testing.TB, cs cloudStorage, now time.Time, nodeConfig Config) (*Service, string) {
 	t.Helper()
 
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	address := "localhost:" + strconv.Itoa(freePort)
+	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
+
 	service, err := NewService(ctx, nodeConfig, cs, logger.NOP)
 	require.NoError(t, err)
 	service.now = func() time.Time { return now }
@@ -195,11 +232,6 @@ func getService(ctx context.Context, t testing.TB, cs cloudStorage, now time.Tim
 	// Create a gRPC server
 	server := grpc.NewServer()
 	pb.RegisterNodeServiceServer(server, service)
-
-	// Create a bufconn listener
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-	address := "localhost:" + strconv.Itoa(freePort)
 
 	lis, err := net.Listen("tcp", address)
 	require.NoError(t, err)
@@ -233,7 +265,7 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 
 func requireTTLInSnapshot(t testing.TB, nodeNumber, hashRange int64, file File, key string, now time.Time) {
 	t.Helper()
-	expectedFilename := "node_" + strconv.FormatInt(nodeNumber, 10) + "_range_" + strconv.FormatInt(hashRange, 10) + ".snapshot"
+	expectedFilename := "range_" + strconv.FormatInt(hashRange, 10) + ".snapshot"
 	require.Equal(t, expectedFilename, file.Key)
 	require.Contains(t, file.Content, key+":")
 	ttl, err := strconv.ParseFloat(strings.Split(file.Content[0:len(file.Content)-1], ":")[1], 64)

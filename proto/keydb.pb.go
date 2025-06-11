@@ -650,6 +650,9 @@ func (x *CreateSnapshotResponse) GetNodeId() uint32 {
 type ScaleRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	NewClusterSize uint32                 `protobuf:"varint,1,opt,name=new_cluster_size,json=newClusterSize,proto3" json:"new_cluster_size,omitempty"` // New number of nodes in the cluster
+	// When the cluster_size changes the operator can use this field to tell all nodes which addresses are to be broadcast
+	// to clients
+	NodesAddresses []string `protobuf:"bytes,2,rep,name=nodesAddresses,proto3" json:"nodesAddresses,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -689,6 +692,13 @@ func (x *ScaleRequest) GetNewClusterSize() uint32 {
 		return x.NewClusterSize
 	}
 	return 0
+}
+
+func (x *ScaleRequest) GetNodesAddresses() []string {
+	if x != nil {
+		return x.NodesAddresses
+	}
+	return nil
 }
 
 // ScaleResponse contains the result of the scaling operation
@@ -887,9 +897,10 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\x16CreateSnapshotResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x17\n" +
-	"\anode_id\x18\x03 \x01(\rR\x06nodeId\"8\n" +
+	"\anode_id\x18\x03 \x01(\rR\x06nodeId\"`\n" +
 	"\fScaleRequest\x12(\n" +
-	"\x10new_cluster_size\x18\x01 \x01(\rR\x0enewClusterSize\"\xac\x01\n" +
+	"\x10new_cluster_size\x18\x01 \x01(\rR\x0enewClusterSize\x12&\n" +
+	"\x0enodesAddresses\x18\x02 \x03(\tR\x0enodesAddresses\"\xac\x01\n" +
 	"\rScaleResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x122\n" +
 	"\x15previous_cluster_size\x18\x02 \x01(\rR\x13previousClusterSize\x12(\n" +
