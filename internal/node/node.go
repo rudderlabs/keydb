@@ -323,6 +323,10 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 }
 
 // CreateSnapshot implements the CreateSnapshot RPC method
+// TODO this can be optimized a lot! For example we could snapshot on local disk every 10s and work only on the head
+// and tail of the file (i.e. remove expired from head and append new entries).
+// Then once a minute we can upload the whole file to S3.
+// The file that we upload could be compressed, for example using zstd with dictionaries.
 func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequest) (*pb.CreateSnapshotResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
