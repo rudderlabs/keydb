@@ -37,7 +37,9 @@ const (
 	bucket          = "bucket-name"
 )
 
-func TestNode(t *testing.T) {
+func TestSimple(t *testing.T) {
+	t.Parallel()
+
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
@@ -50,13 +52,13 @@ func TestNode(t *testing.T) {
 	// Create the node service
 	now := time.Now()
 	totalHashRanges := uint32(128)
-	service, serviceAddress := getService(ctx, t, cloudStorage, now, Config{
+	node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           0,
 		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	})
-	c := getClient(t, totalHashRanges, serviceAddress)
+	c := getClient(t, totalHashRanges, node0Address)
 
 	// Test Put
 	items := []*pb.KeyWithTTL{
@@ -82,28 +84,30 @@ func TestNode(t *testing.T) {
 	requireTTLInSnapshot(t, 0, 13, files[2], "key3", now)
 
 	cancel()
-	service.Close()
+	node0.Close()
 
 	// Let's start again from scratch to see if the data is properly loaded from the snapshots
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
-	service, serviceAddress = getService(ctx, t, cloudStorage, now, Config{
+	node0, node0Address = getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           0,
 		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	})
-	c = getClient(t, totalHashRanges, serviceAddress)
+	c = getClient(t, totalHashRanges, node0Address)
 
 	exists, err = c.Get(ctx, keys)
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, true, true, false}, exists)
 
 	cancel()
-	service.Close()
+	node0.Close()
 }
 
 func TestScaleUpAndDown(t *testing.T) {
+	t.Parallel()
+
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
@@ -116,13 +120,13 @@ func TestScaleUpAndDown(t *testing.T) {
 	// Create the node service
 	now := time.Now()
 	totalHashRanges := uint32(3)
-	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
+	node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           0,
 		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	})
-	c := getClient(t, totalHashRanges, node1Address)
+	c := getClient(t, totalHashRanges, node0Address)
 
 	// Test Put
 	items := []*pb.KeyWithTTL{
@@ -137,7 +141,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, true, true, false}, exists)
 
-	operator := getClient(t, totalHashRanges, node1Address)
+	operator := getClient(t, totalHashRanges, node0Address)
 	require.NoError(t, operator.CreateSnapshot(ctx))
 
 	files, err := getContents(ctx, bucket, "", minioClient)
@@ -147,57 +151,59 @@ func TestScaleUpAndDown(t *testing.T) {
 	requireTTLInSnapshot(t, 0, 1, files[1], "key2", now)
 	requireTTLInSnapshot(t, 0, 0, files[0], "key3", now)
 
-	node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
+	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           1,
 		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node1Address},
+		Addresses:        []string{node0Address},
 	})
-	require.NoError(t, operator.Scale(ctx, node1Address, node2Address))
+	require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
 	require.NoError(t, operator.ScaleComplete(ctx))
 
-	respNode1, err := c.GetNodeInfo(ctx, 0)
+	respNode0, err := c.GetNodeInfo(ctx, 0)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, respNode0.ClusterSize)
+	require.Len(t, respNode0.HashRanges, 2)
+	require.EqualValues(t, 2, respNode0.KeysCount)
+	require.Equal(t, `{key3:true}`, node0.caches[0].String())
+	require.Equal(t, `{key1:true}`, node0.caches[2].String())
+
+	respNode1, err := c.GetNodeInfo(ctx, 1)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, respNode1.ClusterSize)
-	require.Len(t, respNode1.HashRanges, 2)
-	require.EqualValues(t, 2, respNode1.KeysCount)
-	require.Equal(t, `{key3:true}`, node1.caches[0].String())
-	require.Equal(t, `{key1:true}`, node1.caches[2].String())
-
-	respNode2, err := c.GetNodeInfo(ctx, 1)
-	require.NoError(t, err)
-	require.EqualValues(t, 2, respNode2.ClusterSize)
-	require.Len(t, respNode2.HashRanges, 1)
-	require.EqualValues(t, 1, respNode2.KeysCount)
-	require.Equal(t, `{key2:true}`, node2.caches[1].String())
+	require.Len(t, respNode1.HashRanges, 1)
+	require.EqualValues(t, 1, respNode1.KeysCount)
+	require.Equal(t, `{key2:true}`, node1.caches[1].String())
 
 	exists, err = c.Get(ctx, keys)
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, true, true, false}, exists)
 
-	// Scale down by removing node2. Then node1 should pick up all keys.
-	// WARNING: when scaling up you can only add nodes to the right e.g. clusterSize = 2, if you add a node then it will be node2
+	// Scale down by removing node1. Then node0 should pick up all keys.
+	// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
 	// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
 	require.NoError(t, operator.CreateSnapshot(ctx))
-	require.NoError(t, operator.Scale(ctx, node1Address))
+	require.NoError(t, operator.Scale(ctx, node0Address))
 	require.NoError(t, operator.ScaleComplete(ctx))
 
-	respNode1, err = c.GetNodeInfo(ctx, 0)
+	respNode0, err = c.GetNodeInfo(ctx, 0)
 	require.NoError(t, err)
-	require.EqualValues(t, 1, respNode1.ClusterSize)
-	require.Len(t, respNode1.HashRanges, 3)
-	require.EqualValues(t, 3, respNode1.KeysCount)
-	require.Equal(t, `{key3:true}`, node1.caches[0].String())
-	require.Equal(t, `{key2:true}`, node1.caches[1].String())
-	require.Equal(t, `{key1:true}`, node1.caches[2].String())
+	require.EqualValues(t, 1, respNode0.ClusterSize)
+	require.Len(t, respNode0.HashRanges, 3)
+	require.EqualValues(t, 3, respNode0.KeysCount)
+	require.Equal(t, `{key3:true}`, node0.caches[0].String())
+	require.Equal(t, `{key2:true}`, node0.caches[1].String())
+	require.Equal(t, `{key1:true}`, node0.caches[2].String())
 
 	cancel()
+	node0.Close()
 	node1.Close()
-	node2.Close()
 }
 
-func TestGetAddressBroadcast(t *testing.T) {
+func TestGetPutAddressBroadcast(t *testing.T) {
+	t.Parallel()
+
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
@@ -210,13 +216,13 @@ func TestGetAddressBroadcast(t *testing.T) {
 	// Create the node service
 	now := time.Now()
 	totalHashRanges := uint32(3)
-	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
+	node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           0,
 		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	})
-	c := getClient(t, totalHashRanges, node1Address)
+	c := getClient(t, totalHashRanges, node0Address)
 
 	// Test Put
 	items := []*pb.KeyWithTTL{
@@ -231,7 +237,7 @@ func TestGetAddressBroadcast(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, true, true, false}, exists)
 
-	operator := getClient(t, totalHashRanges, node1Address)
+	operator := getClient(t, totalHashRanges, node0Address)
 	require.NoError(t, operator.CreateSnapshot(ctx))
 
 	files, err := getContents(ctx, bucket, "", minioClient)
@@ -241,33 +247,64 @@ func TestGetAddressBroadcast(t *testing.T) {
 	requireTTLInSnapshot(t, 0, 1, files[1], "key2", now)
 	requireTTLInSnapshot(t, 0, 0, files[0], "key3", now)
 
-	node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
+	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           1,
 		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node1Address},
+		Addresses:        []string{node0Address},
 	})
-	require.NoError(t, operator.Scale(ctx, node1Address, node2Address))
+	require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
 	require.NoError(t, operator.ScaleComplete(ctx))
 
-	require.Equal(t, 1, c.ClusterSize())
+	require.Equal(t, 1, c.ClusterSize(), "The client should still believe that the cluster size is 1")
 	exists, err = c.Get(context.Background(), keys)
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, true, true, false}, exists)
+	require.Equal(t, 2, c.ClusterSize(), "Now the cluster size should be updated to 2")
 
-	// Scale down by removing node2. Then node1 should pick up all keys.
-	// WARNING: when scaling up you can only add nodes to the right e.g. clusterSize = 2, if you add a node then it will be node2
-	// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
-	require.NoError(t, operator.CreateSnapshot(ctx))
-	require.NoError(t, operator.Scale(ctx, node1Address))
+	// Add a 3rd node to the cluster
+	node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
+		NodeID:           2,
+		ClusterSize:      3,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		Addresses:        []string{node0Address, node1Address},
+	})
+	require.NoError(t, operator.Scale(ctx, node0Address, node1Address, node2Address))
 	require.NoError(t, operator.ScaleComplete(ctx))
 
-	exists, err = c.Get(ctx, keys)
+	// Verify that the client's cluster size is still 2 (not updated yet)
+	require.Equal(t, 2, c.ClusterSize())
+
+	// Perform a PUT operation which should update the client's internal cluster data
+	newItems := []*pb.KeyWithTTL{
+		{Key: "key5", TtlSeconds: testTTL},
+	}
+	require.NoError(t, c.Put(ctx, newItems))
+
+	// Verify that the client's cluster size is now 3 (updated after PUT)
+	require.Equal(t, 3, c.ClusterSize())
+
+	// Verify that all keys are still accessible
+	allKeys := []string{"key1", "key2", "key3", "key4", "key5"}
+	exists, err = c.Get(ctx, allKeys)
 	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
+	require.Equal(t, []bool{true, true, true, false, true}, exists)
+
+	// Scale down by removing node1 and node2. Then node0 should pick up all keys.
+	// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
+	// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
+	require.NoError(t, operator.CreateSnapshot(ctx))
+	require.NoError(t, operator.Scale(ctx, node0Address))
+	require.NoError(t, operator.ScaleComplete(ctx))
+
+	exists, err = c.Get(ctx, allKeys)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true, true, false, true}, exists) // all served by node0
 
 	cancel()
+	node0.Close()
 	node1.Close()
 	node2.Close()
 }

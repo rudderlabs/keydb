@@ -146,6 +146,9 @@ func (c *Client) get(
 	// Group keys by node
 	keysByNode := make(map[uint32][]string)
 	for _, key := range keys {
+		if _, alreadyFetched := results[key]; alreadyFetched {
+			continue
+		}
 		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
