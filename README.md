@@ -1,76 +1,205 @@
 # KeyDB
 
-KeyDB is a Key store (not a KV store) designed to be fast and scalable and eventually consistent.
+KeyDB is a distributed key store (not a key-value store) designed to be fast, scalable, and eventually consistent. It provides a simple API for checking the existence of keys with TTL (Time To Live) support.
 
 ## Summary
 
-KeyDB is a distributed system written in Golang that follows the Effective Go best-practices and the SOLID principles 
-that will work as a distributed KV store with TTL support.
-Code quality and test coverage are of the utmost importance. 
-All scenarios need to be covered. The repository will include unit tests but also tests that will create a cluster of 
-multiple nodes and have them communicate with each other so that we can test that all our requirements are met.
+KeyDB is a distributed system that allows you to:
+- Store keys with configurable TTL
+- Check for key existence
+- Scale horizontally by adding or removing nodes
+- Persist data through snapshots to cloud storage
 
-## Requirements
+Key features:
+- **Distributed Architecture**: Supports multiple nodes with automatic key distribution
+- **Scalability**: Dynamically scale the cluster by adding or removing nodes
+- **Eventual Consistency**: Changes propagate through the system over time
+- **TTL Support**: Keys automatically expire after their time-to-live
+- **Persistence**: Snapshots are stored in cloud storage for durability
 
-Data is kept in-memory in a data structure made of a map plus a double linked-list sorted by TTL.
-The map value will be the node of the doubled linked-list.
+## Client
 
-For such data structure this library will be used: https://github.com/rudderlabs/rudder-go-kit/blob/main/cachettl/cachettl.go
+The KeyDB client provides a simple interface to interact with the KeyDB cluster.
 
-The `cachettl` library will be configured with `config.refreshTTL=false` so that the TTL is not refreshed each time we call `Get`.
+### Installation
 
-* Being a distributed system each node will have a number assigned, and it will know how many nodes the cluster is comprised of.
-  This will allow the nodes to know which hash ranges they are serving.
-  The number of nodes will initially be set via an environment variable, but it can be superseded by the `Operator`
-  (explained later) during `SCALE` operations via gRPC.
-* Being a distributed system each node will handle only a set of hash ranges. There are going to be X hash ranges in
-  total (default 128). Each node will know which hash ranges it will handle at a given time by knowing its own node 
-  number and how many nodes the cluster is comprised of. The hashing functions need to be deterministic and as efficient
-  as possible.
-* Every X seconds (configurable, default 60s) each node will autonomously create one snapshot per hash range that is 
-  handling on S3 Express One Zone (or another CloudStorage of choice) using a custom data format to save the content of 
-  the double linked-list sorted by TTL. This way upon recovering we can read the file and repopulate the 
-  in-memory data structures (i.e. map + double linked-list). These files would be called snapshots from 
-  now on. Each line in the snapshot file is a node of the double linked-list with key and timestamp, nothing else.
-  The file format needs to be as small as possible, use the position of the fields to determine the fields values.
-  Being the double linked-list already sorted by TTL the snapshot will include the sooner to expire nodes first.
-  When loading the snapshot, nodes that are already expired can be discarded. 
-  The same when creating snapshots, expired nodes don't need to be included in snapshots. 
-  * if these criteria cannot be met with the rudder-go-kit library we can create an exact local copy of the rudder-go-kit 
-    library in this repo and modify it as needed.
-* All nodes should only load the snapshots for the hash ranges that they handle in memory.
-  If needed other hash ranges will be available on S3 (or CloudStorage of choice) during scaling operations.
-* The scaling up and down will be done manually by using a Go `Operator` client that will live in the same codebase. 
-  Such client will use gRPC to call all the nodes and instruct them whether a scale up or a scale down is needed.
-  The `Operator` client will first send a `CREATE SNAPSHOT` command and wait for all nodes to create a snapshot by checking 
-  their response. Then the `Operator` client sends a `SCALE` command to tell the nodes how many nodes are now in the cluster.
-  As a result they nodes will try to get the snapshots of the new hash-ranges that they will have to handle from 
-  the CloudStorage and they will load them in memory replacing what they previously had.
-* In the same codebase we will also have a Go gRPC client that will be used to communicate with the nodes to send `GET` 
-  requests and `PUT` requests used to interact with the actual Key store that we are designing. We will call it `Client`.
-  The nodes will always advertise in their responses how many nodes the cluster is comprised of.
-  The `Client` will use such information to know which node it should call for a given key. In fact the `Client` will 
-  use the same hashing functions as the nodes so that given a key and the number of nodes it will know which node 
-  it should send the request to.
-* The Go gRPC `Client` will be able to do `GET` and `PUT` requests specifying multiple keys (i.e. batching).
-* The Go gRPC `Client` and the Go gRPC `Operator` will both live in the cmd folder, one in "client" and one in the 
-  "operator" folder.
-* You will have to use the latest Go version 1.24.3 and containerized the nodes in a Dockerfile that uses the latest 
-  Alpine and Go versions. We don't need containers for the two clients (`Client` and `Operator`). Make sure to create a 
-  proper `go.mod` as well.
-* Only one of `CREATING SNAPSHOT` and `SCALE` command can happen at a given time, they cannot happen simultaneously.
-  * Consider that `CREATING SNAPSHOT` can happen for two reasons. One because the `Operator` triggered it, and one because
-    each node creates the snapshots of the hash ranges it handles autonomously every X seconds (configurable as explained
-    above).
+```go
+import "github.com/rudderlabs/keydb/client"
+```
 
-We also need:
-1. An importable package in the root of the folder called `client` that exposes the same functionality as 
-   `cmd/client` but that can be imported in any Go codebase.
-2. An importable package in the root of the folder called `operator` that exposes the same functionality
-   as `cmd/operator` but that can be imported in any Go codebase.
-3. An `integration_test.go` in the root of the project that tests all the scaling scenarios. It needs to bring up
-   more than one node and do a scale up and scale down. It will use the new `client` and `operator` packages. 
-   It will use the `client` package to test the GET and PUT capabilities, and it will use the `operator` package to 
-   issue the scaling commands.
-4. a Makefile with a recipe to generate the protobuf files
-5. a Makefile recipe to build the Dockerfile image and one to run it
+### Creating a Client
+
+```go
+config := client.Config{
+    Addresses:       []string{"localhost:50051", "localhost:50052"}, // List of node addresses
+    TotalHashRanges: 128,                                           // Optional, defaults to 128
+    RetryCount:      3,                                             // Optional, defaults to 3
+    RetryDelay:      100 * time.Millisecond,                        // Optional, defaults to 100ms
+}
+
+keydbClient, err := client.NewClient(config)
+if err != nil {
+    // Handle error
+}
+defer keydbClient.Close()
+```
+
+### Adding Keys
+
+To add keys with TTL:
+
+```go
+// Create items with TTL
+items := []*pb.KeyWithTTL{
+    {
+        Key:        "user:123",
+        TtlSeconds: 3600, // 1 hour TTL
+    },
+    {
+        Key:        "session:456",
+        TtlSeconds: 86400, // 24 hours TTL
+    },
+}
+
+// Put the keys
+err := keydbClient.Put(context.Background(), items)
+if err != nil {
+    // Handle error
+}
+```
+
+### Checking Key Existence
+
+To check if keys exist:
+
+```go
+// Keys to check
+keys := []string{"user:123", "session:456", "unknown:key"}
+
+// Get existence status
+exists, err := keydbClient.Get(context.Background(), keys)
+if err != nil {
+    // Handle error
+}
+
+// Process results
+for i, key := range keys {
+    if exists[i] {
+        fmt.Printf("Key %s exists\n", key)
+    } else {
+        fmt.Printf("Key %s does not exist\n", key)
+    }
+}
+```
+
+### Client Features
+
+- **Automatic Retries**: The client automatically retries operations on transient errors
+- **Cluster Awareness**: Automatically adapts to cluster size changes
+- **Key Distribution**: Automatically routes keys to the correct node based on hash
+- **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
+
+## Operator
+
+The Operator is responsible for managing the KeyDB cluster, including scaling operations and monitoring.
+
+### Starting a Node
+
+To start a KeyDB node:
+
+```bash
+# Configure node with environment variables
+export KEYDB_NODE_ID=0
+export KEYDB_CLUSTER_SIZE=3
+export KEYDB_NODE_ADDRESSES='["localhost:50051","localhost:50052","localhost:50053"]'
+export KEYDB_PORT=50051
+export KEYDB_SNAPSHOT_INTERVAL=60s
+export KEYDB_TOTAL_HASH_RANGES=128
+
+# Storage configuration
+export KEYDB_STORAGE_BUCKET="my-keydb-bucket"
+export KEYDB_STORAGE_REGION="us-east-1"
+export KEYDB_STORAGE_ACCESSKEYID="your-access-key-id"
+export KEYDB_STORAGE_ACCESSKEY="your-secret-access-key"
+
+# Start the node
+go run cmd/node/main.go
+```
+
+### Scaling the Cluster
+
+To scale the KeyDB cluster, use the client's `CreateSnapshot`, `Scale` and `ScaleComplete` methods:
+Before scaling the cluster it is good practice to call `CreateSnapshot`.
+
+```go
+// Create a client for operator operations
+existingNodes := []string{
+    "localhost:50051",
+    "localhost:50052",
+    "localhost:50053",
+}
+operatorClient, err := client.NewClient(client.Config{
+    Addresses: existingNodes, // Connect to any existing node
+})
+if err != nil {
+    // Handle error
+}
+defer operatorClient.Close()
+
+// Let's force a snapshot creation on the old nodes first
+err = operatorClient.CreateSnapshot(context.Background())
+if err != nil {
+    // Handle error
+}
+
+// New node address
+newNode := "localhost:50054", // New node
+existingNodes = append(existingNodes, newNode)
+
+// Scale the cluster
+err = operatorClient.Scale(context.Background(), existingNodes...)
+if err != nil {
+    // Handle error
+}
+
+// Notify all nodes that scaling is complete
+err = operatorClient.ScaleComplete(context.Background())
+if err != nil {
+    // Handle error
+}
+```
+
+### Monitoring
+
+To get information about a specific node:
+
+```go
+nodeInfo, err := operatorClient.GetNodeInfo(context.Background(), 0) // Node ID 0
+if err != nil {
+    // Handle error
+}
+
+fmt.Printf("Node ID: %d\n", nodeInfo.NodeId)
+fmt.Printf("Cluster Size: %d\n", nodeInfo.ClusterSize)
+fmt.Printf("Keys Count: %d\n", nodeInfo.KeysCount)
+fmt.Printf("Last Snapshot: %s\n", time.Unix(int64(nodeInfo.LastSnapshotTimestamp), 0))
+```
+
+### Scaling Best Practices
+
+1. **Prepare New Nodes**: Ensure new nodes are running before scaling
+2. **Gradual Scaling**: Scale by small increments for large clusters
+3. **Monitor During Scaling**: Watch for errors and performance during scaling
+4. **Complete the Scaling**: Always call ScaleComplete after scaling
+5. **Create Snapshots**: Create snapshots before and after scaling operations
+
+# Known issues
+
+* During scaling operations the nodes might not be available
+* New nodes are to be created first before scaling
+* Creating and uploading very big snapshots can become a performance issue
+  * A possible solution is that we could snapshot on local disk every 10s and work only on the head and tail of the
+    file (i.e. remove expired from head and append new entries at the end of the file).
+    This would allow us to hold the lock for a much smaller amount of time.
+    Then once a minute we can upload the whole file to S3. The file that we upload could be compressed, 
+    for example by using zstd with dictionaries.
