@@ -188,7 +188,7 @@ func (c *Client) get(
 
 				// TODO add some logging and metrics here
 
-				if c.clusterSize != resp.ClusterSize {
+				if resp != nil && c.clusterSize != resp.ClusterSize {
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
@@ -294,7 +294,7 @@ func (c *Client) put(ctx context.Context, items []*pb.KeyWithTTL) error {
 
 				// TODO add some logging and metrics here
 
-				if c.clusterSize != resp.ClusterSize {
+				if resp != nil && c.clusterSize != resp.ClusterSize {
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
