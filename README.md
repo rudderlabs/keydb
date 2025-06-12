@@ -203,3 +203,8 @@ fmt.Printf("Last Snapshot: %s\n", time.Unix(int64(nodeInfo.LastSnapshotTimestamp
     This would allow us to hold the lock for a much smaller amount of time.
     Then once a minute we can upload the whole file to S3. The file that we upload could be compressed, 
     for example by using zstd with dictionaries.
+* Missing metrics and logs (observability is poor)
+* Missing Kubernetes health probes
+* Missing linters
+* Missing Continuos Integration
+

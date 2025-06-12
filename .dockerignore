@@ -1,0 +1,7 @@
+*
+!client
+!cmd
+!internal
+!proto
+!go.mod
+!go.sum
