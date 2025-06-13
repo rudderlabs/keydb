@@ -7,6 +7,9 @@ import (
 	"github.com/rudderlabs/keydb/internal/cachettl"
 )
 
+// TODO this memory implementation might be useless after all since badger also supports InMemory mode, also
+// keeping everything in memory won't really be doable in production
+
 // Cache is an in-memory implementation of the cache interface using the cachettl package
 type Cache struct {
 	cache *cachettl.Cache[string, bool]
@@ -19,14 +22,20 @@ func New() *Cache {
 	}
 }
 
-// Get returns the value associated with the key and an error if the operation failed
-func (c *Cache) Get(key string) (bool, error) {
-	return c.cache.Get(key), nil
+// Get returns the values associated with the keys and an error if the operation failed
+func (c *Cache) Get(keys []string) ([]bool, error) {
+	results := make([]bool, len(keys))
+	for i, key := range keys {
+		results[i] = c.cache.Get(key)
+	}
+	return results, nil
 }
 
-// Put adds or updates an element inside the cache with the specified TTL and returns an error if the operation failed
-func (c *Cache) Put(key string, value bool, ttl time.Duration) error {
-	c.cache.Put(key, value, ttl)
+// Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
+func (c *Cache) Put(keys []string, value bool, ttl time.Duration) error {
+	for _, key := range keys {
+		c.cache.Put(key, value, ttl)
+	}
 	return nil
 }
 

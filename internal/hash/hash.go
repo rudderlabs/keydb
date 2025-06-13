@@ -1,8 +1,11 @@
 package hash
 
 import (
+	"fmt"
 	"hash/fnv"
 )
+
+var ErrWrongNode = fmt.Errorf("wrong node")
 
 // GetNodeNumber computes the hash of a key and determines which node should handle it
 // given the total number of nodes and hash ranges.
@@ -32,6 +35,33 @@ func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, u
 
 	// Determine which node handles this hash range
 	return hashRange, hashRange % numberOfNodes
+}
+
+func GetHashesForKeys(keys []string, nodeID, numberOfNodes, totalHashRanges uint32) (map[uint32][]string, error) {
+	if numberOfNodes == 0 {
+		panic("numberOfNodes must be greater than 0")
+	}
+	if totalHashRanges < numberOfNodes {
+		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	}
+
+	m := make(map[uint32][]string)
+	for _, key := range keys {
+		// Create a new hash object for each key
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(key))
+		hashValue := h.Sum32()
+		hashRange := hashValue % totalHashRanges
+
+		if nodeID != hashRange%numberOfNodes {
+			return nil, fmt.Errorf("hashRange %d not for node %d: %w", hashRange, nodeID, ErrWrongNode)
+		}
+
+		m[hashRange] = append(m[hashRange], key)
+	}
+
+	// Determine which node handles this hash range
+	return m, nil
 }
 
 // GetNodeHashRanges returns the hash ranges that a specific node should handle

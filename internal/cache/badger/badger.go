@@ -24,40 +24,48 @@ func New(path string) (*Cache, error) {
 	return &Cache{cache: db}, nil
 }
 
-// Get returns the value associated with the key and an error if the operation failed
-func (c *Cache) Get(key string) (bool, error) {
-	var result bool
+// Get returns the values associated with the keys and an error if the operation failed
+func (c *Cache) Get(keys []string) ([]bool, error) {
+	results := make([]bool, len(keys))
+
 	err := c.cache.View(func(txn *badger.Txn) error {
-		_, err := txn.Get([]byte(key))
-		if err != nil {
-			if errors.Is(err, badger.ErrKeyNotFound) {
-				result = false
-				return nil
+		for i, key := range keys {
+			_, err := txn.Get([]byte(key))
+			if err != nil {
+				if errors.Is(err, badger.ErrKeyNotFound) {
+					results[i] = false
+					continue
+				}
+				return fmt.Errorf("failed to get key %s: %w", key, err)
 			}
-			return err
+			// Key exists, value is true
+			results[i] = true
 		}
-		// Key exists, value is true
-		result = true
 		return nil
 	})
 	if err != nil {
-		return false, fmt.Errorf("failed to get key %s: %w", key, err)
+		return nil, err
 	}
 
-	return result, nil
+	return results, nil
 }
 
-// Put adds or updates an element inside the cache with the specified TTL and returns an error if the operation failed
-func (c *Cache) Put(key string, _ bool, ttl time.Duration) error {
+// Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
+func (c *Cache) Put(keys []string, _ bool, ttl time.Duration) error {
 	err := c.cache.Update(func(txn *badger.Txn) error {
-		entry := badger.NewEntry([]byte(key), []byte{})
-		if ttl > 0 {
-			entry = entry.WithTTL(ttl)
+		for _, key := range keys {
+			entry := badger.NewEntry([]byte(key), []byte{})
+			if ttl > 0 {
+				entry = entry.WithTTL(ttl)
+			}
+			if err := txn.SetEntry(entry); err != nil {
+				return fmt.Errorf("failed to put key %s: %w", key, err)
+			}
 		}
-		return txn.SetEntry(entry)
+		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to put key %s: %w", key, err)
+		return err
 	}
 	return nil
 }
@@ -80,7 +88,6 @@ func (c *Cache) Len() int {
 	if err != nil {
 		panic("failed to get cache length: " + err.Error())
 	}
-
 	return count
 }
 

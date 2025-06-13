@@ -77,11 +77,11 @@ type Service struct {
 
 // Cache is an interface for a key-value store with TTL support
 type Cache interface {
-	// Get returns the value associated with the key and an error if the operation failed
-	Get(key string) (bool, error)
+	// Get returns the values associated with the keys and an error if the operation failed
+	Get(keys []string) ([]bool, error)
 
-	// Put adds or updates an element inside the cache with the specified TTL and returns an error if the operation failed
-	Put(key string, value bool, ttl time.Duration) error
+	// Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
+	Put(keys []string, value bool, ttl time.Duration) error
 
 	// Len returns the number of elements in the cache
 	Len() int
@@ -239,34 +239,53 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	}
 
 	response.Exists = make([]bool, len(req.Keys))
-
-	for i, key := range req.Keys {
-		// Determine which node should handle this key
-		hashRange, nodeID := hash.GetNodeNumber(key, s.config.ClusterSize, s.config.TotalHashRanges)
-
-		// Check if this node should handle this key
-		if nodeID != s.config.NodeID {
+	hashesAndKeys, err := hash.GetHashesForKeys(req.Keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+	if err != nil {
+		if errors.Is(err, hash.ErrWrongNode) {
 			response.ErrorCode = pb.ErrorCode_WRONG_NODE
 			return response, nil
 		}
+		response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
+		s.logger.Errorn("Error getting hashes for keys", obskit.Error(err))
+		return response, nil
+	}
 
-		// Get the cache for this hash range
-		cache, exists := s.caches[hashRange]
-		if !exists {
-			// This should not happen if our hash functions are correct
-			// return nil, status.Errorf(codes.Internal, "no cache for hash range %d", hashRange)
-			response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
-			return response, nil
-		}
+	// Create a map to track the original indices of keys
+	keyIndices := make(map[string]int, len(req.Keys))
+	for i, key := range req.Keys {
+		keyIndices[key] = i
+	}
 
-		// Check if the key exists in the cache
-		exists, err := cache.Get(key)
-		if err != nil {
-			response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
-			s.logger.Errorn("Error getting key", logger.NewStringField("key", key), obskit.Error(err))
-			return response, nil
-		}
-		response.Exists[i] = exists
+	group, _ := kitsync.NewEagerGroup(ctx, len(hashesAndKeys))
+	for hashRange, keys := range hashesAndKeys {
+		keysToProcess := keys // Capture the keys for this goroutine
+		group.Go(func() error {
+			// Get the cache for this hash range
+			cache, exists := s.caches[hashRange]
+			if !exists {
+				// This should not happen if our hash functions are correct
+				return fmt.Errorf("no cache for hash range %d", hashRange)
+			}
+
+			// Check if the keys exist in the cache
+			existsValues, err := cache.Get(keysToProcess)
+			if err != nil {
+				return fmt.Errorf("failed to get keys from cache: %w", err)
+			}
+
+			// Update the response with the results
+			for i, key := range keysToProcess {
+				originalIndex := keyIndices[key]
+				response.Exists[originalIndex] = existsValues[i]
+			}
+
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
+		return response, nil
 	}
 
 	return response, nil
@@ -288,6 +307,9 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		return resp, nil
 	}
 
+	// Group items by hash range
+	itemsByHashRange := make(map[uint32][]*pb.KeyWithTTL)
+
 	for _, item := range req.Items {
 		// Determine which node should handle this key
 		hashRange, nodeID := hash.GetNodeNumber(item.Key, s.config.ClusterSize, s.config.TotalHashRanges)
@@ -298,6 +320,11 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 			return resp, nil
 		}
 
+		itemsByHashRange[hashRange] = append(itemsByHashRange[hashRange], item)
+	}
+
+	// Process items by hash range
+	for hashRange, items := range itemsByHashRange {
 		// Get the cache for this hash range
 		cache, exists := s.caches[hashRange]
 		if !exists {
@@ -306,12 +333,23 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 			return resp, nil
 		}
 
-		// Store the key in the cache with the specified TTL
-		ttl := time.Duration(item.TtlSeconds) * time.Second
-		err := cache.Put(item.Key, true, ttl)
+		// Extract keys and find the maximum TTL for this batch
+		keys := make([]string, len(items))
+		var maxTTL time.Duration
+
+		for i, item := range items {
+			keys[i] = item.Key
+			ttl := time.Duration(item.TtlSeconds) * time.Second
+			if ttl > maxTTL {
+				maxTTL = ttl
+			}
+		}
+
+		// Store the keys in the cache with the specified TTL
+		err := cache.Put(keys, true, maxTTL)
 		if err != nil {
 			resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
-			s.logger.Errorn("Error putting key", logger.NewStringField("key", item.Key), obskit.Error(err))
+			s.logger.Errorn("Error putting keys", obskit.Error(err))
 			return resp, nil
 		}
 	}
