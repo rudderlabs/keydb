@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/rudderlabs/keydb/internal/cache/badger"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/node"
@@ -57,7 +58,15 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 		logger.NewDurationField("snapshotInterval", nodeConfig.SnapshotInterval),
 	)
 
-	service, err := node.NewService(ctx, nodeConfig, cloudStorage, log.Child("service"))
+	badgerCacheFactory := func() (node.Cache, error) {
+		badgerCache, err := badger.New(conf.GetString("badgerPath", "/tmp/badger"))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create cache factory: %w", err)
+		}
+		return badgerCache, nil
+	}
+
+	service, err := node.NewService(ctx, nodeConfig, badgerCacheFactory, cloudStorage, log.Child("service"))
 	if err != nil {
 		return fmt.Errorf("failed to create node service: %w", err)
 	}

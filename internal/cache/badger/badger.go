@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -82,7 +83,36 @@ func (c *Cache) Len() int {
 }
 
 // String returns a string representation of the cache
-func (c *Cache) String() string { return "not supported" } // TODO do we need this method for tests?
+func (c *Cache) String() string {
+	sb := strings.Builder{}
+	sb.WriteString("{")
+
+	err := c.cache.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		first := true
+		for it.Rewind(); it.Valid(); it.Next() {
+			if !first {
+				sb.WriteString(",")
+			}
+			first = false
+
+			item := it.Item()
+			key := string(item.Key())
+			sb.WriteString(fmt.Sprintf("%s:true", key))
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Sprintf("{error:%v}", err)
+	}
+
+	sb.WriteString("}")
+	return sb.String()
+}
 
 // CreateSnapshot writes the cache contents to the provided writer
 func (c *Cache) CreateSnapshot(w io.Writer) error {

@@ -22,7 +22,7 @@ import (
 
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/cache/badger"
-	"github.com/rudderlabs/keydb/internal/cache/memory"
+	"github.com/rudderlabs/keydb/internal/cache/cachettl"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
@@ -44,7 +44,7 @@ func TestSimple(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, cf func() cache) {
+	run := func(t *testing.T, cf cacheFactory) {
 		t.Parallel()
 
 		minioClient, cloudStorage := getCloudStorage(t, pool)
@@ -108,8 +108,8 @@ func TestSimple(t *testing.T) {
 		node0.Close()
 	}
 
-	t.Run("memory", func(t *testing.T) {
-		run(t, getMemoryCache)
+	t.Run("cachettl", func(t *testing.T) {
+		run(t, getMemoryCache(t))
 	})
 
 	t.Run("badger", func(t *testing.T) {
@@ -118,211 +118,223 @@ func TestSimple(t *testing.T) {
 }
 
 func TestScaleUpAndDown(t *testing.T) {
-	t.Parallel()
-
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	cf := getMemoryCache
+	run := func(t *testing.T, cf cacheFactory) {
+		minioClient, cloudStorage := getCloudStorage(t, pool)
 
-	minioClient, cloudStorage := getCloudStorage(t, pool)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		// Create the node service
+		now := time.Now()
+		totalHashRanges := uint32(3)
+		node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, cf)
+		c := getClient(t, totalHashRanges, node0Address)
 
-	// Create the node service
-	now := time.Now()
-	totalHashRanges := uint32(3)
-	node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           0,
-		ClusterSize:      1,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-	}, cf)
-	c := getClient(t, totalHashRanges, node0Address)
+		// Test Put
+		items := []*pb.KeyWithTTL{
+			{Key: "key1", TtlSeconds: testTTL},
+			{Key: "key2", TtlSeconds: testTTL},
+			{Key: "key3", TtlSeconds: testTTL},
+		}
+		require.NoError(t, c.Put(ctx, items))
 
-	// Test Put
-	items := []*pb.KeyWithTTL{
-		{Key: "key1", TtlSeconds: testTTL},
-		{Key: "key2", TtlSeconds: testTTL},
-		{Key: "key3", TtlSeconds: testTTL},
+		keys := []string{"key1", "key2", "key3", "key4"}
+		exists, err := c.Get(ctx, keys)
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		operator := getClient(t, totalHashRanges, node0Address)
+		require.NoError(t, operator.CreateSnapshot(ctx))
+
+		files, err := getContents(ctx, bucket, "", minioClient)
+		require.NoError(t, err)
+		require.Len(t, files, 3)
+		requireSnapshotFilename(t, 0, files[0])
+		requireSnapshotFilename(t, 1, files[1])
+		requireSnapshotFilename(t, 2, files[2])
+
+		node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
+			NodeID:           1,
+			ClusterSize:      2,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+			Addresses:        []string{node0Address},
+		}, cf)
+		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
+		require.NoError(t, operator.ScaleComplete(ctx))
+
+		respNode0, err := c.GetNodeInfo(ctx, 0)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, respNode0.ClusterSize)
+		require.Len(t, respNode0.HashRanges, 2)
+		require.EqualValues(t, 2, respNode0.KeysCount)
+		require.Equal(t, `{key3:true}`, node0.caches[0].String())
+		require.Equal(t, `{key1:true}`, node0.caches[2].String())
+
+		respNode1, err := c.GetNodeInfo(ctx, 1)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, respNode1.ClusterSize)
+		require.Len(t, respNode1.HashRanges, 1)
+		require.EqualValues(t, 1, respNode1.KeysCount)
+		require.Equal(t, `{key2:true}`, node1.caches[1].String())
+
+		exists, err = c.Get(ctx, keys)
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		// Scale down by removing node1. Then node0 should pick up all keys.
+		// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
+		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
+		require.NoError(t, operator.CreateSnapshot(ctx))
+		require.NoError(t, operator.Scale(ctx, node0Address))
+		require.NoError(t, operator.ScaleComplete(ctx))
+
+		respNode0, err = c.GetNodeInfo(ctx, 0)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, respNode0.ClusterSize)
+		require.Len(t, respNode0.HashRanges, 3)
+		require.EqualValues(t, 3, respNode0.KeysCount)
+		require.Equal(t, `{key3:true}`, node0.caches[0].String())
+		require.Equal(t, `{key2:true}`, node0.caches[1].String())
+		require.Equal(t, `{key1:true}`, node0.caches[2].String())
+
+		cancel()
+		node0.Close()
+		node1.Close()
 	}
-	require.NoError(t, c.Put(ctx, items))
 
-	keys := []string{"key1", "key2", "key3", "key4"}
-	exists, err := c.Get(ctx, keys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
+	t.Run("cachettl", func(t *testing.T) {
+		run(t, getMemoryCache(t))
+	})
 
-	operator := getClient(t, totalHashRanges, node0Address)
-	require.NoError(t, operator.CreateSnapshot(ctx))
-
-	files, err := getContents(ctx, bucket, "", minioClient)
-	require.NoError(t, err)
-	require.Len(t, files, 3)
-	requireSnapshotFilename(t, 0, files[0])
-	requireSnapshotFilename(t, 1, files[1])
-	requireSnapshotFilename(t, 2, files[2])
-
-	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           1,
-		ClusterSize:      2,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node0Address},
-	}, cf)
-	require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
-	require.NoError(t, operator.ScaleComplete(ctx))
-
-	respNode0, err := c.GetNodeInfo(ctx, 0)
-	require.NoError(t, err)
-	require.EqualValues(t, 2, respNode0.ClusterSize)
-	require.Len(t, respNode0.HashRanges, 2)
-	require.EqualValues(t, 2, respNode0.KeysCount)
-	require.Equal(t, `{key3:true}`, node0.caches[0].String())
-	require.Equal(t, `{key1:true}`, node0.caches[2].String())
-
-	respNode1, err := c.GetNodeInfo(ctx, 1)
-	require.NoError(t, err)
-	require.EqualValues(t, 2, respNode1.ClusterSize)
-	require.Len(t, respNode1.HashRanges, 1)
-	require.EqualValues(t, 1, respNode1.KeysCount)
-	require.Equal(t, `{key2:true}`, node1.caches[1].String())
-
-	exists, err = c.Get(ctx, keys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
-
-	// Scale down by removing node1. Then node0 should pick up all keys.
-	// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
-	// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
-	require.NoError(t, operator.CreateSnapshot(ctx))
-	require.NoError(t, operator.Scale(ctx, node0Address))
-	require.NoError(t, operator.ScaleComplete(ctx))
-
-	respNode0, err = c.GetNodeInfo(ctx, 0)
-	require.NoError(t, err)
-	require.EqualValues(t, 1, respNode0.ClusterSize)
-	require.Len(t, respNode0.HashRanges, 3)
-	require.EqualValues(t, 3, respNode0.KeysCount)
-	require.Equal(t, `{key3:true}`, node0.caches[0].String())
-	require.Equal(t, `{key2:true}`, node0.caches[1].String())
-	require.Equal(t, `{key1:true}`, node0.caches[2].String())
-
-	cancel()
-	node0.Close()
-	node1.Close()
+	t.Run("badger", func(t *testing.T) {
+		run(t, getBadgerCache(t))
+	})
 }
 
 func TestGetPutAddressBroadcast(t *testing.T) {
-	t.Parallel()
-
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	minioClient, cloudStorage := getCloudStorage(t, pool)
+	run := func(t *testing.T, cf cacheFactory) {
+		minioClient, cloudStorage := getCloudStorage(t, pool)
 
-	cf := getMemoryCache // TODO
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		// Create the node service
+		now := time.Now()
+		totalHashRanges := uint32(3)
+		node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, cf)
+		c := getClient(t, totalHashRanges, node0Address)
 
-	// Create the node service
-	now := time.Now()
-	totalHashRanges := uint32(3)
-	node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           0,
-		ClusterSize:      1,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-	}, cf)
-	c := getClient(t, totalHashRanges, node0Address)
+		// Test Put
+		items := []*pb.KeyWithTTL{
+			{Key: "key1", TtlSeconds: testTTL},
+			{Key: "key2", TtlSeconds: testTTL},
+			{Key: "key3", TtlSeconds: testTTL},
+		}
+		require.NoError(t, c.Put(ctx, items))
 
-	// Test Put
-	items := []*pb.KeyWithTTL{
-		{Key: "key1", TtlSeconds: testTTL},
-		{Key: "key2", TtlSeconds: testTTL},
-		{Key: "key3", TtlSeconds: testTTL},
+		keys := []string{"key1", "key2", "key3", "key4"}
+		exists, err := c.Get(ctx, keys)
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		operator := getClient(t, totalHashRanges, node0Address)
+		require.NoError(t, operator.CreateSnapshot(ctx))
+
+		files, err := getContents(ctx, bucket, "", minioClient)
+		require.NoError(t, err)
+		require.Len(t, files, 3)
+		requireSnapshotFilename(t, 0, files[0])
+		requireSnapshotFilename(t, 1, files[1])
+		requireSnapshotFilename(t, 2, files[2])
+
+		node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
+			NodeID:           1,
+			ClusterSize:      2,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+			Addresses:        []string{node0Address},
+		}, cf)
+		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
+		require.NoError(t, operator.ScaleComplete(ctx))
+
+		require.Equal(t, 1, c.ClusterSize(), "The client should still believe that the cluster size is 1")
+		exists, err = c.Get(context.Background(), keys)
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+		require.Equal(t, 2, c.ClusterSize(), "Now the cluster size should be updated to 2")
+
+		// Add a 3rd node to the cluster
+		node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
+			NodeID:           2,
+			ClusterSize:      3,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+			Addresses:        []string{node0Address, node1Address},
+		}, cf)
+		require.NoError(t, operator.Scale(ctx, node0Address, node1Address, node2Address))
+		require.NoError(t, operator.ScaleComplete(ctx))
+
+		// Verify that the client's cluster size is still 2 (not updated yet)
+		require.Equal(t, 2, c.ClusterSize())
+
+		// Perform a PUT operation which should update the client's internal cluster data
+		newItems := []*pb.KeyWithTTL{
+			{Key: "key5", TtlSeconds: testTTL},
+		}
+		require.NoError(t, c.Put(ctx, newItems))
+
+		// Verify that the client's cluster size is now 3 (updated after PUT)
+		require.Equal(t, 3, c.ClusterSize())
+
+		// Verify that all keys are still accessible
+		allKeys := []string{"key1", "key2", "key3", "key4", "key5"}
+		exists, err = c.Get(ctx, allKeys)
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false, true}, exists)
+
+		// Scale down by removing node1 and node2. Then node0 should pick up all keys.
+		// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
+		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
+		require.NoError(t, operator.CreateSnapshot(ctx))
+		require.NoError(t, operator.Scale(ctx, node0Address))
+		require.NoError(t, operator.ScaleComplete(ctx))
+
+		exists, err = c.Get(ctx, allKeys)
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false, true}, exists) // all served by node0
+
+		cancel()
+		node0.Close()
+		node1.Close()
+		node2.Close()
 	}
-	require.NoError(t, c.Put(ctx, items))
 
-	keys := []string{"key1", "key2", "key3", "key4"}
-	exists, err := c.Get(ctx, keys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
+	t.Run("cachettl", func(t *testing.T) {
+		run(t, getMemoryCache(t))
+	})
 
-	operator := getClient(t, totalHashRanges, node0Address)
-	require.NoError(t, operator.CreateSnapshot(ctx))
-
-	files, err := getContents(ctx, bucket, "", minioClient)
-	require.NoError(t, err)
-	require.Len(t, files, 3)
-	requireSnapshotFilename(t, 0, files[0])
-	requireSnapshotFilename(t, 1, files[1])
-	requireSnapshotFilename(t, 2, files[2])
-
-	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           1,
-		ClusterSize:      2,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node0Address},
-	}, cf)
-	require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
-	require.NoError(t, operator.ScaleComplete(ctx))
-
-	require.Equal(t, 1, c.ClusterSize(), "The client should still believe that the cluster size is 1")
-	exists, err = c.Get(context.Background(), keys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
-	require.Equal(t, 2, c.ClusterSize(), "Now the cluster size should be updated to 2")
-
-	// Add a 3rd node to the cluster
-	node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           2,
-		ClusterSize:      3,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node0Address, node1Address},
-	}, cf)
-	require.NoError(t, operator.Scale(ctx, node0Address, node1Address, node2Address))
-	require.NoError(t, operator.ScaleComplete(ctx))
-
-	// Verify that the client's cluster size is still 2 (not updated yet)
-	require.Equal(t, 2, c.ClusterSize())
-
-	// Perform a PUT operation which should update the client's internal cluster data
-	newItems := []*pb.KeyWithTTL{
-		{Key: "key5", TtlSeconds: testTTL},
-	}
-	require.NoError(t, c.Put(ctx, newItems))
-
-	// Verify that the client's cluster size is now 3 (updated after PUT)
-	require.Equal(t, 3, c.ClusterSize())
-
-	// Verify that all keys are still accessible
-	allKeys := []string{"key1", "key2", "key3", "key4", "key5"}
-	exists, err = c.Get(ctx, allKeys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false, true}, exists)
-
-	// Scale down by removing node1 and node2. Then node0 should pick up all keys.
-	// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
-	// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
-	require.NoError(t, operator.CreateSnapshot(ctx))
-	require.NoError(t, operator.Scale(ctx, node0Address))
-	require.NoError(t, operator.ScaleComplete(ctx))
-
-	exists, err = c.Get(ctx, allKeys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false, true}, exists) // all served by node0
-
-	cancel()
-	node0.Close()
-	node1.Close()
-	node2.Close()
+	t.Run("badger", func(t *testing.T) {
+		run(t, getBadgerCache(t))
+	})
 }
 
 func getCloudStorage(t testing.TB, pool *dockertest.Pool) (*minio.Client, cloudStorage) {
@@ -345,21 +357,22 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool) (*minio.Client, cloudS
 	return minioClient, cloudStorage
 }
 
-func getMemoryCache() cache {
-	return memory.New()
+func getMemoryCache(t testing.TB) cacheFactory {
+	return func() (Cache, error) {
+		t.Helper()
+		return cachettl.New(), nil
+	}
 }
 
-func getBadgerCache(t testing.TB) func() cache {
-	t.Helper()
-	return func() cache {
-		c, err := badger.New(t.TempDir())
-		require.NoError(t, err)
-		return c
+func getBadgerCache(t testing.TB) cacheFactory {
+	return func() (Cache, error) {
+		t.Helper()
+		return badger.New(t.TempDir())
 	}
 }
 
 func getService(
-	ctx context.Context, t testing.TB, cs cloudStorage, now time.Time, nodeConfig Config, cf func() cache,
+	ctx context.Context, t testing.TB, cs cloudStorage, now time.Time, nodeConfig Config, cf cacheFactory,
 ) (*Service, string) {
 	t.Helper()
 

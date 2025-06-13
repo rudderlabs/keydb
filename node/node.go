@@ -56,7 +56,7 @@ type Service struct {
 
 	config Config
 
-	caches       map[uint32]cache
+	caches       map[uint32]Cache
 	cacheFactory cacheFactory
 
 	// mu protects the caches and scaling operations
@@ -75,10 +75,8 @@ type Service struct {
 	logger logger.Logger
 }
 
-type cacheFactory func() cache
-
-// cache is an interface for a key-value store with TTL support
-type cache interface {
+// Cache is an interface for a key-value store with TTL support
+type Cache interface {
 	// Get returns the value associated with the key
 	Get(key string) bool
 
@@ -97,6 +95,8 @@ type cache interface {
 	// LoadSnapshot reads the cache contents from the provided reader
 	LoadSnapshot(r io.Reader) error
 }
+
+type cacheFactory func() (Cache, error)
 
 type cloudStorageReader interface {
 	Download(ctx context.Context, output io.WriterAt, key string) error
@@ -127,7 +127,7 @@ func NewService(
 	service := &Service{
 		now:          time.Now,
 		config:       config,
-		caches:       make(map[uint32]cache),
+		caches:       make(map[uint32]Cache),
 		cacheFactory: cf,
 		storage:      storage,
 		logger: log.Withn(
@@ -202,7 +202,10 @@ func (s *Service) initCaches(ctx context.Context) error {
 		}
 
 		// Create a new cache with no TTL refresh
-		cache := s.cacheFactory()
+		cache, err := s.cacheFactory()
+		if err != nil {
+			return fmt.Errorf("failed to create cache for range %d: %w", r, err)
+		}
 		s.caches[r] = cache
 
 		group.Go(func() error { // Try to load snapshot for this range
@@ -405,7 +408,7 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 }
 
 // createSnapshot creates a snapshot for a specific hash range
-func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache cache) error {
+func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
 	// Create snapshot file
 	filename := getSnapshotFilename(hashRange)
 
@@ -514,7 +517,7 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 }
 
 // loadSnapshot loads a snapshot for a specific hash range
-func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache cache) error {
+func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
 	filename := getSnapshotFilename(hashRange)
 
 	buf := aws.NewWriteAtBuffer([]byte{})

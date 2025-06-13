@@ -1,4 +1,4 @@
-package memory
+package cachettl
 
 import (
 	"io"
@@ -7,7 +7,7 @@ import (
 	"github.com/rudderlabs/keydb/internal/cachettl"
 )
 
-// Cache is an in-memory implementation of the cache interface
+// Cache is an in-memory implementation of the cache interface using the cachettl package
 type Cache struct {
 	cache *cachettl.Cache[string, bool]
 }
