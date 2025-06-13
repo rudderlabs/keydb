@@ -20,6 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
+	"github.com/rudderlabs/keydb/internal/cache/memory"
+
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -337,7 +339,7 @@ func getService(ctx context.Context, t testing.TB, cs cloudStorage, now time.Tim
 	address := "localhost:" + strconv.Itoa(freePort)
 	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
 
-	service, err := NewService(ctx, nodeConfig, cs, logger.NOP)
+	service, err := NewService(ctx, nodeConfig, func() cache { return memory.New() }, cs, logger.NOP)
 	require.NoError(t, err)
 	service.now = func() time.Time { return now }
 

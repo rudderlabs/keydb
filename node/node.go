@@ -14,7 +14,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/rudderlabs/keydb/internal/cachettl"
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
@@ -57,8 +56,8 @@ type Service struct {
 
 	config Config
 
-	// caches is a map of hash range ID to cache
-	caches map[uint32]*cachettl.Cache[string, bool]
+	caches       map[uint32]cache
+	cacheFactory cacheFactory
 
 	// mu protects the caches and scaling operations
 	mu sync.RWMutex
@@ -76,6 +75,29 @@ type Service struct {
 	logger logger.Logger
 }
 
+type cacheFactory func() cache
+
+// cache is an interface for a key-value store with TTL support
+type cache interface {
+	// Get returns the value associated with the key
+	Get(key string) bool
+
+	// Put adds or updates an element inside the cache with the specified TTL
+	Put(key string, value bool, ttl time.Duration)
+
+	// Len returns the number of elements in the cache
+	Len() int
+
+	// String returns a string representation of the cache
+	String() string
+
+	// CreateSnapshot writes the cache contents to the provided writer
+	CreateSnapshot(w io.Writer) error
+
+	// LoadSnapshot reads the cache contents from the provided reader
+	LoadSnapshot(r io.Reader) error
+}
+
 type cloudStorageReader interface {
 	Download(ctx context.Context, output io.WriterAt, key string) error
 }
@@ -90,7 +112,9 @@ type cloudStorage interface {
 }
 
 // NewService creates a new NodeService
-func NewService(ctx context.Context, config Config, storage cloudStorage, log logger.Logger) (*Service, error) {
+func NewService(
+	ctx context.Context, config Config, cf cacheFactory, storage cloudStorage, log logger.Logger,
+) (*Service, error) {
 	// Set defaults for unspecified config values
 	if config.TotalHashRanges == 0 {
 		config.TotalHashRanges = DefaultTotalHashRanges
@@ -101,10 +125,11 @@ func NewService(ctx context.Context, config Config, storage cloudStorage, log lo
 	}
 
 	service := &Service{
-		now:     time.Now,
-		config:  config,
-		caches:  make(map[uint32]*cachettl.Cache[string, bool]),
-		storage: storage,
+		now:          time.Now,
+		config:       config,
+		caches:       make(map[uint32]cache),
+		cacheFactory: cf,
+		storage:      storage,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
@@ -177,7 +202,7 @@ func (s *Service) initCaches(ctx context.Context) error {
 		}
 
 		// Create a new cache with no TTL refresh
-		cache := cachettl.New[string, bool](cachettl.WithNoRefreshTTL)
+		cache := s.cacheFactory()
 		s.caches[r] = cache
 
 		group.Go(func() error { // Try to load snapshot for this range
@@ -380,12 +405,12 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 }
 
 // createSnapshot creates a snapshot for a specific hash range
-func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache *cachettl.Cache[string, bool]) error {
+func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache cache) error {
 	// Create snapshot file
 	filename := getSnapshotFilename(hashRange)
 
 	buf := new(bytes.Buffer)
-	err := cachettl.CreateSnapshot(buf, cache)
+	err := cache.CreateSnapshot(buf)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot for range %d: %w", hashRange, err)
 	}
@@ -489,7 +514,7 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 }
 
 // loadSnapshot loads a snapshot for a specific hash range
-func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache *cachettl.Cache[string, bool]) error {
+func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache cache) error {
 	filename := getSnapshotFilename(hashRange)
 
 	buf := aws.NewWriteAtBuffer([]byte{})
@@ -499,7 +524,7 @@ func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache *cac
 	}
 
 	reader := bytes.NewReader(buf.Bytes())
-	return cachettl.LoadSnapshot(reader, cache)
+	return cache.LoadSnapshot(reader)
 }
 
 func getSnapshotFilename(hashRange uint32) string {
