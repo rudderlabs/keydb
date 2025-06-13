@@ -15,8 +15,8 @@ type Cache struct {
 }
 
 func New(path string) (*Cache, error) {
-	// Open a badger database on disk
-	opts := badger.DefaultOptions(path)
+	opts := badger.DefaultOptions(path) // Open a badger database on disk
+	opts.WithBloomFalsePositive(0)      // Setting this to 0 disables the bloom filter completely.
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, err
@@ -48,7 +48,7 @@ func (c *Cache) Get(key string) bool {
 }
 
 // Put adds or updates an element inside the cache with the specified TTL
-func (c *Cache) Put(key string, value bool, ttl time.Duration) {
+func (c *Cache) Put(key string, _ bool, ttl time.Duration) {
 	err := c.cache.Update(func(txn *badger.Txn) error {
 		entry := badger.NewEntry([]byte(key), []byte{})
 		if ttl > 0 {
