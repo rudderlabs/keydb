@@ -63,6 +63,7 @@ func (c *Cache) Put(key string, _ bool, ttl time.Duration) error {
 }
 
 // Len returns the number of elements in the cache
+// WARNING: this must be used in tests only
 func (c *Cache) Len() int {
 	count := 0
 	err := c.cache.View(func(txn *badger.Txn) error {
@@ -77,7 +78,7 @@ func (c *Cache) Len() int {
 		return nil
 	})
 	if err != nil {
-		return 0 // TODO we should handle the error
+		panic("failed to get cache length: " + err.Error())
 	}
 
 	return count
