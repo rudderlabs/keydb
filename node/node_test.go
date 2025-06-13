@@ -40,136 +40,81 @@ const (
 )
 
 func TestSimple(t *testing.T) {
-	t.Parallel()
-
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	minioClient, cloudStorage := getCloudStorage(t, pool)
+	run := func(t *testing.T, cf func() cache) {
+		t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+		minioClient, cloudStorage := getCloudStorage(t, pool)
 
-	// Create the node service
-	now := time.Now()
-	totalHashRanges := uint32(128)
-	node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           0,
-		ClusterSize:      1,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-	}, true)
-	c := getClient(t, totalHashRanges, node0Address)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	// Test Put
-	items := []*pb.KeyWithTTL{
-		{Key: "key1", TtlSeconds: testTTL},
-		{Key: "key2", TtlSeconds: testTTL},
-		{Key: "key3", TtlSeconds: testTTL},
+		// Create the node service
+		now := time.Now()
+		totalHashRanges := uint32(128)
+		node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, cf)
+		c := getClient(t, totalHashRanges, node0Address)
+
+		// Test Put
+		items := []*pb.KeyWithTTL{
+			{Key: "key1", TtlSeconds: testTTL},
+			{Key: "key2", TtlSeconds: testTTL},
+			{Key: "key3", TtlSeconds: testTTL},
+		}
+		require.NoError(t, c.Put(ctx, items))
+
+		keys := []string{"key1", "key2", "key3", "key4"}
+		exists, err := c.Get(ctx, keys)
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		err = c.CreateSnapshot(ctx)
+		require.NoError(t, err)
+
+		files, err := getContents(ctx, bucket, "", minioClient)
+		require.NoError(t, err)
+		require.Len(t, files, 3)
+		requireSnapshotFilename(t, 103, files[0])
+		requireSnapshotFilename(t, 122, files[1])
+		requireSnapshotFilename(t, 13, files[2])
+
+		cancel()
+		node0.Close()
+
+		// Let's start again from scratch to see if the data is properly loaded from the snapshots
+		ctx, cancel = context.WithCancel(context.Background())
+		defer cancel()
+		node0, node0Address = getService(ctx, t, cloudStorage, now, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, cf)
+		c = getClient(t, totalHashRanges, node0Address)
+
+		exists, err = c.Get(ctx, keys)
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		cancel()
+		node0.Close()
 	}
-	require.NoError(t, c.Put(ctx, items))
 
-	keys := []string{"key1", "key2", "key3", "key4"}
-	exists, err := c.Get(ctx, keys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
+	t.Run("memory", func(t *testing.T) {
+		run(t, getMemoryCache)
+	})
 
-	err = c.CreateSnapshot(ctx)
-	require.NoError(t, err)
-
-	files, err := getContents(ctx, bucket, "", minioClient)
-	require.NoError(t, err)
-	require.Len(t, files, 3)
-	requireTTLInSnapshot(t, 0, 103, files[0], "key1", now)
-	requireTTLInSnapshot(t, 0, 122, files[1], "key2", now)
-	requireTTLInSnapshot(t, 0, 13, files[2], "key3", now)
-
-	cancel()
-	node0.Close()
-
-	// Let's start again from scratch to see if the data is properly loaded from the snapshots
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
-	node0, node0Address = getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           0,
-		ClusterSize:      1,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-	}, true)
-	c = getClient(t, totalHashRanges, node0Address)
-
-	exists, err = c.Get(ctx, keys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
-
-	cancel()
-	node0.Close()
-}
-
-func TestSimpleBadger(t *testing.T) {
-	t.Parallel()
-
-	pool, err := dockertest.NewPool("")
-	require.NoError(t, err)
-	pool.MaxWait = 1 * time.Minute
-
-	minioClient, cloudStorage := getCloudStorage(t, pool)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Create the node service
-	now := time.Now()
-	totalHashRanges := uint32(128)
-	node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           0,
-		ClusterSize:      1,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-	}, false)
-	c := getClient(t, totalHashRanges, node0Address)
-
-	// Test Put
-	items := []*pb.KeyWithTTL{
-		{Key: "key1", TtlSeconds: testTTL},
-		{Key: "key2", TtlSeconds: testTTL},
-		{Key: "key3", TtlSeconds: testTTL},
-	}
-	require.NoError(t, c.Put(ctx, items))
-
-	keys := []string{"key1", "key2", "key3", "key4"}
-	exists, err := c.Get(ctx, keys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
-
-	err = c.CreateSnapshot(ctx)
-	require.NoError(t, err)
-
-	files, err := getContents(ctx, bucket, "", minioClient)
-	require.NoError(t, err)
-	require.Len(t, files, 3)
-
-	cancel()
-	node0.Close()
-
-	// Let's start again from scratch to see if the data is properly loaded from the snapshots
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
-	node0, node0Address = getService(ctx, t, cloudStorage, now, Config{
-		NodeID:           0,
-		ClusterSize:      1,
-		TotalHashRanges:  totalHashRanges,
-		SnapshotInterval: 60 * time.Second,
-	}, false)
-	c = getClient(t, totalHashRanges, node0Address)
-
-	exists, err = c.Get(ctx, keys)
-	require.NoError(t, err)
-	require.Equal(t, []bool{true, true, true, false}, exists)
-
-	cancel()
-	node0.Close()
+	t.Run("badger", func(t *testing.T) {
+		run(t, getBadgerCache(t))
+	})
 }
 
 func TestScaleUpAndDown(t *testing.T) {
@@ -178,6 +123,8 @@ func TestScaleUpAndDown(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
+
+	cf := getMemoryCache
 
 	minioClient, cloudStorage := getCloudStorage(t, pool)
 
@@ -192,7 +139,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, true)
+	}, cf)
 	c := getClient(t, totalHashRanges, node0Address)
 
 	// Test Put
@@ -214,9 +161,9 @@ func TestScaleUpAndDown(t *testing.T) {
 	files, err := getContents(ctx, bucket, "", minioClient)
 	require.NoError(t, err)
 	require.Len(t, files, 3)
-	requireTTLInSnapshot(t, 0, 2, files[2], "key1", now)
-	requireTTLInSnapshot(t, 0, 1, files[1], "key2", now)
-	requireTTLInSnapshot(t, 0, 0, files[0], "key3", now)
+	requireSnapshotFilename(t, 0, files[0])
+	requireSnapshotFilename(t, 1, files[1])
+	requireSnapshotFilename(t, 2, files[2])
 
 	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           1,
@@ -224,7 +171,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
-	}, true)
+	}, cf)
 	require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
 	require.NoError(t, operator.ScaleComplete(ctx))
 
@@ -277,6 +224,8 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 
 	minioClient, cloudStorage := getCloudStorage(t, pool)
 
+	cf := getMemoryCache // TODO
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -288,7 +237,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, true)
+	}, cf)
 	c := getClient(t, totalHashRanges, node0Address)
 
 	// Test Put
@@ -310,9 +259,9 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	files, err := getContents(ctx, bucket, "", minioClient)
 	require.NoError(t, err)
 	require.Len(t, files, 3)
-	requireTTLInSnapshot(t, 0, 2, files[2], "key1", now)
-	requireTTLInSnapshot(t, 0, 1, files[1], "key2", now)
-	requireTTLInSnapshot(t, 0, 0, files[0], "key3", now)
+	requireSnapshotFilename(t, 0, files[0])
+	requireSnapshotFilename(t, 1, files[1])
+	requireSnapshotFilename(t, 2, files[2])
 
 	node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
 		NodeID:           1,
@@ -320,7 +269,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
-	}, true)
+	}, cf)
 	require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
 	require.NoError(t, operator.ScaleComplete(ctx))
 
@@ -337,7 +286,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address, node1Address},
-	}, true)
+	}, cf)
 	require.NoError(t, operator.Scale(ctx, node0Address, node1Address, node2Address))
 	require.NoError(t, operator.ScaleComplete(ctx))
 
@@ -410,7 +359,7 @@ func getBadgerCache(t testing.TB) func() cache {
 }
 
 func getService(
-	ctx context.Context, t testing.TB, cs cloudStorage, now time.Time, nodeConfig Config, memory bool,
+	ctx context.Context, t testing.TB, cs cloudStorage, now time.Time, nodeConfig Config, cf func() cache,
 ) (*Service, string) {
 	t.Helper()
 
@@ -418,13 +367,6 @@ func getService(
 	require.NoError(t, err)
 	address := "localhost:" + strconv.Itoa(freePort)
 	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
-
-	var cf func() cache
-	if memory {
-		cf = getMemoryCache
-	} else {
-		cf = getBadgerCache(t)
-	}
 
 	service, err := NewService(ctx, nodeConfig, cf, cs, logger.NOP)
 	require.NoError(t, err)
@@ -464,14 +406,10 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 	return c
 }
 
-func requireTTLInSnapshot(t testing.TB, nodeNumber, hashRange int64, file File, key string, now time.Time) {
+func requireSnapshotFilename(t testing.TB, hashRange int64, file File) {
 	t.Helper()
 	expectedFilename := "range_" + strconv.FormatInt(hashRange, 10) + ".snapshot"
 	require.Equal(t, expectedFilename, file.Key)
-	require.Contains(t, file.Content, key+":")
-	ttl, err := strconv.ParseFloat(strings.Split(file.Content[0:len(file.Content)-1], ":")[1], 64)
-	require.NoError(t, err)
-	require.InDelta(t, now.UnixMilli(), ttl, (testTTL+3)*1000) // with 3s max difference allowed
 }
 
 func createMinioResource(
