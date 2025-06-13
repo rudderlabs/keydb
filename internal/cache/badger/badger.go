@@ -4,19 +4,64 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/dgraph-io/badger/v4/options"
+
+	"github.com/rudderlabs/rudder-go-kit/bytesize"
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
 type Cache struct {
 	cache *badger.DB
 }
 
-func New(path string) (*Cache, error) {
-	opts := badger.DefaultOptions(path) // Open a badger database on disk
-	opts.WithBloomFalsePositive(0)      // Setting this to 0 disables the bloom filter completely.
+func Factory(conf *config.Config, log logger.Logger) func(hashRange uint32) (*Cache, error) {
+	return func(hashRange uint32) (*Cache, error) {
+		badgerPath := conf.GetString("BadgerDB.Dedup.Path", "/tmp/badger")
+		badgerPath = path.Join(badgerPath, fmt.Sprintf("%d", hashRange))
+		if err := os.MkdirAll(badgerPath, 0o755); err != nil {
+			return nil, fmt.Errorf("failed to create badger directory for hash range %d: %w", hashRange, err)
+		}
+		if conf.GetBoolVar(false, "BadgerDB.Dedup.Debug", "BadgerDB.Debug") {
+		}
+		badgerCache, err := New(badgerPath, conf, log)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create cache factory: %w", err)
+		}
+		return badgerCache, nil
+	}
+}
+
+func New(path string, conf *config.Config, log logger.Logger) (*Cache, error) {
+	opts := badger.DefaultOptions(path).
+		WithBloomFalsePositive(0).
+		WithCompression(options.None).
+		WithNumGoroutines(1).
+		WithNumVersionsToKeep(1).
+		WithIndexCacheSize(conf.GetInt64Var(16*bytesize.MB, 1, "BadgerDB.Dedup.indexCacheSize", "BadgerDB.indexCacheSize")).
+		WithValueLogFileSize(conf.GetInt64Var(1*bytesize.MB, 1, "BadgerDB.Dedup.valueLogFileSize", "BadgerDB.valueLogFileSize")).
+		WithBlockSize(conf.GetIntVar(int(4*bytesize.KB), 1, "BadgerDB.Dedup.blockSize", "BadgerDB.blockSize")).
+		WithMemTableSize(conf.GetInt64Var(20*bytesize.MB, 1, "BadgerDB.Dedup.memTableSize", "BadgerDB.memTableSize")).
+		WithNumMemtables(conf.GetIntVar(5, 1, "BadgerDB.Dedup.numMemtable", "BadgerDB.numMemtable")).
+		WithNumLevelZeroTables(conf.GetIntVar(5, 1, "BadgerDB.Dedup.numLevelZeroTables", "BadgerDB.numLevelZeroTables")).
+		WithNumLevelZeroTablesStall(conf.GetIntVar(10, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall")).
+		WithBaseTableSize(conf.GetInt64Var(1*bytesize.MB, 1, "BadgerDB.Dedup.baseTableSize", "BadgerDB.baseTableSize")).
+		WithBaseLevelSize(conf.GetInt64Var(5*bytesize.MB, 1, "BadgerDB.Dedup.baseLevelSize", "BadgerDB.baseLevelSize")).
+		WithLevelSizeMultiplier(conf.GetIntVar(10, 1, "BadgerDB.Dedup.levelSizeMultiplier", "BadgerDB.levelSizeMultiplier")).
+		WithMaxLevels(conf.GetIntVar(7, 1, "BadgerDB.Dedup.maxLevels", "BadgerDB.maxLevels")).
+		WithNumCompactors(conf.GetIntVar(4, 1, "BadgerDB.Dedup.numCompactors", "BadgerDB.numCompactors")).
+		WithValueThreshold(conf.GetInt64Var(10*bytesize.B, 1, "BadgerDB.Dedup.valueThreshold", "BadgerDB.valueThreshold")).
+		WithSyncWrites(conf.GetBoolVar(false, "BadgerDB.Dedup.syncWrites", "BadgerDB.syncWrites")).
+		WithBlockCacheSize(conf.GetInt64Var(0, 1, "BadgerDB.Dedup.blockCacheSize", "BadgerDB.blockCacheSize")).
+		WithDetectConflicts(conf.GetBoolVar(false, "BadgerDB.Dedup.detectConflicts", "BadgerDB.detectConflicts")).
+		WithLogger(loggerForBadger{log})
+
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, err
@@ -135,4 +180,16 @@ func (c *Cache) CreateSnapshot(w io.Writer) error {
 // LoadSnapshot reads the cache contents from the provided reader
 func (c *Cache) LoadSnapshot(r io.Reader) error {
 	return c.cache.Load(r, 16)
+}
+
+func (c *Cache) Close() error {
+	return c.cache.Close()
+}
+
+type loggerForBadger struct {
+	logger.Logger
+}
+
+func (l loggerForBadger) Warningf(fmt string, args ...interface{}) {
+	l.Warnf(fmt, args...)
 }

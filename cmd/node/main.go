@@ -58,14 +58,9 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 		logger.NewDurationField("snapshotInterval", nodeConfig.SnapshotInterval),
 	)
 
-	badgerCacheFactory := func() (node.Cache, error) {
-		badgerCache, err := badger.New(conf.GetString("badgerPath", "/tmp/badger"))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create cache factory: %w", err)
-		}
-		return badgerCache, nil
+	badgerCacheFactory := func(hashRange uint32) (node.Cache, error) {
+		return badger.Factory(conf, log)(hashRange)
 	}
-
 	service, err := node.NewService(ctx, nodeConfig, badgerCacheFactory, cloudStorage, log.Child("service"))
 	if err != nil {
 		return fmt.Errorf("failed to create node service: %w", err)

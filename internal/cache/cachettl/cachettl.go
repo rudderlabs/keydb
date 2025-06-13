@@ -58,3 +58,8 @@ func (c *Cache) CreateSnapshot(w io.Writer) error {
 func (c *Cache) LoadSnapshot(r io.Reader) error {
 	return cachettl.LoadSnapshot(r, c.cache)
 }
+
+// Close releases any resources held by the cache and performs any necessary cleanup.
+func (c *Cache) Close() error { // TODO implementation
+	return nil
+}

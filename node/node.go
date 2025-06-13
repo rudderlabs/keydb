@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	cuckoo "github.com/seiflotfy/cuckoofilter"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -28,6 +29,9 @@ const (
 
 	// DefaultSnapshotInterval is the default interval for creating snapshots (in seconds)
 	DefaultSnapshotInterval = 60 * time.Second
+
+	// DefaultCuckooFilterCapacity is the default initial capacity of the cuckoo filter
+	DefaultCuckooFilterCapacity = 1_000_000
 )
 
 // Config holds the configuration for a node
@@ -46,6 +50,15 @@ type Config struct {
 
 	// Addresses is a list of node addresses that this node will advertise to clients
 	Addresses []string
+
+	// TODO make the test with cuckoo filters pass
+	// TODO handle deletions from cuckoo filter
+	// EnableCuckooFilter enables the cuckoo filter for faster key lookups
+	EnableCuckooFilter bool
+
+	// CuckooFilterCapacity is the initial capacity of the cuckoo filter
+	// If not specified, a default value will be used
+	CuckooFilterCapacity uint
 }
 
 // Service implements the NodeService gRPC service
@@ -58,6 +71,11 @@ type Service struct {
 
 	caches       map[uint32]Cache
 	cacheFactory cacheFactory
+	cuckooFilter *cuckoo.Filter
+	// cuckooItemCount tracks the number of items in the cuckoo filter
+	cuckooItemCount uint
+	// cuckooCapacity tracks the capacity of the cuckoo filter
+	cuckooCapacity uint
 
 	// mu protects the caches and scaling operations
 	mu sync.RWMutex
@@ -94,9 +112,12 @@ type Cache interface {
 
 	// LoadSnapshot reads the cache contents from the provided reader
 	LoadSnapshot(r io.Reader) error
+
+	// Close releases any resources associated with the cache and ensures proper cleanup. Returns an error if the operation fails.
+	Close() error
 }
 
-type cacheFactory func() (Cache, error)
+type cacheFactory func(hashRange uint32) (Cache, error)
 
 type cloudStorageReader interface {
 	Download(ctx context.Context, output io.WriterAt, key string) error
@@ -137,6 +158,20 @@ func NewService(
 		),
 	}
 
+	// Initialize cuckoo filter if enabled
+	if config.EnableCuckooFilter {
+		capacity := config.CuckooFilterCapacity
+		if capacity == 0 {
+			capacity = DefaultCuckooFilterCapacity
+		}
+		service.cuckooFilter = cuckoo.NewFilter(capacity)
+		service.cuckooCapacity = capacity
+		service.cuckooItemCount = 0
+		service.logger.Infon("Cuckoo filter enabled",
+			logger.NewIntField("capacity", int64(capacity)),
+		)
+	}
+
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx); err != nil {
 		return nil, err
@@ -149,7 +184,14 @@ func NewService(
 	return service, nil
 }
 
-func (s *Service) Close() { s.waitGroup.Wait() }
+func (s *Service) Close() {
+	s.waitGroup.Wait()
+	for _, cache := range s.caches {
+		if err := cache.Close(); err != nil {
+			s.logger.Errorn("Error closing cache", obskit.Error(err))
+		}
+	}
+}
 
 // snapshotLoop periodically creates snapshots
 func (s *Service) snapshotLoop(ctx context.Context) {
@@ -202,7 +244,7 @@ func (s *Service) initCaches(ctx context.Context) error {
 		}
 
 		// Create a new cache with no TTL refresh
-		cache, err := s.cacheFactory()
+		cache, err := s.cacheFactory(r)
 		if err != nil {
 			return fmt.Errorf("failed to create cache for range %d: %w", r, err)
 		}
@@ -254,6 +296,35 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	// Create a map to track the original indices of keys
 	responseMu := sync.Mutex{}
 	response.Exists = make([]bool, len(req.Keys))
+
+	// Check cuckoo filter first if enabled
+	if s.config.EnableCuckooFilter && s.cuckooFilter != nil {
+		for _, key := range req.Keys {
+			// If the key is definitely not in the set, we can return false without querying the cache
+			if !s.cuckooFilter.Lookup([]byte(key)) {
+				response.Exists[indexes[key]] = false
+				// Remove the key from itemsByHashRange to avoid querying the cache
+				for hashRange, keys := range itemsByHashRange {
+					for i, k := range keys {
+						if k == key {
+							// Remove the key from the slice
+							itemsByHashRange[hashRange] = append(keys[:i], keys[i+1:]...)
+							break
+						}
+					}
+					// If the slice is empty, remove the hash range
+					if len(itemsByHashRange[hashRange]) == 0 {
+						delete(itemsByHashRange, hashRange)
+					}
+				}
+			}
+		}
+
+		// If all keys were filtered out, we can return early
+		if len(itemsByHashRange) == 0 {
+			return response, nil
+		}
+	}
 
 	group, _ := kitsync.NewEagerGroup(ctx, len(itemsByHashRange))
 	for hashRange, keys := range itemsByHashRange {
@@ -317,6 +388,32 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		s.logger.Errorn("Error getting hashes for keys", obskit.Error(err))
 		return resp, nil
+	}
+
+	// Add keys to cuckoo filter if enabled
+	if s.config.EnableCuckooFilter && s.cuckooFilter != nil {
+		// Check if we need to grow the filter (if load factor > 0.9)
+		if float64(s.cuckooItemCount)/float64(s.cuckooCapacity) > 0.9 {
+			// Create a new filter with double the capacity
+			newCapacity := s.cuckooCapacity * 2
+			newFilter := cuckoo.NewFilter(newCapacity)
+
+			// We don't need to copy the old filter's contents because we're adding all keys again
+			s.cuckooFilter = newFilter
+			s.cuckooCapacity = newCapacity
+			s.cuckooItemCount = 0 // Will be incremented below
+			s.logger.Infon("Cuckoo filter resized",
+				logger.NewIntField("newCapacity", int64(newCapacity)),
+			)
+		}
+
+		// Add all keys to the cuckoo filter
+		for _, key := range req.Keys {
+			// Only increment the count if the key was actually inserted (not already present)
+			if s.cuckooFilter.InsertUnique([]byte(key)) {
+				s.cuckooItemCount++
+			}
+		}
 	}
 
 	ttl := time.Duration(req.TtlSeconds) * time.Second
