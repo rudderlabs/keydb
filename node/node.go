@@ -81,7 +81,7 @@ type Cache interface {
 	Get(keys []string) ([]bool, error)
 
 	// Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
-	Put(keys []string, value bool, ttl time.Duration) error
+	Put(keys []string, ttl time.Duration) error
 
 	// Len returns the number of elements in the cache
 	Len() int
@@ -273,8 +273,7 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 			// Update the response with the results
 			responseMu.Lock()
 			for i, key := range keys {
-				originalIndex := indexes[key]
-				response.Exists[originalIndex] = existsValues[i]
+				response.Exists[indexes[key]] = existsValues[i]
 			}
 			responseMu.Unlock()
 
@@ -331,7 +330,7 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 			}
 
 			// Store the keys in the cache with the specified TTL
-			err := cache.Put(keys, true, ttl)
+			err := cache.Put(keys, ttl)
 			if err != nil {
 				return fmt.Errorf("failed to put keys into cache: %w", err)
 			}

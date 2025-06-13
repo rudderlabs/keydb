@@ -32,9 +32,9 @@ func (c *Cache) Get(keys []string) ([]bool, error) {
 }
 
 // Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
-func (c *Cache) Put(keys []string, value bool, ttl time.Duration) error {
+func (c *Cache) Put(keys []string, ttl time.Duration) error {
 	for _, key := range keys {
-		c.cache.Put(key, value, ttl)
+		c.cache.Put(key, true, ttl)
 	}
 	return nil
 }

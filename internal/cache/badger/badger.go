@@ -51,7 +51,7 @@ func (c *Cache) Get(keys []string) ([]bool, error) {
 }
 
 // Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
-func (c *Cache) Put(keys []string, _ bool, ttl time.Duration) error {
+func (c *Cache) Put(keys []string, ttl time.Duration) error {
 	err := c.cache.Update(func(txn *badger.Txn) error {
 		for _, key := range keys {
 			entry := badger.NewEntry([]byte(key), []byte{})

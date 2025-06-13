@@ -32,7 +32,7 @@ import (
 )
 
 const (
-	testTTL         = 10
+	testTTL         = 5 * time.Minute
 	accessKeyId     = "MYACCESSKEYID"
 	secretAccessKey = "MYSECRETACCESSKEY"
 	region          = "MYREGION"
@@ -53,9 +53,8 @@ func TestSimple(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		now := time.Now()
 		totalHashRanges := uint32(128)
-		node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
@@ -66,8 +65,7 @@ func TestSimple(t *testing.T) {
 		// Test Put
 		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
 
-		keys := []string{"key1", "key2", "key3", "key4"}
-		exists, err := c.Get(ctx, keys)
+		exists, err := c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
@@ -87,7 +85,7 @@ func TestSimple(t *testing.T) {
 		// Let's start again from scratch to see if the data is properly loaded from the snapshots
 		ctx, cancel = context.WithCancel(context.Background())
 		defer cancel()
-		node0, node0Address = getService(ctx, t, cloudStorage, now, Config{
+		node0, node0Address = getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
@@ -95,7 +93,7 @@ func TestSimple(t *testing.T) {
 		}, cf)
 		c = getClient(t, totalHashRanges, node0Address)
 
-		exists, err = c.Get(ctx, keys)
+		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
@@ -124,9 +122,8 @@ func TestScaleUpAndDown(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		now := time.Now()
 		totalHashRanges := uint32(3)
-		node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
@@ -152,7 +149,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		requireSnapshotFilename(t, 1, files[1])
 		requireSnapshotFilename(t, 2, files[2])
 
-		node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
+		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
 			ClusterSize:      2,
 			TotalHashRanges:  totalHashRanges,
@@ -223,9 +220,8 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		now := time.Now()
 		totalHashRanges := uint32(3)
-		node0, node0Address := getService(ctx, t, cloudStorage, now, Config{
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
@@ -251,7 +247,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		requireSnapshotFilename(t, 1, files[1])
 		requireSnapshotFilename(t, 2, files[2])
 
-		node1, node1Address := getService(ctx, t, cloudStorage, now, Config{
+		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
 			ClusterSize:      2,
 			TotalHashRanges:  totalHashRanges,
@@ -268,7 +264,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.Equal(t, 2, c.ClusterSize(), "Now the cluster size should be updated to 2")
 
 		// Add a 3rd node to the cluster
-		node2, node2Address := getService(ctx, t, cloudStorage, now, Config{
+		node2, node2Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           2,
 			ClusterSize:      3,
 			TotalHashRanges:  totalHashRanges,
@@ -354,7 +350,7 @@ func getBadgerCache(t testing.TB) cacheFactory {
 }
 
 func getService(
-	ctx context.Context, t testing.TB, cs cloudStorage, now time.Time, nodeConfig Config, cf cacheFactory,
+	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, cf cacheFactory,
 ) (*Service, string) {
 	t.Helper()
 
@@ -365,7 +361,6 @@ func getService(
 
 	service, err := NewService(ctx, nodeConfig, cf, cs, logger.NOP)
 	require.NoError(t, err)
-	service.now = func() time.Time { return now }
 
 	// Create a gRPC server
 	server := grpc.NewServer()
