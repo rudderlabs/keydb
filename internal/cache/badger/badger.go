@@ -24,8 +24,8 @@ func New(path string) (*Cache, error) {
 	return &Cache{cache: db}, nil
 }
 
-// Get returns the value associated with the key
-func (c *Cache) Get(key string) bool {
+// Get returns the value associated with the key and an error if the operation failed
+func (c *Cache) Get(key string) (bool, error) {
 	var result bool
 	err := c.cache.View(func(txn *badger.Txn) error {
 		_, err := txn.Get([]byte(key))
@@ -41,14 +41,14 @@ func (c *Cache) Get(key string) bool {
 		return nil
 	})
 	if err != nil {
-		return false // TODO we should handle the error
+		return false, fmt.Errorf("failed to get key %s: %w", key, err)
 	}
 
-	return result
+	return result, nil
 }
 
-// Put adds or updates an element inside the cache with the specified TTL
-func (c *Cache) Put(key string, _ bool, ttl time.Duration) {
+// Put adds or updates an element inside the cache with the specified TTL and returns an error if the operation failed
+func (c *Cache) Put(key string, _ bool, ttl time.Duration) error {
 	err := c.cache.Update(func(txn *badger.Txn) error {
 		entry := badger.NewEntry([]byte(key), []byte{})
 		if ttl > 0 {
@@ -57,8 +57,9 @@ func (c *Cache) Put(key string, _ bool, ttl time.Duration) {
 		return txn.SetEntry(entry)
 	})
 	if err != nil {
-		// TODO we should handle the error
+		return fmt.Errorf("failed to put key %s: %w", key, err)
 	}
+	return nil
 }
 
 // Len returns the number of elements in the cache

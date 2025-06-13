@@ -77,11 +77,11 @@ type Service struct {
 
 // Cache is an interface for a key-value store with TTL support
 type Cache interface {
-	// Get returns the value associated with the key
-	Get(key string) bool
+	// Get returns the value associated with the key and an error if the operation failed
+	Get(key string) (bool, error)
 
-	// Put adds or updates an element inside the cache with the specified TTL
-	Put(key string, value bool, ttl time.Duration)
+	// Put adds or updates an element inside the cache with the specified TTL and returns an error if the operation failed
+	Put(key string, value bool, ttl time.Duration) error
 
 	// Len returns the number of elements in the cache
 	Len() int
@@ -260,7 +260,13 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		}
 
 		// Check if the key exists in the cache
-		response.Exists[i] = cache.Get(key)
+		exists, err := cache.Get(key)
+		if err != nil {
+			response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
+			s.logger.Errorn("Error getting key", logger.NewStringField("key", key), obskit.Error(err))
+			return response, nil
+		}
+		response.Exists[i] = exists
 	}
 
 	return response, nil
@@ -302,7 +308,12 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 
 		// Store the key in the cache with the specified TTL
 		ttl := time.Duration(item.TtlSeconds) * time.Second
-		cache.Put(item.Key, true, ttl)
+		err := cache.Put(item.Key, true, ttl)
+		if err != nil {
+			resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
+			s.logger.Errorn("Error putting key", logger.NewStringField("key", item.Key), obskit.Error(err))
+			return resp, nil
+		}
 	}
 
 	resp.Success = true

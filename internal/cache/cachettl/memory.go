@@ -19,14 +19,15 @@ func New() *Cache {
 	}
 }
 
-// Get returns the value associated with the key
-func (c *Cache) Get(key string) bool {
-	return c.cache.Get(key)
+// Get returns the value associated with the key and an error if the operation failed
+func (c *Cache) Get(key string) (bool, error) {
+	return c.cache.Get(key), nil
 }
 
-// Put adds or updates an element inside the cache with the specified TTL
-func (c *Cache) Put(key string, value bool, ttl time.Duration) {
+// Put adds or updates an element inside the cache with the specified TTL and returns an error if the operation failed
+func (c *Cache) Put(key string, value bool, ttl time.Duration) error {
 	c.cache.Put(key, value, ttl)
+	return nil
 }
 
 // Len returns the number of elements in the cache
