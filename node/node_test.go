@@ -64,12 +64,7 @@ func TestSimple(t *testing.T) {
 		c := getClient(t, totalHashRanges, node0Address)
 
 		// Test Put
-		items := []*pb.KeyWithTTL{
-			{Key: "key1", TtlSeconds: testTTL},
-			{Key: "key2", TtlSeconds: testTTL},
-			{Key: "key3", TtlSeconds: testTTL},
-		}
-		require.NoError(t, c.Put(ctx, items))
+		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
 
 		keys := []string{"key1", "key2", "key3", "key4"}
 		exists, err := c.Get(ctx, keys)
@@ -140,12 +135,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		c := getClient(t, totalHashRanges, node0Address)
 
 		// Test Put
-		items := []*pb.KeyWithTTL{
-			{Key: "key1", TtlSeconds: testTTL},
-			{Key: "key2", TtlSeconds: testTTL},
-			{Key: "key3", TtlSeconds: testTTL},
-		}
-		require.NoError(t, c.Put(ctx, items))
+		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
 
 		keys := []string{"key1", "key2", "key3", "key4"}
 		exists, err := c.Get(ctx, keys)
@@ -244,12 +234,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		c := getClient(t, totalHashRanges, node0Address)
 
 		// Test Put
-		items := []*pb.KeyWithTTL{
-			{Key: "key1", TtlSeconds: testTTL},
-			{Key: "key2", TtlSeconds: testTTL},
-			{Key: "key3", TtlSeconds: testTTL},
-		}
-		require.NoError(t, c.Put(ctx, items))
+		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
 
 		keys := []string{"key1", "key2", "key3", "key4"}
 		exists, err := c.Get(ctx, keys)
@@ -297,10 +282,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.Equal(t, 2, c.ClusterSize())
 
 		// Perform a PUT operation which should update the client's internal cluster data
-		newItems := []*pb.KeyWithTTL{
-			{Key: "key5", TtlSeconds: testTTL},
-		}
-		require.NoError(t, c.Put(ctx, newItems))
+		require.NoError(t, c.Put(ctx, []string{"key5"}, testTTL))
 
 		// Verify that the client's cluster size is now 3 (updated after PUT)
 		require.Equal(t, 3, c.ClusterSize())

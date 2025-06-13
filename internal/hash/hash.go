@@ -37,7 +37,10 @@ func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, u
 	return hashRange, hashRange % numberOfNodes
 }
 
-func GetHashesForKeys(keys []string, nodeID, numberOfNodes, totalHashRanges uint32) (map[uint32][]string, error) {
+func GetKeysByHashRange(keys []string, nodeID, numberOfNodes, totalHashRanges uint32) (
+	map[uint32][]string, // itemsByHashRange
+	error,
+) {
 	if numberOfNodes == 0 {
 		panic("numberOfNodes must be greater than 0")
 	}
@@ -60,8 +63,39 @@ func GetHashesForKeys(keys []string, nodeID, numberOfNodes, totalHashRanges uint
 		m[hashRange] = append(m[hashRange], key)
 	}
 
-	// Determine which node handles this hash range
 	return m, nil
+}
+
+func GetKeysByHashRangeWithIndexes(keys []string, nodeID, numberOfNodes, totalHashRanges uint32) (
+	map[uint32][]string, // itemsByHashRange
+	map[string]int, // indexes
+	error,
+) {
+	if numberOfNodes == 0 {
+		panic("numberOfNodes must be greater than 0")
+	}
+	if totalHashRanges < numberOfNodes {
+		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	}
+
+	m := make(map[uint32][]string)
+	indexes := make(map[string]int, len(keys))
+	for i, key := range keys {
+		// Create a new hash object for each key
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(key))
+		hashValue := h.Sum32()
+		hashRange := hashValue % totalHashRanges
+
+		if nodeID != hashRange%numberOfNodes {
+			return nil, nil, fmt.Errorf("hashRange %d not for node %d: %w", hashRange, nodeID, ErrWrongNode)
+		}
+
+		m[hashRange] = append(m[hashRange], key)
+		indexes[key] = i
+	}
+
+	return m, indexes, nil
 }
 
 // GetNodeHashRanges returns the hash ranges that a specific node should handle

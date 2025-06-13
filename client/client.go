@@ -246,19 +246,19 @@ func (c *Client) get(
 }
 
 // Put stores multiple key-value pairs with TTL
-func (c *Client) Put(ctx context.Context, items []*pb.KeyWithTTL) error {
+func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	return c.put(ctx, items)
+	return c.put(ctx, keys, ttl)
 }
 
-func (c *Client) put(ctx context.Context, items []*pb.KeyWithTTL) error {
+func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) error {
 	// Group items by node
-	itemsByNode := make(map[uint32][]*pb.KeyWithTTL)
-	for _, item := range items {
-		_, nodeID := hash.GetNodeNumber(item.Key, c.clusterSize, c.config.TotalHashRanges)
-		itemsByNode[nodeID] = append(itemsByNode[nodeID], item)
+	itemsByNode := make(map[uint32][]string)
+	for _, key := range keys {
+		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
+		itemsByNode[nodeID] = append(itemsByNode[nodeID], key)
 	}
 
 	hasClusterSizeChanged := atomic.Value{}
@@ -279,7 +279,7 @@ func (c *Client) put(ctx context.Context, items []*pb.KeyWithTTL) error {
 			}
 
 			// Create the request
-			req := &pb.PutRequest{Items: nodeItems}
+			req := &pb.PutRequest{Keys: nodeItems, TtlSeconds: uint64(ttl.Seconds())}
 
 			// Send the request with retries
 			var err error
@@ -330,7 +330,7 @@ func (c *Client) put(ctx context.Context, items []*pb.KeyWithTTL) error {
 			if err = c.updateClusterSize(nodesAddresses); err != nil {
 				return fmt.Errorf("failed to update cluster size: %w", err)
 			}
-			return c.put(ctx, items)
+			return c.put(ctx, keys, ttl)
 		}
 		return err
 	}

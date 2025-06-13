@@ -46,7 +46,9 @@ message GetResponse {
 // The client will automatically split PutRequest into multiple ones, one per node depending on the keys and hash-ranges
 // Then the requests are sent in parallel to all the concerned nodes and put back into a single PutResponse
 message PutRequest {
-  repeated KeyWithTTL items = 1;
+  repeated string keys = 1;
+  uint64 ttl_seconds = 2;
+  ErrorCode error_code = 3; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
 }
 
 // PutResponse contains the operation result and cluster information
@@ -55,12 +57,6 @@ message PutResponse {
   uint32 cluster_size = 2; // Number of nodes in the cluster
   repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
   ErrorCode error_code = 4; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
-}
-
-// KeyWithTTL represents a key with its time to live
-message KeyWithTTL {
-  string key = 1;
-  uint64 ttl_seconds = 2;
 }
 
 // ErrorCode enum for different types of errors
