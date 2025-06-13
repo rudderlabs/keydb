@@ -20,9 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/rudderlabs/keydb/internal/cache/memory"
-
 	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/cache/memory"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
