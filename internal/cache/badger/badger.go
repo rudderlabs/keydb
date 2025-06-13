@@ -40,7 +40,7 @@ func Factory(conf *config.Config, log logger.Logger) func(hashRange uint32) (*Ca
 
 func New(path string, conf *config.Config, log logger.Logger) (*Cache, error) {
 	opts := badger.DefaultOptions(path).
-		WithBloomFalsePositive(0).
+		WithBloomFalsePositive(0). // TODO look into this instead of using cuckoo although it would be per hash range
 		WithCompression(options.None).
 		WithNumGoroutines(1).
 		WithNumVersionsToKeep(1).
@@ -190,6 +190,6 @@ type loggerForBadger struct {
 	logger.Logger
 }
 
-func (l loggerForBadger) Warningf(fmt string, args ...interface{}) {
+func (l loggerForBadger) Warningf(fmt string, args ...any) {
 	l.Warnf(fmt, args...)
 }

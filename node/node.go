@@ -29,9 +29,6 @@ const (
 
 	// DefaultSnapshotInterval is the default interval for creating snapshots (in seconds)
 	DefaultSnapshotInterval = 60 * time.Second
-
-	// DefaultCuckooFilterCapacity is the default initial capacity of the cuckoo filter
-	DefaultCuckooFilterCapacity = 1_000_000
 )
 
 // Config holds the configuration for a node
@@ -55,10 +52,6 @@ type Config struct {
 	// TODO handle deletions from cuckoo filter
 	// EnableCuckooFilter enables the cuckoo filter for faster key lookups
 	EnableCuckooFilter bool
-
-	// CuckooFilterCapacity is the initial capacity of the cuckoo filter
-	// If not specified, a default value will be used
-	CuckooFilterCapacity uint
 }
 
 // Service implements the NodeService gRPC service
@@ -71,7 +64,7 @@ type Service struct {
 
 	caches       map[uint32]Cache
 	cacheFactory cacheFactory
-	cuckooFilter *cuckoo.Filter
+	cuckooFilter *cuckoo.ScalableCuckooFilter
 	// cuckooItemCount tracks the number of items in the cuckoo filter
 	cuckooItemCount uint
 	// cuckooCapacity tracks the capacity of the cuckoo filter
@@ -160,16 +153,9 @@ func NewService(
 
 	// Initialize cuckoo filter if enabled
 	if config.EnableCuckooFilter {
-		capacity := config.CuckooFilterCapacity
-		if capacity == 0 {
-			capacity = DefaultCuckooFilterCapacity
-		}
-		service.cuckooFilter = cuckoo.NewFilter(capacity)
-		service.cuckooCapacity = capacity
-		service.cuckooItemCount = 0
-		service.logger.Infon("Cuckoo filter enabled",
-			logger.NewIntField("capacity", int64(capacity)),
-		)
+		service.cuckooFilter = cuckoo.NewScalableCuckooFilter() // TODO is a mutex needed? double check
+		service.cuckooItemCount = 0                             // TODO use atomic?
+		service.logger.Infon("Cuckoo filter enabled")
 	}
 
 	// Initialize caches for all hash ranges this node handles
@@ -392,21 +378,6 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 
 	// Add keys to cuckoo filter if enabled
 	if s.config.EnableCuckooFilter && s.cuckooFilter != nil {
-		// Check if we need to grow the filter (if load factor > 0.9)
-		if float64(s.cuckooItemCount)/float64(s.cuckooCapacity) > 0.9 {
-			// Create a new filter with double the capacity
-			newCapacity := s.cuckooCapacity * 2
-			newFilter := cuckoo.NewFilter(newCapacity)
-
-			// We don't need to copy the old filter's contents because we're adding all keys again
-			s.cuckooFilter = newFilter
-			s.cuckooCapacity = newCapacity
-			s.cuckooItemCount = 0 // Will be incremented below
-			s.logger.Infon("Cuckoo filter resized",
-				logger.NewIntField("newCapacity", int64(newCapacity)),
-			)
-		}
-
 		// Add all keys to the cuckoo filter
 		for _, key := range req.Keys {
 			// Only increment the count if the key was actually inserted (not already present)
