@@ -170,7 +170,7 @@ func (c *Cache) String() string {
 
 // CreateSnapshot writes the cache contents to the provided writer
 func (c *Cache) CreateSnapshot(w io.Writer) error {
-	_, err := c.cache.Backup(w, 0)
+	_, err := c.cache.Backup(w, 0) // TODO we should optimize this and use the "since" parameter
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %w", err)
 	}
