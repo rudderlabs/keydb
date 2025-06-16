@@ -45,7 +45,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 		NodeID:           uint32(conf.GetInt("nodeId", 0)),
 		ClusterSize:      uint32(conf.GetInt("clusterSize", 1)),
 		TotalHashRanges:  uint32(conf.GetInt("totalHashRanges", 128)),
-		SnapshotInterval: conf.GetDuration("snapshotInterval", 60, time.Second),
+		SnapshotInterval: conf.GetDuration("snapshotInterval", 24, time.Hour),
 		Addresses:        conf.GetStringSlice("nodeAddresses", []string{"localhost:50051"}),
 	}
 

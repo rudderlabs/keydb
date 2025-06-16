@@ -7,7 +7,7 @@ import (
 	"github.com/rudderlabs/keydb/internal/cachettl"
 )
 
-// TODO this memory implementation might be useless after all since badger also supports InMemory mode, also
+// TODO delete this implementation since it was being used for prototyping only
 // keeping everything in memory won't really be doable in production
 
 // Cache is an in-memory implementation of the cache interface using the cachettl package
@@ -50,8 +50,8 @@ func (c *Cache) String() string {
 }
 
 // CreateSnapshot writes the cache contents to the provided writer
-func (c *Cache) CreateSnapshot(w io.Writer) error {
-	return cachettl.CreateSnapshot(w, c.cache)
+func (c *Cache) CreateSnapshot(w io.Writer) (uint64, error) {
+	return 0, cachettl.CreateSnapshot(w, c.cache)
 }
 
 // LoadSnapshot reads the cache contents from the provided reader

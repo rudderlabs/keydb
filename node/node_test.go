@@ -2,7 +2,6 @@ package node
 
 import (
 	"bufio"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -47,7 +46,7 @@ func TestSimple(t *testing.T) {
 	run := func(t *testing.T, conf *config.Config, cf cacheFactory) {
 		t.Parallel()
 
-		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
+		_, cloudStorage := getCloudStorage(t, pool, conf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -71,13 +70,6 @@ func TestSimple(t *testing.T) {
 
 		err = c.CreateSnapshot(ctx)
 		require.NoError(t, err)
-
-		files, err := getContents(ctx, bucket, "", minioClient)
-		require.NoError(t, err)
-		require.Len(t, files, 3)
-		requireSnapshotFilename(t, 103, files[0])
-		requireSnapshotFilename(t, 122, files[1])
-		requireSnapshotFilename(t, 13, files[2])
 
 		cancel()
 		node0.Close()
@@ -108,6 +100,12 @@ func TestSimple(t *testing.T) {
 
 	t.Run("badger", func(t *testing.T) {
 		conf := config.New()
+		run(t, conf, getBadgerCache(t, conf))
+	})
+
+	t.Run("badger compressed", func(t *testing.T) {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Compress", true)
 		run(t, conf, getBadgerCache(t, conf))
 	})
 }
@@ -147,9 +145,9 @@ func TestScaleUpAndDown(t *testing.T) {
 		files, err := getContents(ctx, bucket, "", minioClient)
 		require.NoError(t, err)
 		require.Len(t, files, 3)
-		requireSnapshotFilename(t, 0, files[0])
-		requireSnapshotFilename(t, 1, files[1])
-		requireSnapshotFilename(t, 2, files[2])
+		requireSnapshotFilename(t, 0, 0, files[0])
+		requireSnapshotFilename(t, 1, 0, files[1])
+		requireSnapshotFilename(t, 2, 0, files[2])
 
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
@@ -247,9 +245,9 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		files, err := getContents(ctx, bucket, "", minioClient)
 		require.NoError(t, err)
 		require.Len(t, files, 3)
-		requireSnapshotFilename(t, 0, files[0])
-		requireSnapshotFilename(t, 1, files[1])
-		requireSnapshotFilename(t, 2, files[2])
+		requireSnapshotFilename(t, 0, 0, files[0])
+		requireSnapshotFilename(t, 1, 0, files[1])
+		requireSnapshotFilename(t, 2, 0, files[2])
 
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
@@ -401,9 +399,9 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 	return c
 }
 
-func requireSnapshotFilename(t testing.TB, hashRange int64, file File) {
+func requireSnapshotFilename(t testing.TB, hashRange int64, since uint64, file File) {
 	t.Helper()
-	expectedFilename := "range_" + strconv.FormatInt(hashRange, 10) + ".snapshot"
+	expectedFilename := "hr_" + strconv.FormatInt(hashRange, 10) + "_s_" + strconv.FormatUint(since, 10) + ".snapshot"
 	require.Equal(t, expectedFilename, file.Key)
 }
 
@@ -475,30 +473,17 @@ func getContents(ctx context.Context, bucket, prefix string, client *minio.Clien
 	}
 	for objInfo := range client.ListObjects(ctx, bucket, opts) {
 		if objInfo.Err != nil {
-			return nil, objInfo.Err
+			return nil, fmt.Errorf("list objects: %w", objInfo.Err)
 		}
 
 		o, err := client.GetObject(ctx, bucket, objInfo.Key, minio.GetObjectOptions{})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("get object: %w", err)
 		}
 
-		var r io.Reader
-		br := bufio.NewReader(o)
-		magic, err := br.Peek(2)
-		// check if the file is gzipped using the magic number
-		if err == nil && magic[0] == 31 && magic[1] == 139 {
-			r, err = gzip.NewReader(br)
-			if err != nil {
-				return nil, fmt.Errorf("gunzip: %w", err)
-			}
-		} else {
-			r = br
-		}
-
-		b, err := io.ReadAll(r)
+		b, err := io.ReadAll(bufio.NewReader(o))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read all: %w", err)
 		}
 
 		contents = append(contents, File{

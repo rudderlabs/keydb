@@ -1,12 +1,14 @@
 package badger
 
 import (
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -17,8 +19,14 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
+var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
+
 type Cache struct {
-	cache *badger.DB
+	cache            *badger.DB
+	compress         bool
+	snapshotSince    uint64
+	snapshotting     bool
+	snapshottingLock sync.Mutex
 }
 
 func Factory(conf *config.Config, log logger.Logger) func(hashRange uint32) (*Cache, error) {
@@ -66,7 +74,10 @@ func New(path string, conf *config.Config, log logger.Logger) (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Cache{cache: db}, nil
+	return &Cache{
+		cache:    db,
+		compress: conf.GetBool("BadgerDB.Dedup.Compress", true),
+	}, nil
 }
 
 // Get returns the values associated with the keys and an error if the operation failed
@@ -116,7 +127,7 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 }
 
 // Len returns the number of elements in the cache
-// WARNING: this must be used in tests only
+// WARNING: this must be used in tests only TODO protect this with a testMode=false by default
 func (c *Cache) Len() int {
 	count := 0
 	err := c.cache.View(func(txn *badger.Txn) error {
@@ -137,6 +148,7 @@ func (c *Cache) Len() int {
 }
 
 // String returns a string representation of the cache
+// WARNING: this must be used in tests only TODO protect this with a testMode=false by default
 func (c *Cache) String() string {
 	sb := strings.Builder{}
 	sb.WriteString("{")
@@ -169,16 +181,47 @@ func (c *Cache) String() string {
 }
 
 // CreateSnapshot writes the cache contents to the provided writer
-func (c *Cache) CreateSnapshot(w io.Writer) error {
-	_, err := c.cache.Backup(w, 0) // TODO we should optimize this and use the "since" parameter
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot: %w", err)
+func (c *Cache) CreateSnapshot(w io.Writer) (uint64, error) {
+	c.snapshottingLock.Lock()
+	if c.snapshotting {
+		c.snapshottingLock.Unlock()
+		return 0, ErrSnapshotInProgress
 	}
-	return nil
+
+	since := c.snapshotSince
+	c.snapshotting = true
+	c.snapshottingLock.Unlock()
+
+	// TODO gzip should be configurable, maybe we want to use another algorithm with a different compression level
+	if c.compress {
+		w = gzip.NewWriter(w)
+		defer func() { _ = w.(*gzip.Writer).Close() }()
+	}
+
+	newSince, err := c.cache.Backup(w, since)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create snapshot: %w", err)
+	}
+
+	c.snapshottingLock.Lock()
+	c.snapshotSince = newSince
+	c.snapshotting = false
+	c.snapshottingLock.Unlock()
+
+	return since, nil
 }
 
 // LoadSnapshot reads the cache contents from the provided reader
 func (c *Cache) LoadSnapshot(r io.Reader) error {
+	// TODO gzip should be configurable, maybe we want to use another algorithm with a different compression level
+	if c.compress {
+		var err error
+		r, err = gzip.NewReader(r)
+		if err != nil {
+			return fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		defer func() { _ = r.(*gzip.Reader).Close() }()
+	}
 	return c.cache.Load(r, 16)
 }
 

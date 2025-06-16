@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -27,7 +28,7 @@ const (
 	DefaultTotalHashRanges = 128
 
 	// DefaultSnapshotInterval is the default interval for creating snapshots (in seconds)
-	DefaultSnapshotInterval = 60 * time.Second
+	DefaultSnapshotInterval = 24 * time.Hour
 )
 
 // Config holds the configuration for a node
@@ -90,7 +91,8 @@ type Cache interface {
 	String() string
 
 	// CreateSnapshot writes the cache contents to the provided writer
-	CreateSnapshot(w io.Writer) error
+	// it returns a timestamp (version) indicating the version of last entry that is dumped
+	CreateSnapshot(w io.Writer) (uint64, error)
 
 	// LoadSnapshot reads the cache contents from the provided reader
 	LoadSnapshot(r io.Reader) error
@@ -103,6 +105,7 @@ type cacheFactory func(hashRange uint32) (Cache, error)
 
 type cloudStorageReader interface {
 	Download(ctx context.Context, output io.WriterAt, key string) error
+	ListFilesWithPrefix(ctx context.Context, startAfter, prefix string, maxItems int64) filemanager.ListSession
 }
 
 type cloudStorageWriter interface {
@@ -398,87 +401,6 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 	}, nil
 }
 
-// CreateSnapshot implements the CreateSnapshot RPC method
-// TODO this can be optimized a lot! For example we could snapshot on local disk every 10s and work only on the head
-// and tail of the file (i.e. remove expired from head and append new entries).
-// Then once a minute we can upload the whole file to S3.
-// The file that we upload could be compressed, for example by using zstd with dictionaries.
-func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequest) (*pb.CreateSnapshotResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.scaling {
-		return &pb.CreateSnapshotResponse{
-			Success:      false,
-			ErrorMessage: "scaling operation in progress",
-			NodeId:       s.config.NodeID,
-		}, nil
-	}
-
-	// Create snapshots for all hash ranges this node handles
-	if err := s.createSnapshots(ctx); err != nil {
-		return &pb.CreateSnapshotResponse{
-			Success:      false,
-			ErrorMessage: err.Error(),
-			NodeId:       s.config.NodeID,
-		}, nil
-	}
-
-	return &pb.CreateSnapshotResponse{
-		Success: true,
-		NodeId:  s.config.NodeID,
-	}, nil
-}
-
-// createSnapshots creates snapshots for all hash ranges this node handles
-func (s *Service) createSnapshots(ctx context.Context) error {
-	// Get hash ranges for this node
-	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
-
-	// Create a snapshot for each hash range
-	group, ctx := kitsync.NewEagerGroup(context.TODO(), len(ranges))
-	for r := range ranges {
-		group.Go(func() error {
-			cache, exists := s.caches[r]
-			if !exists {
-				return fmt.Errorf("no cache for hash range %d", r)
-			}
-
-			if err := s.createSnapshot(ctx, r, cache); err != nil {
-				return fmt.Errorf("failed to create snapshot for range %d: %w", r, err)
-			}
-			return nil
-		})
-	}
-
-	s.lastSnapshotTime = time.Now()
-
-	return group.Wait()
-}
-
-// createSnapshot creates a snapshot for a specific hash range
-func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
-	// Create snapshot file
-	filename := getSnapshotFilename(hashRange)
-
-	buf := new(bytes.Buffer)
-	err := cache.CreateSnapshot(buf)
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot for range %d: %w", hashRange, err)
-	}
-
-	if len(buf.Bytes()) == 0 {
-		return nil // no data to upload
-	}
-
-	_, err = s.storage.UploadReader(ctx, filename, buf)
-	if err != nil {
-		return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
-	}
-
-	return nil
-}
-
 // Scale implements the Scale RPC method
 func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
 	s.mu.Lock()
@@ -565,20 +487,117 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
 
-// loadSnapshot loads a snapshot for a specific hash range
-func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
-	filename := getSnapshotFilename(hashRange)
+// CreateSnapshot implements the CreateSnapshot RPC method
+// TODO this can be optimized a lot! For example we could snapshot on local disk every 10s and work only on the head
+// and tail of the file (i.e. remove expired from head and append new entries).
+// Then once a minute we can upload the whole file to S3.
+// The file that we upload could be compressed, for example by using zstd with dictionaries.
+func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequest) (*pb.CreateSnapshotResponse, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	buf := aws.NewWriteAtBuffer([]byte{})
-	err := s.storage.Download(ctx, buf, filename)
-	if err != nil {
-		return fmt.Errorf("failed to download snapshot file %q: %w", filename, err)
+	if s.scaling {
+		return &pb.CreateSnapshotResponse{
+			Success:      false,
+			ErrorMessage: "scaling operation in progress",
+			NodeId:       s.config.NodeID,
+		}, nil
 	}
 
-	reader := bytes.NewReader(buf.Bytes())
-	return cache.LoadSnapshot(reader)
+	// Create snapshots for all hash ranges this node handles
+	if err := s.createSnapshots(ctx); err != nil {
+		return &pb.CreateSnapshotResponse{
+			Success:      false,
+			ErrorMessage: err.Error(),
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	return &pb.CreateSnapshotResponse{
+		Success: true,
+		NodeId:  s.config.NodeID,
+	}, nil
 }
 
-func getSnapshotFilename(hashRange uint32) string {
-	return "range_" + strconv.Itoa(int(hashRange)) + ".snapshot"
+// createSnapshots creates snapshots for all hash ranges this node handles
+func (s *Service) createSnapshots(ctx context.Context) error {
+	// Get hash ranges for this node
+	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+
+	// Create a snapshot for each hash range
+	group, ctx := kitsync.NewEagerGroup(context.TODO(), len(ranges))
+	for r := range ranges {
+		group.Go(func() error {
+			cache, exists := s.caches[r]
+			if !exists {
+				return fmt.Errorf("no cache for hash range %d", r)
+			}
+
+			if err := s.createSnapshot(ctx, r, cache); err != nil {
+				return fmt.Errorf("failed to create snapshot for range %d: %w", r, err)
+			}
+			return nil
+		})
+	}
+
+	s.lastSnapshotTime = time.Now()
+
+	return group.Wait()
+}
+
+// createSnapshot creates a snapshot for a specific hash range
+func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
+	// Create snapshot file
+
+	buf := new(bytes.Buffer)
+	since, err := cache.CreateSnapshot(buf)
+	if err != nil {
+		return fmt.Errorf("failed to create snapshot for range %d: %w", hashRange, err)
+	}
+
+	if len(buf.Bytes()) == 0 {
+		return nil // no data to upload
+	}
+
+	filename := getSnapshotFilenamePrefix(hashRange) + getSnapshotFilenamePostfix(since)
+
+	_, err = s.storage.UploadReader(ctx, filename, buf)
+	if err != nil {
+		return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
+	}
+
+	return nil
+}
+
+// loadSnapshot loads a snapshot for a specific hash range
+func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
+	filenamePrefix := getSnapshotFilenamePrefix(hashRange)
+	list := s.storage.ListFilesWithPrefix(ctx, "", filenamePrefix, math.MaxInt64) // TODO using MaxInt64 is hacky
+	files, err := list.Next()
+	if err != nil {
+		return fmt.Errorf("failed to list snapshot files for range %d: %w", hashRange, err)
+	}
+
+	for _, file := range files {
+		buf := aws.NewWriteAtBuffer([]byte{})
+		err := s.storage.Download(ctx, buf, file.Key)
+		if err != nil {
+			return fmt.Errorf("failed to download snapshot file %q: %w", file.Key, err)
+		}
+
+		reader := bytes.NewReader(buf.Bytes())
+		if err := cache.LoadSnapshot(reader); err != nil {
+			return fmt.Errorf("failed to load snapshot file %q: %w", file.Key, err)
+		}
+	}
+
+	return nil
+}
+
+func getSnapshotFilenamePrefix(hashRange uint32) string {
+	return "hr_" + strconv.Itoa(int(hashRange)) + "_s_"
+}
+
+func getSnapshotFilenamePostfix(since uint64) string {
+	return strconv.FormatUint(since, 10) + ".snapshot"
 }
