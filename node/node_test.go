@@ -44,10 +44,10 @@ func TestSimple(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, cf cacheFactory) {
+	run := func(t *testing.T, conf *config.Config, cf cacheFactory) {
 		t.Parallel()
 
-		minioClient, cloudStorage := getCloudStorage(t, pool)
+		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -55,11 +55,10 @@ func TestSimple(t *testing.T) {
 		// Create the node service
 		totalHashRanges := uint32(128)
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
-			NodeID:             0,
-			ClusterSize:        1,
-			TotalHashRanges:    totalHashRanges,
-			SnapshotInterval:   60 * time.Second,
-			EnableCuckooFilter: false, // Test without cuckoo filter first
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
 		}, cf)
 		c := getClient(t, totalHashRanges, node0Address)
 
@@ -103,11 +102,13 @@ func TestSimple(t *testing.T) {
 	}
 
 	t.Run("cachettl", func(t *testing.T) {
-		run(t, getMemoryCache(t))
+		conf := config.New()
+		run(t, conf, getMemoryCache(t, conf))
 	})
 
 	t.Run("badger", func(t *testing.T) {
-		run(t, getBadgerCache(t))
+		conf := config.New()
+		run(t, conf, getBadgerCache(t, conf))
 	})
 }
 
@@ -116,8 +117,8 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, cf cacheFactory) {
-		minioClient, cloudStorage := getCloudStorage(t, pool)
+	run := func(t *testing.T, conf *config.Config, cf cacheFactory) {
+		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -125,11 +126,10 @@ func TestScaleUpAndDown(t *testing.T) {
 		// Create the node service
 		totalHashRanges := uint32(3)
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
-			NodeID:             0,
-			ClusterSize:        1,
-			TotalHashRanges:    totalHashRanges,
-			SnapshotInterval:   60 * time.Second,
-			EnableCuckooFilter: false, // Test without cuckoo filter
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
 		}, cf)
 		c := getClient(t, totalHashRanges, node0Address)
 
@@ -202,11 +202,13 @@ func TestScaleUpAndDown(t *testing.T) {
 	}
 
 	t.Run("cachettl", func(t *testing.T) {
-		run(t, getMemoryCache(t))
+		conf := config.New()
+		run(t, conf, getMemoryCache(t, conf))
 	})
 
 	t.Run("badger", func(t *testing.T) {
-		run(t, getBadgerCache(t))
+		conf := config.New()
+		run(t, conf, getBadgerCache(t, conf))
 	})
 }
 
@@ -215,8 +217,8 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, cf cacheFactory) {
-		minioClient, cloudStorage := getCloudStorage(t, pool)
+	run := func(t *testing.T, conf *config.Config, cf cacheFactory) {
+		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -224,11 +226,10 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// Create the node service
 		totalHashRanges := uint32(3)
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
-			NodeID:             0,
-			ClusterSize:        1,
-			TotalHashRanges:    totalHashRanges,
-			SnapshotInterval:   60 * time.Second,
-			EnableCuckooFilter: false, // Test without cuckoo filter
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
 		}, cf)
 		c := getClient(t, totalHashRanges, node0Address)
 
@@ -310,11 +311,13 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	}
 
 	t.Run("cachettl", func(t *testing.T) {
-		run(t, getMemoryCache(t))
+		conf := config.New()
+		run(t, conf, getMemoryCache(t, conf))
 	})
 
 	t.Run("badger", func(t *testing.T) {
-		run(t, getBadgerCache(t))
+		conf := config.New()
+		run(t, conf, getBadgerCache(t, conf))
 	})
 }
 
@@ -323,10 +326,10 @@ func TestCuckooFilter(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, cf cacheFactory) {
+	run := func(t *testing.T, conf *config.Config, cf cacheFactory) {
 		t.Parallel()
 
-		_, cloudStorage := getCloudStorage(t, pool)
+		_, cloudStorage := getCloudStorage(t, pool, conf)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -338,7 +341,7 @@ func TestCuckooFilter(t *testing.T) {
 			ClusterSize:        1,
 			TotalHashRanges:    totalHashRanges,
 			SnapshotInterval:   60 * time.Second,
-			EnableCuckooFilter: false, // TODO revert
+			EnableCuckooFilter: true,
 		}, cf)
 		c := getClient(t, totalHashRanges, node0Address)
 
@@ -375,19 +378,20 @@ func TestCuckooFilter(t *testing.T) {
 	}
 
 	t.Run("cachettl", func(t *testing.T) {
-		run(t, getMemoryCache(t))
+		conf := config.New()
+		run(t, conf, getMemoryCache(t, conf))
 	})
 
 	t.Run("badger", func(t *testing.T) {
-		run(t, getBadgerCache(t))
+		conf := config.New()
+		run(t, conf, getBadgerCache(t, conf))
 	})
 }
 
-func getCloudStorage(t testing.TB, pool *dockertest.Pool) (*minio.Client, cloudStorage) {
+func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (*minio.Client, cloudStorage) {
 	t.Helper()
 
 	minioEndpoint, minioClient := createMinioResource(t, pool, accessKeyId, secretAccessKey, region, bucket)
-	conf := config.New(config.WithEnvPrefix("KEYDB"))
 	conf.Set("Storage.Bucket", bucket)
 	conf.Set("Storage.Endpoint", minioEndpoint)
 	conf.Set("Storage.AccessKeyId", accessKeyId)
@@ -403,17 +407,17 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool) (*minio.Client, cloudS
 	return minioClient, cloudStorage
 }
 
-func getMemoryCache(t testing.TB) cacheFactory {
+func getMemoryCache(t testing.TB, _ *config.Config) cacheFactory {
 	return func(_ uint32) (Cache, error) {
 		t.Helper()
 		return cachettl.New(), nil
 	}
 }
 
-func getBadgerCache(t testing.TB) cacheFactory {
-	return func(hashRange uint32) (Cache, error) {
+func getBadgerCache(t testing.TB, conf *config.Config) cacheFactory {
+	return func(_ uint32) (Cache, error) {
 		t.Helper()
-		return badger.New(t.TempDir(), config.New(), logger.NewLogger())
+		return badger.New(t.TempDir(), conf, logger.NOP)
 	}
 }
 

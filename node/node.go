@@ -67,8 +67,6 @@ type Service struct {
 	cuckooFilter *cuckoo.ScalableCuckooFilter
 	// cuckooItemCount tracks the number of items in the cuckoo filter
 	cuckooItemCount uint
-	// cuckooCapacity tracks the capacity of the cuckoo filter
-	cuckooCapacity uint
 
 	// mu protects the caches and scaling operations
 	mu sync.RWMutex
