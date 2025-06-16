@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	cuckoo "github.com/seiflotfy/cuckoofilter"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -47,11 +46,6 @@ type Config struct {
 
 	// Addresses is a list of node addresses that this node will advertise to clients
 	Addresses []string
-
-	// TODO make the test with cuckoo filters pass
-	// TODO handle deletions from cuckoo filter
-	// EnableCuckooFilter enables the cuckoo filter for faster key lookups
-	EnableCuckooFilter bool
 }
 
 // Service implements the NodeService gRPC service
@@ -64,9 +58,6 @@ type Service struct {
 
 	caches       map[uint32]Cache
 	cacheFactory cacheFactory
-	cuckooFilter *cuckoo.ScalableCuckooFilter
-	// cuckooItemCount tracks the number of items in the cuckoo filter
-	cuckooItemCount uint
 
 	// mu protects the caches and scaling operations
 	mu sync.RWMutex
@@ -147,13 +138,6 @@ func NewService(
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
 			logger.NewIntField("snapshotInterval", int64(config.SnapshotInterval.Seconds())),
 		),
-	}
-
-	// Initialize cuckoo filter if enabled
-	if config.EnableCuckooFilter {
-		service.cuckooFilter = cuckoo.NewScalableCuckooFilter() // TODO is a mutex needed? double check
-		service.cuckooItemCount = 0                             // TODO use atomic?
-		service.logger.Infon("Cuckoo filter enabled")
 	}
 
 	// Initialize caches for all hash ranges this node handles
@@ -281,35 +265,6 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	responseMu := sync.Mutex{}
 	response.Exists = make([]bool, len(req.Keys))
 
-	// Check cuckoo filter first if enabled
-	if s.config.EnableCuckooFilter && s.cuckooFilter != nil {
-		for _, key := range req.Keys {
-			// If the key is definitely not in the set, we can return false without querying the cache
-			if !s.cuckooFilter.Lookup([]byte(key)) {
-				response.Exists[indexes[key]] = false
-				// Remove the key from itemsByHashRange to avoid querying the cache
-				for hashRange, keys := range itemsByHashRange {
-					for i, k := range keys {
-						if k == key {
-							// Remove the key from the slice
-							itemsByHashRange[hashRange] = append(keys[:i], keys[i+1:]...)
-							break
-						}
-					}
-					// If the slice is empty, remove the hash range
-					if len(itemsByHashRange[hashRange]) == 0 {
-						delete(itemsByHashRange, hashRange)
-					}
-				}
-			}
-		}
-
-		// If all keys were filtered out, we can return early
-		if len(itemsByHashRange) == 0 {
-			return response, nil
-		}
-	}
-
 	group, _ := kitsync.NewEagerGroup(ctx, len(itemsByHashRange))
 	for hashRange, keys := range itemsByHashRange {
 		group.Go(func() error {
@@ -372,17 +327,6 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		s.logger.Errorn("Error getting hashes for keys", obskit.Error(err))
 		return resp, nil
-	}
-
-	// Add keys to cuckoo filter if enabled
-	if s.config.EnableCuckooFilter && s.cuckooFilter != nil {
-		// Add all keys to the cuckoo filter
-		for _, key := range req.Keys {
-			// Only increment the count if the key was actually inserted (not already present)
-			if s.cuckooFilter.InsertUnique([]byte(key)) {
-				s.cuckooItemCount++
-			}
-		}
 	}
 
 	ttl := time.Duration(req.TtlSeconds) * time.Second

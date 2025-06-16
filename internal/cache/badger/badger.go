@@ -40,10 +40,10 @@ func Factory(conf *config.Config, log logger.Logger) func(hashRange uint32) (*Ca
 
 func New(path string, conf *config.Config, log logger.Logger) (*Cache, error) {
 	opts := badger.DefaultOptions(path).
-		WithBloomFalsePositive(0). // TODO look into this instead of using cuckoo although it would be per hash range
 		WithCompression(options.None).
 		WithNumGoroutines(1).
 		WithNumVersionsToKeep(1).
+		WithBloomFalsePositive(conf.GetFloat64("BadgerDB.Dedup.BloomFalsePositive", 0.000001)).
 		WithIndexCacheSize(conf.GetInt64Var(16*bytesize.MB, 1, "BadgerDB.Dedup.indexCacheSize", "BadgerDB.indexCacheSize")).
 		WithValueLogFileSize(conf.GetInt64Var(1*bytesize.MB, 1, "BadgerDB.Dedup.valueLogFileSize", "BadgerDB.valueLogFileSize")).
 		WithBlockSize(conf.GetIntVar(int(4*bytesize.KB), 1, "BadgerDB.Dedup.blockSize", "BadgerDB.blockSize")).
