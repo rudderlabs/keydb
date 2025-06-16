@@ -36,7 +36,8 @@ func Factory(conf *config.Config, log logger.Logger) func(hashRange uint32) (*Ca
 		if err := os.MkdirAll(badgerPath, 0o755); err != nil {
 			return nil, fmt.Errorf("failed to create badger directory for hash range %d: %w", hashRange, err)
 		}
-		if conf.GetBoolVar(false, "BadgerDB.Dedup.Debug", "BadgerDB.Debug") {
+		if conf.GetBool("BadgerDB.TestMode", false) {
+			// TODO use this to enable usage of String() string and Len() methods
 		}
 		badgerCache, err := New(badgerPath, conf, log)
 		if err != nil {
