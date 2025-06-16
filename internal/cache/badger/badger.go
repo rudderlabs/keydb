@@ -71,13 +71,18 @@ func New(path string, conf *config.Config, log logger.Logger) (*Cache, error) {
 		WithDetectConflicts(conf.GetBoolVar(false, "BadgerDB.Dedup.detectConflicts", "BadgerDB.detectConflicts")).
 		WithLogger(loggerForBadger{log})
 
+	compress := conf.GetBool("BadgerDB.Dedup.Compress", true)
+	if compress {
+		log.Infon("BadgerDB.Dedup.Compress is enabled, using gzip compression")
+	}
+
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, err
 	}
 	return &Cache{
 		cache:    db,
-		compress: conf.GetBool("BadgerDB.Dedup.Compress", true),
+		compress: compress,
 	}, nil
 }
 

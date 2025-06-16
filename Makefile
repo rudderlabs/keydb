@@ -24,3 +24,13 @@ build:
 	fi
 	docker build -t $(DOCKER_USER)/keydb:latest .
 	docker push $(DOCKER_USER)/keydb:latest
+
+run:
+	@if [ -z "$(DOCKER_USER)" ]; then \
+		echo "Error: DOCKER_USER variable is empty"; \
+		exit 1; \
+	fi
+	docker run --rm -it -p 50051:50051 \
+		-e KEYDB_PORT=50051 \
+		-e KEYDB_BADGERDB_DEDUP_COMPRESS=true \
+		$(DOCKER_USER)/keydb:latest
