@@ -358,20 +358,18 @@ func TestCuckooFilter(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{false, false, false}, exists)
 
-		// TODO continue debugging here!
-		// Test filter growth by adding many keys
-		//keys := make([]string, 2)
-		//for i := range keys {
-		//	keys[i] = fmt.Sprintf("growth-key-%d", i)
-		//}
-		//require.NoError(t, c.Put(ctx, keys, testTTL))
-		//
-		//// Verify all keys exist
-		//exists, err = c.Get(ctx, keys)
-		//require.NoError(t, err)
-		//for i, e := range exists {
-		//	require.True(t, e, "Key %s should exist", keys[i])
-		//}
+		keys := make([]string, 5000)
+		for i := range keys {
+			keys[i] = fmt.Sprintf("growth-key-%d", i)
+		}
+		require.NoError(t, c.Put(ctx, keys, testTTL))
+
+		// Verify all keys exist
+		exists, err = c.Get(ctx, keys)
+		require.NoError(t, err)
+		for i, e := range exists {
+			require.True(t, e, "Key %s should exist", keys[i])
+		}
 
 		cancel()
 		node0.Close()
