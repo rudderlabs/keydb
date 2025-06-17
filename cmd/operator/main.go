@@ -19,7 +19,7 @@ import (
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM)
 
-	conf := config.New(config.WithEnvPrefix("KEYDB"))
+	conf := config.New(config.WithEnvPrefix("KEYDB_OPERATOR"))
 	logFactory := logger.NewFactory(conf)
 	defer logFactory.Sync()
 	log := logFactory.NewLogger()
