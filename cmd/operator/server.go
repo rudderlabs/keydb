@@ -81,8 +81,8 @@ func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 // PutRequest represents a request to put keys
 type PutRequest struct {
-	Keys []string      `json:"keys"`
-	TTL  time.Duration `json:"ttl"` // TTL in seconds
+	Keys []string `json:"keys"`
+	TTL  string   `json:"ttl"`
 }
 
 // handlePut handles POST /put requests
@@ -106,7 +106,7 @@ func (s *httpServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Put keys
-	ttl, err := time.ParseDuration(fmt.Sprintf("%ds", req.TTL))
+	ttl, err := time.ParseDuration(req.TTL)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error parsing TTL: %v", err), http.StatusBadRequest)
 		return
