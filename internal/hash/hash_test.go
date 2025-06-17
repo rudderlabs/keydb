@@ -137,6 +137,20 @@ func TestHashRangeInNodeHashRanges(t *testing.T) {
 	}
 }
 
+func TestCollision(t *testing.T) {
+	var clusterSize, totalHashRanges uint32 = 3, 128
+	seen := make(map[uint32]struct{})
+	for nodeID := uint32(0); nodeID < clusterSize; nodeID++ {
+		hashRanges := GetNodeHashRanges(nodeID, clusterSize, totalHashRanges)
+		for hashRange := range hashRanges {
+			if _, exists := seen[hashRange]; exists {
+				t.Errorf("Collision for hashRange %d", hashRange)
+			}
+			seen[hashRange] = struct{}{}
+		}
+	}
+}
+
 type hashResult struct {
 	key       string
 	hashRange uint32

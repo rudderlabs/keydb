@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -29,6 +28,9 @@ const (
 
 	// DefaultSnapshotInterval is the default interval for creating snapshots (in seconds)
 	DefaultSnapshotInterval = 24 * time.Hour
+
+	// DefaultMaxFilesToList defines the default maximum number of files to list in a single operation, set to 1000.
+	DefaultMaxFilesToList int64 = 1000
 )
 
 // Config holds the configuration for a node
@@ -41,6 +43,9 @@ type Config struct {
 
 	// TotalHashRanges is the total number of hash ranges
 	TotalHashRanges uint32
+
+	// MaxFilesToList specifies the maximum number of files that can be listed in a single operation.
+	MaxFilesToList int64
 
 	// SnapshotInterval is the interval for creating snapshots (in seconds)
 	SnapshotInterval time.Duration
@@ -68,6 +73,9 @@ type Service struct {
 
 	// lastSnapshotTime is the timestamp of the last snapshot
 	lastSnapshotTime time.Time
+
+	// maxFilesToList specifies the maximum number of files to retrieve during a file listing operation.
+	maxFilesToList int64
 
 	waitGroup sync.WaitGroup
 
@@ -130,12 +138,17 @@ func NewService(
 		config.SnapshotInterval = DefaultSnapshotInterval
 	}
 
+	if config.MaxFilesToList == 0 {
+		config.MaxFilesToList = DefaultMaxFilesToList
+	}
+
 	service := &Service{
-		now:          time.Now,
-		config:       config,
-		caches:       make(map[uint32]Cache),
-		cacheFactory: cf,
-		storage:      storage,
+		now:            time.Now,
+		config:         config,
+		caches:         make(map[uint32]Cache),
+		cacheFactory:   cf,
+		storage:        storage,
+		maxFilesToList: config.MaxFilesToList,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
@@ -572,7 +585,7 @@ func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache Ca
 // loadSnapshot loads a snapshot for a specific hash range
 func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
 	filenamePrefix := getSnapshotFilenamePrefix(hashRange)
-	list := s.storage.ListFilesWithPrefix(ctx, "", filenamePrefix, math.MaxInt64) // TODO using MaxInt64 is hacky
+	list := s.storage.ListFilesWithPrefix(ctx, "", filenamePrefix, s.maxFilesToList)
 	files, err := list.Next()
 	if err != nil {
 		return fmt.Errorf("failed to list snapshot files for range %d: %w", hashRange, err)

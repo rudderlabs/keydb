@@ -6,6 +6,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"regexp"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -20,6 +22,8 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
+
+var podNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM)
@@ -41,8 +45,17 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 		return fmt.Errorf("failed to create cloud storage: %w", err)
 	}
 
+	podName := conf.GetString("nodeId", "")
+	if !podNameRegex.MatchString(podName) {
+		return fmt.Errorf("invalid pod name %s", podName)
+	}
+	nodeID, err := strconv.Atoi(podNameRegex.FindStringSubmatch(podName)[1])
+	if err != nil {
+		return fmt.Errorf("failed to parse node ID %q: %w", podName, err)
+	}
+
 	nodeConfig := node.Config{
-		NodeID:           uint32(conf.GetInt("nodeId", 0)),
+		NodeID:           uint32(nodeID),
 		ClusterSize:      uint32(conf.GetInt("clusterSize", 1)),
 		TotalHashRanges:  uint32(conf.GetInt("totalHashRanges", 128)),
 		SnapshotInterval: conf.GetDuration("snapshotInterval", 24, time.Hour),
@@ -79,6 +92,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 	}
 
 	log.Infon("Starting node",
+		logger.NewStringField("addresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
 		logger.NewIntField("hashRanges", int64(len(
 			hash.GetNodeHashRanges(nodeConfig.NodeID, nodeConfig.ClusterSize, nodeConfig.TotalHashRanges),
 		))),
