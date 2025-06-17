@@ -388,13 +388,9 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
 
 	// Convert to proto hash ranges
-	hashRanges := make([]*pb.HashRange, 0, len(ranges))
+	hashRanges := make([]uint32, 0, len(ranges))
 	for r := range ranges {
-		hashRanges = append(hashRanges, &pb.HashRange{
-			RangeId: r,
-			Start:   r,
-			End:     r + 1,
-		})
+		hashRanges = append(hashRanges, r)
 	}
 
 	// Count total keys

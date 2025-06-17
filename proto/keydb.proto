@@ -77,16 +77,9 @@ message GetNodeInfoResponse {
   uint32 node_id = 1; // ID of the node
   uint32 cluster_size = 2; // Number of nodes in the cluster
   repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
-  repeated HashRange hash_ranges = 4; // Hash ranges handled by this node
+  repeated uint32 hash_ranges = 4; // Hash ranges handled by this node
   uint64 keys_count = 5; // Number of keys stored in this node
   uint64 last_snapshot_timestamp = 6; // Unix timestamp of the last snapshot
-}
-
-// HashRange represents a range of hash values
-message HashRange {
-  uint32 range_id = 1;
-  uint32 start = 2; // Start of the hash range (inclusive)
-  uint32 end = 3; // End of the hash range (exclusive)
 }
 
 // CreateSnapshotRequest initiates snapshot creation

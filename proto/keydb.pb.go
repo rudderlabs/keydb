@@ -371,7 +371,7 @@ type GetNodeInfoResponse struct {
 	NodeId                uint32                 `protobuf:"varint,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`                                                // ID of the node
 	ClusterSize           uint32                 `protobuf:"varint,2,opt,name=cluster_size,json=clusterSize,proto3" json:"cluster_size,omitempty"`                                 // Number of nodes in the cluster
 	NodesAddresses        []string               `protobuf:"bytes,3,rep,name=nodesAddresses,proto3" json:"nodesAddresses,omitempty"`                                               // When the cluster_size changes the client can use this variable to connect to the new nodes
-	HashRanges            []*HashRange           `protobuf:"bytes,4,rep,name=hash_ranges,json=hashRanges,proto3" json:"hash_ranges,omitempty"`                                     // Hash ranges handled by this node
+	HashRanges            []uint32               `protobuf:"varint,4,rep,packed,name=hash_ranges,json=hashRanges,proto3" json:"hash_ranges,omitempty"`                             // Hash ranges handled by this node
 	KeysCount             uint64                 `protobuf:"varint,5,opt,name=keys_count,json=keysCount,proto3" json:"keys_count,omitempty"`                                       // Number of keys stored in this node
 	LastSnapshotTimestamp uint64                 `protobuf:"varint,6,opt,name=last_snapshot_timestamp,json=lastSnapshotTimestamp,proto3" json:"last_snapshot_timestamp,omitempty"` // Unix timestamp of the last snapshot
 	unknownFields         protoimpl.UnknownFields
@@ -429,7 +429,7 @@ func (x *GetNodeInfoResponse) GetNodesAddresses() []string {
 	return nil
 }
 
-func (x *GetNodeInfoResponse) GetHashRanges() []*HashRange {
+func (x *GetNodeInfoResponse) GetHashRanges() []uint32 {
 	if x != nil {
 		return x.HashRanges
 	}
@@ -450,67 +450,6 @@ func (x *GetNodeInfoResponse) GetLastSnapshotTimestamp() uint64 {
 	return 0
 }
 
-// HashRange represents a range of hash values
-type HashRange struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RangeId       uint32                 `protobuf:"varint,1,opt,name=range_id,json=rangeId,proto3" json:"range_id,omitempty"`
-	Start         uint32                 `protobuf:"varint,2,opt,name=start,proto3" json:"start,omitempty"` // Start of the hash range (inclusive)
-	End           uint32                 `protobuf:"varint,3,opt,name=end,proto3" json:"end,omitempty"`     // End of the hash range (exclusive)
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *HashRange) Reset() {
-	*x = HashRange{}
-	mi := &file_proto_keydb_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *HashRange) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*HashRange) ProtoMessage() {}
-
-func (x *HashRange) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_keydb_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use HashRange.ProtoReflect.Descriptor instead.
-func (*HashRange) Descriptor() ([]byte, []int) {
-	return file_proto_keydb_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *HashRange) GetRangeId() uint32 {
-	if x != nil {
-		return x.RangeId
-	}
-	return 0
-}
-
-func (x *HashRange) GetStart() uint32 {
-	if x != nil {
-		return x.Start
-	}
-	return 0
-}
-
-func (x *HashRange) GetEnd() uint32 {
-	if x != nil {
-		return x.End
-	}
-	return 0
-}
-
 // CreateSnapshotRequest initiates snapshot creation
 type CreateSnapshotRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -520,7 +459,7 @@ type CreateSnapshotRequest struct {
 
 func (x *CreateSnapshotRequest) Reset() {
 	*x = CreateSnapshotRequest{}
-	mi := &file_proto_keydb_proto_msgTypes[7]
+	mi := &file_proto_keydb_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -532,7 +471,7 @@ func (x *CreateSnapshotRequest) String() string {
 func (*CreateSnapshotRequest) ProtoMessage() {}
 
 func (x *CreateSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_keydb_proto_msgTypes[7]
+	mi := &file_proto_keydb_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -545,7 +484,7 @@ func (x *CreateSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*CreateSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_proto_keydb_proto_rawDescGZIP(), []int{7}
+	return file_proto_keydb_proto_rawDescGZIP(), []int{6}
 }
 
 // CreateSnapshotResponse contains the result of the snapshot creation
@@ -560,7 +499,7 @@ type CreateSnapshotResponse struct {
 
 func (x *CreateSnapshotResponse) Reset() {
 	*x = CreateSnapshotResponse{}
-	mi := &file_proto_keydb_proto_msgTypes[8]
+	mi := &file_proto_keydb_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -572,7 +511,7 @@ func (x *CreateSnapshotResponse) String() string {
 func (*CreateSnapshotResponse) ProtoMessage() {}
 
 func (x *CreateSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_keydb_proto_msgTypes[8]
+	mi := &file_proto_keydb_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -585,7 +524,7 @@ func (x *CreateSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*CreateSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_proto_keydb_proto_rawDescGZIP(), []int{8}
+	return file_proto_keydb_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CreateSnapshotResponse) GetSuccess() bool {
@@ -622,7 +561,7 @@ type ScaleRequest struct {
 
 func (x *ScaleRequest) Reset() {
 	*x = ScaleRequest{}
-	mi := &file_proto_keydb_proto_msgTypes[9]
+	mi := &file_proto_keydb_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -634,7 +573,7 @@ func (x *ScaleRequest) String() string {
 func (*ScaleRequest) ProtoMessage() {}
 
 func (x *ScaleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_keydb_proto_msgTypes[9]
+	mi := &file_proto_keydb_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -647,7 +586,7 @@ func (x *ScaleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScaleRequest.ProtoReflect.Descriptor instead.
 func (*ScaleRequest) Descriptor() ([]byte, []int) {
-	return file_proto_keydb_proto_rawDescGZIP(), []int{9}
+	return file_proto_keydb_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ScaleRequest) GetNewClusterSize() uint32 {
@@ -677,7 +616,7 @@ type ScaleResponse struct {
 
 func (x *ScaleResponse) Reset() {
 	*x = ScaleResponse{}
-	mi := &file_proto_keydb_proto_msgTypes[10]
+	mi := &file_proto_keydb_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -689,7 +628,7 @@ func (x *ScaleResponse) String() string {
 func (*ScaleResponse) ProtoMessage() {}
 
 func (x *ScaleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_keydb_proto_msgTypes[10]
+	mi := &file_proto_keydb_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -702,7 +641,7 @@ func (x *ScaleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScaleResponse.ProtoReflect.Descriptor instead.
 func (*ScaleResponse) Descriptor() ([]byte, []int) {
-	return file_proto_keydb_proto_rawDescGZIP(), []int{10}
+	return file_proto_keydb_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ScaleResponse) GetSuccess() bool {
@@ -741,7 +680,7 @@ type ScaleCompleteRequest struct {
 
 func (x *ScaleCompleteRequest) Reset() {
 	*x = ScaleCompleteRequest{}
-	mi := &file_proto_keydb_proto_msgTypes[11]
+	mi := &file_proto_keydb_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -753,7 +692,7 @@ func (x *ScaleCompleteRequest) String() string {
 func (*ScaleCompleteRequest) ProtoMessage() {}
 
 func (x *ScaleCompleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_keydb_proto_msgTypes[11]
+	mi := &file_proto_keydb_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -766,7 +705,7 @@ func (x *ScaleCompleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScaleCompleteRequest.ProtoReflect.Descriptor instead.
 func (*ScaleCompleteRequest) Descriptor() ([]byte, []int) {
-	return file_proto_keydb_proto_rawDescGZIP(), []int{11}
+	return file_proto_keydb_proto_rawDescGZIP(), []int{10}
 }
 
 type ScaleCompleteResponse struct {
@@ -778,7 +717,7 @@ type ScaleCompleteResponse struct {
 
 func (x *ScaleCompleteResponse) Reset() {
 	*x = ScaleCompleteResponse{}
-	mi := &file_proto_keydb_proto_msgTypes[12]
+	mi := &file_proto_keydb_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +729,7 @@ func (x *ScaleCompleteResponse) String() string {
 func (*ScaleCompleteResponse) ProtoMessage() {}
 
 func (x *ScaleCompleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_keydb_proto_msgTypes[12]
+	mi := &file_proto_keydb_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +742,7 @@ func (x *ScaleCompleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScaleCompleteResponse.ProtoReflect.Descriptor instead.
 func (*ScaleCompleteResponse) Descriptor() ([]byte, []int) {
-	return file_proto_keydb_proto_rawDescGZIP(), []int{12}
+	return file_proto_keydb_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ScaleCompleteResponse) GetSuccess() bool {
@@ -841,20 +780,16 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\n" +
 	"error_code\x18\x04 \x01(\x0e2\x10.keydb.ErrorCodeR\terrorCode\"-\n" +
 	"\x12GetNodeInfoRequest\x12\x17\n" +
-	"\anode_id\x18\x01 \x01(\rR\x06nodeId\"\x83\x02\n" +
+	"\anode_id\x18\x01 \x01(\rR\x06nodeId\"\xf1\x01\n" +
 	"\x13GetNodeInfoResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\rR\x06nodeId\x12!\n" +
 	"\fcluster_size\x18\x02 \x01(\rR\vclusterSize\x12&\n" +
-	"\x0enodesAddresses\x18\x03 \x03(\tR\x0enodesAddresses\x121\n" +
-	"\vhash_ranges\x18\x04 \x03(\v2\x10.keydb.HashRangeR\n" +
+	"\x0enodesAddresses\x18\x03 \x03(\tR\x0enodesAddresses\x12\x1f\n" +
+	"\vhash_ranges\x18\x04 \x03(\rR\n" +
 	"hashRanges\x12\x1d\n" +
 	"\n" +
 	"keys_count\x18\x05 \x01(\x04R\tkeysCount\x126\n" +
-	"\x17last_snapshot_timestamp\x18\x06 \x01(\x04R\x15lastSnapshotTimestamp\"N\n" +
-	"\tHashRange\x12\x19\n" +
-	"\brange_id\x18\x01 \x01(\rR\arangeId\x12\x14\n" +
-	"\x05start\x18\x02 \x01(\rR\x05start\x12\x10\n" +
-	"\x03end\x18\x03 \x01(\rR\x03end\"\x17\n" +
+	"\x17last_snapshot_timestamp\x18\x06 \x01(\x04R\x15lastSnapshotTimestamp\"\x17\n" +
 	"\x15CreateSnapshotRequest\"p\n" +
 	"\x16CreateSnapshotResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
@@ -898,7 +833,7 @@ func file_proto_keydb_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_keydb_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_keydb_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_proto_keydb_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
 var file_proto_keydb_proto_goTypes = []any{
 	(ErrorCode)(0),                 // 0: keydb.ErrorCode
 	(*GetRequest)(nil),             // 1: keydb.GetRequest
@@ -907,36 +842,34 @@ var file_proto_keydb_proto_goTypes = []any{
 	(*PutResponse)(nil),            // 4: keydb.PutResponse
 	(*GetNodeInfoRequest)(nil),     // 5: keydb.GetNodeInfoRequest
 	(*GetNodeInfoResponse)(nil),    // 6: keydb.GetNodeInfoResponse
-	(*HashRange)(nil),              // 7: keydb.HashRange
-	(*CreateSnapshotRequest)(nil),  // 8: keydb.CreateSnapshotRequest
-	(*CreateSnapshotResponse)(nil), // 9: keydb.CreateSnapshotResponse
-	(*ScaleRequest)(nil),           // 10: keydb.ScaleRequest
-	(*ScaleResponse)(nil),          // 11: keydb.ScaleResponse
-	(*ScaleCompleteRequest)(nil),   // 12: keydb.ScaleCompleteRequest
-	(*ScaleCompleteResponse)(nil),  // 13: keydb.ScaleCompleteResponse
+	(*CreateSnapshotRequest)(nil),  // 7: keydb.CreateSnapshotRequest
+	(*CreateSnapshotResponse)(nil), // 8: keydb.CreateSnapshotResponse
+	(*ScaleRequest)(nil),           // 9: keydb.ScaleRequest
+	(*ScaleResponse)(nil),          // 10: keydb.ScaleResponse
+	(*ScaleCompleteRequest)(nil),   // 11: keydb.ScaleCompleteRequest
+	(*ScaleCompleteResponse)(nil),  // 12: keydb.ScaleCompleteResponse
 }
 var file_proto_keydb_proto_depIdxs = []int32{
 	0,  // 0: keydb.GetResponse.error_code:type_name -> keydb.ErrorCode
 	0,  // 1: keydb.PutRequest.error_code:type_name -> keydb.ErrorCode
 	0,  // 2: keydb.PutResponse.error_code:type_name -> keydb.ErrorCode
-	7,  // 3: keydb.GetNodeInfoResponse.hash_ranges:type_name -> keydb.HashRange
-	1,  // 4: keydb.NodeService.Get:input_type -> keydb.GetRequest
-	3,  // 5: keydb.NodeService.Put:input_type -> keydb.PutRequest
-	5,  // 6: keydb.NodeService.GetNodeInfo:input_type -> keydb.GetNodeInfoRequest
-	8,  // 7: keydb.NodeService.CreateSnapshot:input_type -> keydb.CreateSnapshotRequest
-	10, // 8: keydb.NodeService.Scale:input_type -> keydb.ScaleRequest
-	12, // 9: keydb.NodeService.ScaleComplete:input_type -> keydb.ScaleCompleteRequest
-	2,  // 10: keydb.NodeService.Get:output_type -> keydb.GetResponse
-	4,  // 11: keydb.NodeService.Put:output_type -> keydb.PutResponse
-	6,  // 12: keydb.NodeService.GetNodeInfo:output_type -> keydb.GetNodeInfoResponse
-	9,  // 13: keydb.NodeService.CreateSnapshot:output_type -> keydb.CreateSnapshotResponse
-	11, // 14: keydb.NodeService.Scale:output_type -> keydb.ScaleResponse
-	13, // 15: keydb.NodeService.ScaleComplete:output_type -> keydb.ScaleCompleteResponse
-	10, // [10:16] is the sub-list for method output_type
-	4,  // [4:10] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	1,  // 3: keydb.NodeService.Get:input_type -> keydb.GetRequest
+	3,  // 4: keydb.NodeService.Put:input_type -> keydb.PutRequest
+	5,  // 5: keydb.NodeService.GetNodeInfo:input_type -> keydb.GetNodeInfoRequest
+	7,  // 6: keydb.NodeService.CreateSnapshot:input_type -> keydb.CreateSnapshotRequest
+	9,  // 7: keydb.NodeService.Scale:input_type -> keydb.ScaleRequest
+	11, // 8: keydb.NodeService.ScaleComplete:input_type -> keydb.ScaleCompleteRequest
+	2,  // 9: keydb.NodeService.Get:output_type -> keydb.GetResponse
+	4,  // 10: keydb.NodeService.Put:output_type -> keydb.PutResponse
+	6,  // 11: keydb.NodeService.GetNodeInfo:output_type -> keydb.GetNodeInfoResponse
+	8,  // 12: keydb.NodeService.CreateSnapshot:output_type -> keydb.CreateSnapshotResponse
+	10, // 13: keydb.NodeService.Scale:output_type -> keydb.ScaleResponse
+	12, // 14: keydb.NodeService.ScaleComplete:output_type -> keydb.ScaleCompleteResponse
+	9,  // [9:15] is the sub-list for method output_type
+	3,  // [3:9] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_proto_keydb_proto_init() }
@@ -950,7 +883,7 @@ func file_proto_keydb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_keydb_proto_rawDesc), len(file_proto_keydb_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   12,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
