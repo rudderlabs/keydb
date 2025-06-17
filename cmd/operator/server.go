@@ -147,7 +147,7 @@ func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 	// Get node info
 	info, err := s.client.GetNodeInfo(r.Context(), uint32(nodeID))
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error getting node info: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Error getting info for node %d: %v", nodeID, err), http.StatusInternalServerError)
 		return
 	}
 

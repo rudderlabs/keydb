@@ -82,7 +82,7 @@ func BenchmarkSingleNode(b *testing.B) {
 		RetryDelay:      100 * time.Millisecond,
 	}
 
-	c, err := client.NewClient(clientConfig)
+	c, err := client.NewClient(clientConfig, logger.NOP)
 	require.NoError(b, err)
 	b.Cleanup(func() { _ = c.Close() })
 

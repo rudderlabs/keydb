@@ -392,7 +392,7 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 		RetryDelay:      100 * time.Millisecond,
 	}
 
-	c, err := client.NewClient(clientConfig)
+	c, err := client.NewClient(clientConfig, logger.NOP)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 

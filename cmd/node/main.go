@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -53,6 +54,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 	if err != nil {
 		return fmt.Errorf("failed to parse node ID %q: %w", podName, err)
 	}
+	nodeAddresses := conf.GetString("nodeAddresses", "")
+	if len(nodeAddresses) == 0 {
+		return fmt.Errorf("no node addresses provided")
+	}
 
 	nodeConfig := node.Config{
 		NodeID:           uint32(nodeID),
@@ -60,7 +65,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 		TotalHashRanges:  uint32(conf.GetInt("totalHashRanges", node.DefaultTotalHashRanges)),
 		MaxFilesToList:   conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
 		SnapshotInterval: conf.GetDuration("snapshotInterval", 0, time.Nanosecond), // node.DefaultSnapshotInterval will be used
-		Addresses:        conf.GetStringSlice("nodeAddresses", []string{}),
+		Addresses:        strings.Split(nodeAddresses, ","),
 	}
 
 	port := conf.GetInt("port", 50051)
@@ -70,6 +75,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 		logger.NewIntField("clusterSize", int64(nodeConfig.ClusterSize)),
 		logger.NewIntField("totalHashRanges", int64(nodeConfig.TotalHashRanges)),
 		logger.NewDurationField("snapshotInterval", nodeConfig.SnapshotInterval),
+		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
+		logger.NewIntField("noOfAddresses", int64(len(nodeConfig.Addresses))),
 	)
 
 	badgerCacheFactory := func(hashRange uint32) (node.Cache, error) {

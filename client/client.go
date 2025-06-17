@@ -13,6 +13,7 @@ import (
 
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 )
 
@@ -58,10 +59,12 @@ type Client struct {
 
 	// mu protects connections, clients and clusterSize
 	mu sync.RWMutex
+
+	logger logger.Logger
 }
 
 // NewClient creates a new KeyDB client
-func NewClient(config Config) (*Client, error) {
+func NewClient(config Config, log logger.Logger) (*Client, error) {
 	if len(config.Addresses) == 0 {
 		return nil, fmt.Errorf("no addresses provided")
 	}
@@ -83,6 +86,7 @@ func NewClient(config Config) (*Client, error) {
 		connections: make(map[int]*grpc.ClientConn),
 		clients:     make(map[int]pb.NodeServiceClient),
 		clusterSize: uint32(len(config.Addresses)),
+		logger:      log,
 	}
 
 	// Connect to all nodes
@@ -594,6 +598,12 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 	if c.clusterSize == newClusterSize {
 		return nil // No need to update or refetch
 	}
+
+	c.logger.Infon("Detected new cluster size",
+		logger.NewIntField("oldClusterSize", int64(c.clusterSize)),
+		logger.NewIntField("newClusterSize", int64(newClusterSize)),
+		logger.NewStringField("nodesAddresses", fmt.Sprintf("%+v", nodesAddresses)),
+	)
 
 	c.config.Addresses = nodesAddresses
 	oldClusterSize := c.clusterSize

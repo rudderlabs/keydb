@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,16 +34,18 @@ func main() {
 func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Logger) error {
 	defer cancel()
 
-	nodeAddresses := conf.GetStringSlice("nodeAddresses", []string{})
+	nodeAddresses := conf.GetString("nodeAddresses", "")
 	if len(nodeAddresses) == 0 {
 		return fmt.Errorf("no node addresses provided")
 	}
-	c, err := client.NewClient(client.Config{
-		Addresses:       nodeAddresses,
+
+	clientConfig := client.Config{
+		Addresses:       strings.Split(nodeAddresses, ","),
 		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
 		RetryCount:      conf.GetInt("retryCount", client.DefaultRetryCount),
 		RetryDelay:      conf.GetDuration("retryDelay", 0, time.Nanosecond), // client.DefaultRetryDelay will be used
-	})
+	}
+	c, err := client.NewClient(clientConfig, log.Child("client"))
 	if err != nil {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
@@ -51,6 +54,17 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 			log.Warnn("Failed to close client", obskit.Error(err))
 		}
 	}()
+
+	log.Infon("Starting operator",
+		logger.NewIntField("totalHashRanges", int64(clientConfig.TotalHashRanges)),
+		logger.NewIntField("retryCount", int64(clientConfig.RetryCount)),
+		logger.NewDurationField("retryDelay", clientConfig.RetryDelay),
+		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", clientConfig.Addresses)),
+		logger.NewIntField("noOfAddresses", int64(len(clientConfig.Addresses))),
+	)
+	for i, addr := range clientConfig.Addresses {
+		log.Infon("Detected node", logger.NewIntField("index", int64(i)), logger.NewStringField("address", addr))
+	}
 
 	// Create and start HTTP server
 	serverAddr := conf.GetString("serverAddr", ":8080")

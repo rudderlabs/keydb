@@ -28,9 +28,9 @@ affinity: {}
 
 # KeyDB node addresses that the operator will connect to
 nodeAddresses: [
-  "keydb-0.keydb-headless.loveholidays.svc.cluster.local",
-  "keydb-1.keydb-headless.loveholidays.svc.cluster.local",
-  "keydb-2.keydb-headless.loveholidays.svc.cluster.local"
+  "keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051",
+  "keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051",
+  "keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051"
 ]
 
 # Configuration for the operator
