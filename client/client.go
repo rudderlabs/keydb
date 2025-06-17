@@ -16,6 +16,12 @@ import (
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 )
 
+var (
+	DefaultRetryCount             = 3
+	DefaultRetryDelay             = 1 * time.Second
+	DefaultTotalHashRanges uint32 = 128
+)
+
 type errClusterSizeChanged struct {
 	nodesAddresses []string
 }
@@ -61,15 +67,15 @@ func NewClient(config Config) (*Client, error) {
 	}
 
 	if config.TotalHashRanges == 0 {
-		config.TotalHashRanges = 128
+		config.TotalHashRanges = DefaultTotalHashRanges
 	}
 
 	if config.RetryCount == 0 {
-		config.RetryCount = 3
+		config.RetryCount = DefaultRetryCount
 	}
 
 	if config.RetryDelay == 0 {
-		config.RetryDelay = 100 * time.Millisecond
+		config.RetryDelay = DefaultRetryDelay
 	}
 
 	client := &Client{

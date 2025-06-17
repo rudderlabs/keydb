@@ -57,9 +57,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 	nodeConfig := node.Config{
 		NodeID:           uint32(nodeID),
 		ClusterSize:      uint32(conf.GetInt("clusterSize", 1)),
-		TotalHashRanges:  uint32(conf.GetInt("totalHashRanges", 128)),
-		SnapshotInterval: conf.GetDuration("snapshotInterval", 24, time.Hour),
-		Addresses:        conf.GetStringSlice("nodeAddresses", []string{"localhost:50051"}),
+		TotalHashRanges:  uint32(conf.GetInt("totalHashRanges", node.DefaultTotalHashRanges)),
+		MaxFilesToList:   conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
+		SnapshotInterval: conf.GetDuration("snapshotInterval", 0, time.Nanosecond), // node.DefaultSnapshotInterval will be used
+		Addresses:        conf.GetStringSlice("nodeAddresses", []string{}),
 	}
 
 	port := conf.GetInt("port", 50051)
