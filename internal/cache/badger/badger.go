@@ -73,7 +73,7 @@ func New(path string, conf *config.Config, log logger.Logger) (*Cache, error) {
 
 	compress := conf.GetBool("BadgerDB.Dedup.Compress", true)
 	if compress {
-		log.Infon("BadgerDB.Dedup.Compress is enabled, using gzip compression")
+		log.Infon("BadgerDB.Dedup.Compress is enabled, using gzip compression for snapshots")
 	}
 
 	db, err := badger.Open(opts)
