@@ -18,6 +18,7 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
@@ -58,30 +59,29 @@ type Config struct {
 type Service struct {
 	pb.UnimplementedNodeServiceServer
 
-	now func() time.Time
-
 	config Config
 
-	caches       map[uint32]Cache
-	cacheFactory cacheFactory
-
 	// mu protects the caches and scaling operations
-	mu sync.RWMutex
-
-	// scaling indicates if a scaling operation is in progress
+	mu      sync.RWMutex
+	caches  map[uint32]Cache
 	scaling bool
 
-	// lastSnapshotTime is the timestamp of the last snapshot
+	now              func() time.Time
+	cacheFactory     cacheFactory
 	lastSnapshotTime time.Time
+	maxFilesToList   int64
+	waitGroup        sync.WaitGroup
+	storage          cloudStorage
+	stats            stats.Stats
+	logger           logger.Logger
 
-	// maxFilesToList specifies the maximum number of files to retrieve during a file listing operation.
-	maxFilesToList int64
-
-	waitGroup sync.WaitGroup
-
-	storage cloudStorage
-
-	logger logger.Logger
+	metrics struct {
+		getKeysCounters     map[uint32]stats.Counter
+		putKeysCounter      map[uint32]stats.Counter
+		errScalingCounter   stats.Counter
+		errWrongNodeCounter stats.Counter
+		errInternalCounter  stats.Counter
+	}
 }
 
 // Cache is an interface for a key-value store with TTL support
@@ -91,12 +91,6 @@ type Cache interface {
 
 	// Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
 	Put(keys []string, ttl time.Duration) error
-
-	// Len returns the number of elements in the cache
-	Len() int
-
-	// String returns a string representation of the cache
-	String() string
 
 	// CreateSnapshot writes the cache contents to the provided writer
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
@@ -127,7 +121,7 @@ type cloudStorage interface {
 
 // NewService creates a new NodeService
 func NewService(
-	ctx context.Context, config Config, cf cacheFactory, storage cloudStorage, log logger.Logger,
+	ctx context.Context, config Config, cf cacheFactory, storage cloudStorage, stat stats.Stats, log logger.Logger,
 ) (*Service, error) {
 	// Set defaults for unspecified config values
 	if config.TotalHashRanges == 0 {
@@ -149,6 +143,7 @@ func NewService(
 		cacheFactory:   cf,
 		storage:        storage,
 		maxFilesToList: config.MaxFilesToList,
+		stats:          stat,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
@@ -160,6 +155,11 @@ func NewService(
 	if err := service.initCaches(ctx); err != nil {
 		return nil, err
 	}
+
+	statsTags := stats.Tags{"nodeID": strconv.Itoa(int(config.NodeID))}
+	service.metrics.errScalingCounter = stat.NewTaggedStat("keydb_err_scaling_count", stats.CountType, statsTags)
+	service.metrics.errWrongNodeCounter = stat.NewTaggedStat("keydb_err_wrong_node_count", stats.CountType, statsTags)
+	service.metrics.errInternalCounter = stat.NewTaggedStat("keydb_err_internal_count", stats.CountType, statsTags)
 
 	// Start background snapshot creation
 	service.waitGroup.Add(1)
@@ -216,6 +216,8 @@ func (s *Service) initCaches(ctx context.Context) error {
 	for r := range s.caches {
 		if _, shouldHandle := ranges[r]; !shouldHandle {
 			delete(s.caches, r)
+			delete(s.metrics.getKeysCounters, r)
+			delete(s.metrics.putKeysCounter, r)
 		}
 	}
 
@@ -233,6 +235,13 @@ func (s *Service) initCaches(ctx context.Context) error {
 			return fmt.Errorf("failed to create cache for range %d: %w", r, err)
 		}
 		s.caches[r] = cache
+
+		statsTags := stats.Tags{
+			"nodeID":    strconv.Itoa(int(s.config.NodeID)),
+			"hashRange": strconv.Itoa(int(r)),
+		}
+		s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
+		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 
 		group.Go(func() error { // Try to load snapshot for this range
 			if err := s.loadSnapshot(ctx, r, cache); err != nil {
@@ -260,6 +269,7 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	}
 
 	if s.scaling {
+		s.metrics.errScalingCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_SCALING
 		return response, nil
 	}
@@ -269,9 +279,11 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	)
 	if err != nil {
 		if errors.Is(err, hash.ErrWrongNode) {
+			s.metrics.errWrongNodeCounter.Increment()
 			response.ErrorCode = pb.ErrorCode_WRONG_NODE
 			return response, nil
 		}
+		s.metrics.errInternalCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		s.logger.Errorn("Error getting hashes for keys", obskit.Error(err))
 		return response, nil
@@ -296,6 +308,8 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 				return fmt.Errorf("failed to get keys from cache: %w", err)
 			}
 
+			s.metrics.getKeysCounters[hashRange].Count(len(keys))
+
 			// Update the response with the results
 			responseMu.Lock()
 			for i, key := range keys {
@@ -308,6 +322,7 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	}
 
 	if err := group.Wait(); err != nil {
+		s.metrics.errInternalCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		return response, nil
 	}
@@ -327,6 +342,7 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 	}
 
 	if s.scaling {
+		s.metrics.errScalingCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_SCALING
 		return resp, nil
 	}
@@ -337,9 +353,11 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 	)
 	if err != nil {
 		if errors.Is(err, hash.ErrWrongNode) {
+			s.metrics.errWrongNodeCounter.Increment()
 			resp.ErrorCode = pb.ErrorCode_WRONG_NODE
 			return resp, nil
 		}
+		s.metrics.errInternalCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		s.logger.Errorn("Error getting hashes for keys", obskit.Error(err))
 		return resp, nil
@@ -361,11 +379,14 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 				return fmt.Errorf("failed to put keys into cache: %w", err)
 			}
 
+			s.metrics.putKeysCounter[hashRange].Count(len(keys))
+
 			return nil
 		})
 	}
 
 	if err := group.Wait(); err != nil {
+		s.metrics.errInternalCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		return resp, nil
 	}
@@ -393,19 +414,11 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 		hashRanges = append(hashRanges, r)
 	}
 
-	// Count total keys
-	var keysCount uint64
-	for r := range ranges {
-		cache := s.caches[r]
-		keysCount += uint64(cache.Len())
-	}
-
 	return &pb.GetNodeInfoResponse{
 		NodeId:                s.config.NodeID,
 		ClusterSize:           s.config.ClusterSize,
 		NodesAddresses:        s.config.Addresses,
 		HashRanges:            hashRanges,
-		KeysCount:             keysCount,
 		LastSnapshotTimestamp: uint64(s.lastSnapshotTime.Unix()),
 	}, nil
 }

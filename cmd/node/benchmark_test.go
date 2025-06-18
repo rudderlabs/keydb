@@ -20,6 +20,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
 )
 
@@ -56,7 +57,7 @@ func BenchmarkSingleNode(b *testing.B) {
 	cf := func(hashRange uint32) (node.Cache, error) {
 		return cache.BadgerFactory(conf, logger.NOP)(hashRange)
 	}
-	service, err := node.NewService(ctx, nodeConfig, cf, cs, logger.NOP)
+	service, err := node.NewService(ctx, nodeConfig, cf, cs, stats.NOP, logger.NOP)
 	require.NoError(b, err)
 
 	// Create a gRPC server

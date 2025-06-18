@@ -372,8 +372,7 @@ type GetNodeInfoResponse struct {
 	ClusterSize           uint32                 `protobuf:"varint,2,opt,name=cluster_size,json=clusterSize,proto3" json:"cluster_size,omitempty"`                                 // Number of nodes in the cluster
 	NodesAddresses        []string               `protobuf:"bytes,3,rep,name=nodesAddresses,proto3" json:"nodesAddresses,omitempty"`                                               // When the cluster_size changes the client can use this variable to connect to the new nodes
 	HashRanges            []uint32               `protobuf:"varint,4,rep,packed,name=hash_ranges,json=hashRanges,proto3" json:"hash_ranges,omitempty"`                             // Hash ranges handled by this node
-	KeysCount             uint64                 `protobuf:"varint,5,opt,name=keys_count,json=keysCount,proto3" json:"keys_count,omitempty"`                                       // Number of keys stored in this node
-	LastSnapshotTimestamp uint64                 `protobuf:"varint,6,opt,name=last_snapshot_timestamp,json=lastSnapshotTimestamp,proto3" json:"last_snapshot_timestamp,omitempty"` // Unix timestamp of the last snapshot
+	LastSnapshotTimestamp uint64                 `protobuf:"varint,5,opt,name=last_snapshot_timestamp,json=lastSnapshotTimestamp,proto3" json:"last_snapshot_timestamp,omitempty"` // Unix timestamp of the last snapshot
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
@@ -434,13 +433,6 @@ func (x *GetNodeInfoResponse) GetHashRanges() []uint32 {
 		return x.HashRanges
 	}
 	return nil
-}
-
-func (x *GetNodeInfoResponse) GetKeysCount() uint64 {
-	if x != nil {
-		return x.KeysCount
-	}
-	return 0
 }
 
 func (x *GetNodeInfoResponse) GetLastSnapshotTimestamp() uint64 {
@@ -780,16 +772,14 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\n" +
 	"error_code\x18\x04 \x01(\x0e2\x10.keydb.ErrorCodeR\terrorCode\"-\n" +
 	"\x12GetNodeInfoRequest\x12\x17\n" +
-	"\anode_id\x18\x01 \x01(\rR\x06nodeId\"\xf1\x01\n" +
+	"\anode_id\x18\x01 \x01(\rR\x06nodeId\"\xd2\x01\n" +
 	"\x13GetNodeInfoResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\rR\x06nodeId\x12!\n" +
 	"\fcluster_size\x18\x02 \x01(\rR\vclusterSize\x12&\n" +
 	"\x0enodesAddresses\x18\x03 \x03(\tR\x0enodesAddresses\x12\x1f\n" +
 	"\vhash_ranges\x18\x04 \x03(\rR\n" +
-	"hashRanges\x12\x1d\n" +
-	"\n" +
-	"keys_count\x18\x05 \x01(\x04R\tkeysCount\x126\n" +
-	"\x17last_snapshot_timestamp\x18\x06 \x01(\x04R\x15lastSnapshotTimestamp\"\x17\n" +
+	"hashRanges\x126\n" +
+	"\x17last_snapshot_timestamp\x18\x05 \x01(\x04R\x15lastSnapshotTimestamp\"\x17\n" +
 	"\x15CreateSnapshotRequest\"p\n" +
 	"\x16CreateSnapshotResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +

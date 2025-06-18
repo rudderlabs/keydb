@@ -14,14 +14,18 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
+	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+
 	"github.com/rudderlabs/keydb/cache"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/keydb/internal/hash"
+	"github.com/rudderlabs/keydb/internal/release"
 	"github.com/rudderlabs/keydb/node"
 	pb "github.com/rudderlabs/keydb/proto"
-	"github.com/rudderlabs/rudder-go-kit/config"
-	"github.com/rudderlabs/rudder-go-kit/logger"
-	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
 var podNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
@@ -34,13 +38,31 @@ func main() {
 	defer logFactory.Sync()
 	log := logFactory.NewLogger()
 
-	if err := run(ctx, cancel, conf, log); err != nil {
+	releaseInfo := release.NewInfo()
+	statsOptions := []stats.Option{
+		stats.WithServiceName(serviceName),
+		stats.WithServiceVersion(releaseInfo.Version),
+		stats.WithDefaultHistogramBuckets(defaultHistogramBuckets),
+	}
+	for histogramName, buckets := range customBuckets {
+		statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
+	}
+
+	stat := stats.NewStats(conf, logFactory, svcMetric.NewManager(), statsOptions...)
+	defer stat.Stop()
+
+	if err := stat.Start(ctx, stats.DefaultGoRoutineFactory); err != nil {
+		log.Errorn("Failed to start Stats", obskit.Error(err))
+		os.Exit(1)
+	}
+
+	if err := run(ctx, cancel, conf, stat, log); err != nil {
 		log.Fataln("failed to run", obskit.Error(err))
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Logger) error {
+func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Stats, log logger.Logger) error {
 	cloudStorage, err := cloudstorage.GetCloudStorage(conf, log)
 	if err != nil {
 		return fmt.Errorf("failed to create cloud storage: %w", err)
@@ -82,7 +104,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 	badgerCacheFactory := func(hashRange uint32) (node.Cache, error) {
 		return cache.BadgerFactory(conf, log)(hashRange)
 	}
-	service, err := node.NewService(ctx, nodeConfig, badgerCacheFactory, cloudStorage, log.Child("service"))
+	service, err := node.NewService(ctx, nodeConfig, badgerCacheFactory, cloudStorage, stat, log.Child("service"))
 	if err != nil {
 		return fmt.Errorf("failed to create node service: %w", err)
 	}

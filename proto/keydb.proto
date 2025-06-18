@@ -78,8 +78,7 @@ message GetNodeInfoResponse {
   uint32 cluster_size = 2; // Number of nodes in the cluster
   repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
   repeated uint32 hash_ranges = 4; // Hash ranges handled by this node
-  uint64 keys_count = 5; // Number of keys stored in this node
-  uint64 last_snapshot_timestamp = 6; // Unix timestamp of the last snapshot
+  uint64 last_snapshot_timestamp = 5; // Unix timestamp of the last snapshot
 }
 
 // CreateSnapshotRequest initiates snapshot creation

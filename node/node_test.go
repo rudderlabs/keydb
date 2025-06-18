@@ -27,6 +27,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
 )
 
@@ -163,16 +164,11 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 2, respNode0.ClusterSize)
 		require.Len(t, respNode0.HashRanges, 2)
-		require.EqualValues(t, 2, respNode0.KeysCount)
-		require.Equal(t, `{key3:true}`, node0.caches[0].String())
-		require.Equal(t, `{key1:true}`, node0.caches[2].String())
 
 		respNode1, err := c.GetNodeInfo(ctx, 1)
 		require.NoError(t, err)
 		require.EqualValues(t, 2, respNode1.ClusterSize)
 		require.Len(t, respNode1.HashRanges, 1)
-		require.EqualValues(t, 1, respNode1.KeysCount)
-		require.Equal(t, `{key2:true}`, node1.caches[1].String())
 
 		exists, err = c.Get(ctx, keys)
 		require.NoError(t, err)
@@ -189,10 +185,6 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 1, respNode0.ClusterSize)
 		require.Len(t, respNode0.HashRanges, 3)
-		require.EqualValues(t, 3, respNode0.KeysCount)
-		require.Equal(t, `{key3:true}`, node0.caches[0].String())
-		require.Equal(t, `{key2:true}`, node0.caches[1].String())
-		require.Equal(t, `{key1:true}`, node0.caches[2].String())
 
 		cancel()
 		node0.Close()
@@ -362,7 +354,7 @@ func getService(
 	address := "localhost:" + strconv.Itoa(freePort)
 	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
 
-	service, err := NewService(ctx, nodeConfig, cf, cs, logger.NOP)
+	service, err := NewService(ctx, nodeConfig, cf, cs, stats.NOP, logger.NOP)
 	require.NoError(t, err)
 
 	// Create a gRPC server
