@@ -76,6 +76,8 @@ func New(path string, conf *config.Config, log logger.Logger) (*Cache, error) {
 		log.Infon("BadgerDB.Dedup.Compress is enabled, using gzip compression for snapshots")
 	}
 
+	log.Infon("Starting BadgerDB", logger.NewStringField("path", path))
+
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, err
