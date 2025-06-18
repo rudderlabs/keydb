@@ -14,7 +14,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/rudderlabs/keydb/internal/cache/badger"
+	"github.com/rudderlabs/keydb/cache"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/node"
@@ -80,7 +80,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 	)
 
 	badgerCacheFactory := func(hashRange uint32) (node.Cache, error) {
-		return badger.Factory(conf, log)(hashRange)
+		return cache.BadgerFactory(conf, log)(hashRange)
 	}
 	service, err := node.NewService(ctx, nodeConfig, badgerCacheFactory, cloudStorage, log.Child("service"))
 	if err != nil {
