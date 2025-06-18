@@ -40,7 +40,7 @@ func GetCloudStorage(conf *config.Config, log logger.Logger) (filemanager.S3Mana
 		s3Config,
 		log.Withn(logger.NewStringField("component", "cloudStorage")),
 		func() time.Duration {
-			return conf.GetDuration("Storage.UploadTimeout", 120, time.Second)
+			return conf.GetDuration("Storage.DefaultTimeout", 180, time.Second)
 		},
 	)
 }
