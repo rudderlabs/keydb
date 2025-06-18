@@ -151,15 +151,17 @@ func NewService(
 		),
 	}
 
-	// Initialize caches for all hash ranges this node handles
-	if err := service.initCaches(ctx); err != nil {
-		return nil, err
-	}
-
 	statsTags := stats.Tags{"nodeID": strconv.Itoa(int(config.NodeID))}
 	service.metrics.errScalingCounter = stat.NewTaggedStat("keydb_err_scaling_count", stats.CountType, statsTags)
 	service.metrics.errWrongNodeCounter = stat.NewTaggedStat("keydb_err_wrong_node_count", stats.CountType, statsTags)
 	service.metrics.errInternalCounter = stat.NewTaggedStat("keydb_err_internal_count", stats.CountType, statsTags)
+	service.metrics.getKeysCounters = make(map[uint32]stats.Counter)
+	service.metrics.putKeysCounter = make(map[uint32]stats.Counter)
+
+	// Initialize caches for all hash ranges this node handles
+	if err := service.initCaches(ctx); err != nil {
+		return nil, err
+	}
 
 	// Start background snapshot creation
 	service.waitGroup.Add(1)
