@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -33,6 +34,8 @@ const (
 	// DefaultMaxFilesToList defines the default maximum number of files to list in a single operation, set to 1000.
 	DefaultMaxFilesToList int64 = 1000
 )
+
+var snapshotFilenameRegex = regexp.MustCompile(`^hr_(\d+)_s_(\d+).snapshot$`)
 
 // Config holds the configuration for a node
 type Config struct {
@@ -223,8 +226,30 @@ func (s *Service) initCaches(ctx context.Context) error {
 		}
 	}
 
+	// List all files in the bucket
+	filenamesPrefix := getSnapshotFilenamePrefix()
+	list := s.storage.ListFilesWithPrefix(ctx, "", filenamesPrefix, s.maxFilesToList)
+	files, err := list.Next()
+	if err != nil {
+		return fmt.Errorf("failed to list snapshot files: %w", err)
+	}
+
+	filesByHashRange := make(map[uint32]string, len(files))
+	for _, file := range files {
+		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
+		if len(matches) != 3 {
+			continue
+		}
+		hashRange, err := strconv.Atoi(matches[1])
+		if err != nil {
+			s.logger.Warnn("Invalid snapshot filename", logger.NewStringField("filename", file.Key))
+			continue
+		}
+		filesByHashRange[uint32(hashRange)] = file.Key
+	}
+
 	// Create a cache for each hash range
-	group, _ := kitsync.NewEagerGroup(ctx, len(ranges))
+	group, gCtx := kitsync.NewEagerGroup(ctx, len(ranges))
 	for r := range ranges {
 		// Check if we already have a cache for this range
 		if _, exists := s.caches[r]; exists {
@@ -245,8 +270,13 @@ func (s *Service) initCaches(ctx context.Context) error {
 		s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
 		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 
+		snapshotFile := filesByHashRange[r]
+		if snapshotFile == "" {
+			continue
+		}
+
 		group.Go(func() error { // Try to load snapshot for this range
-			if err := s.loadSnapshot(ctx, r, cache); err != nil {
+			if err := s.loadSnapshot(gCtx, cache, snapshotFile); err != nil {
 				if errors.Is(err, filemanager.ErrKeyNotFound) {
 					s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
 					return nil
@@ -583,7 +613,7 @@ func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache Ca
 		return nil // no data to upload
 	}
 
-	filename := getSnapshotFilenamePrefix(hashRange) + getSnapshotFilenamePostfix(since)
+	filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, since)
 
 	_, err = s.storage.UploadReader(ctx, filename, buf)
 	if err != nil {
@@ -594,34 +624,25 @@ func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache Ca
 }
 
 // loadSnapshot loads a snapshot for a specific hash range
-func (s *Service) loadSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
-	filenamePrefix := getSnapshotFilenamePrefix(hashRange)
-	list := s.storage.ListFilesWithPrefix(ctx, "", filenamePrefix, s.maxFilesToList)
-	files, err := list.Next()
+func (s *Service) loadSnapshot(ctx context.Context, cache Cache, filename string) error {
+	buf := aws.NewWriteAtBuffer([]byte{})
+	err := s.storage.Download(ctx, buf, filename)
 	if err != nil {
-		return fmt.Errorf("failed to list snapshot files for range %d: %w", hashRange, err)
+		return fmt.Errorf("failed to download snapshot file %q: %w", filename, err)
 	}
 
-	for _, file := range files {
-		buf := aws.NewWriteAtBuffer([]byte{})
-		err := s.storage.Download(ctx, buf, file.Key)
-		if err != nil {
-			return fmt.Errorf("failed to download snapshot file %q: %w", file.Key, err)
-		}
-
-		reader := bytes.NewReader(buf.Bytes())
-		if err := cache.LoadSnapshot(reader); err != nil {
-			return fmt.Errorf("failed to load snapshot file %q: %w", file.Key, err)
-		}
+	reader := bytes.NewReader(buf.Bytes())
+	if err := cache.LoadSnapshot(reader); err != nil {
+		return fmt.Errorf("failed to load snapshot file %q: %w", filename, err)
 	}
 
 	return nil
 }
 
-func getSnapshotFilenamePrefix(hashRange uint32) string {
-	return "hr_" + strconv.Itoa(int(hashRange)) + "_s_"
+func getSnapshotFilenamePrefix() string {
+	return "hr_"
 }
 
-func getSnapshotFilenamePostfix(since uint64) string {
-	return strconv.FormatUint(since, 10) + ".snapshot"
+func getSnapshotFilenamePostfix(hashRange uint32, since uint64) string {
+	return strconv.Itoa(int(hashRange)) + "_s_" + strconv.FormatUint(since, 10) + ".snapshot"
 }
