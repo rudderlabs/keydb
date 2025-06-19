@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/profiler"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
@@ -63,6 +65,8 @@ func main() {
 }
 
 func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Stats, log logger.Logger) error {
+	defer cancel()
+
 	cloudStorage, err := cloudstorage.GetCloudStorage(conf, log)
 	if err != nil {
 		return fmt.Errorf("failed to create cloud storage: %w", err)
@@ -108,8 +112,18 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	if err != nil {
 		return fmt.Errorf("failed to create node service: %w", err)
 	}
-	defer service.Close() // TODO test graceful shutdown
-	defer cancel()
+
+	var wg sync.WaitGroup
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		service.Close() // TODO test graceful shutdown
+	}()
 
 	// Create a gRPC server
 	server := grpc.NewServer()
@@ -127,6 +141,16 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			hash.GetNodeHashRanges(nodeConfig.NodeID, nodeConfig.ClusterSize, nodeConfig.TotalHashRanges),
 		))),
 	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer log.Infon("Profiler server terminated")
+		if err := profiler.StartServer(ctx, conf.GetInt("Profiler.Port", 7777)); err != nil {
+			log.Warnn("Profiler server failed", obskit.Error(err))
+			return
+		}
+	}()
 
 	// Start the server
 	if err := server.Serve(lis); err != nil {
