@@ -161,8 +161,8 @@ func NewService(
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
-			logger.NewDurationField("snapshotInterval", config.SnapshotInterval),
-			logger.NewDurationField("garbageCollectionInterval", config.GarbageCollectionInterval),
+			logger.NewStringField("snapshotInterval", config.SnapshotInterval.String()),
+			logger.NewStringField("garbageCollectionInterval", config.GarbageCollectionInterval.String()),
 			logger.NewIntField("maxFilesToList", config.MaxFilesToList),
 		),
 	}
@@ -255,7 +255,7 @@ func (s *Service) garbageCollection(ctx context.Context) {
 					elapsed := time.Since(start)
 					s.logger.Infon("Garbage collection finished",
 						logger.NewIntField("noOfCaches", int64(len(s.caches))),
-						logger.NewDurationField("duration", elapsed),
+						logger.NewStringField("duration", elapsed.String()),
 					)
 					s.metrics.gcDuration.Observe(elapsed.Seconds())
 				}()
