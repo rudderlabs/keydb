@@ -86,12 +86,13 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	nodeConfig := node.Config{
-		NodeID:           uint32(nodeID),
-		ClusterSize:      uint32(conf.GetInt("clusterSize", 1)),
-		TotalHashRanges:  uint32(conf.GetInt("totalHashRanges", node.DefaultTotalHashRanges)),
-		MaxFilesToList:   conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
-		SnapshotInterval: conf.GetDuration("snapshotInterval", 0, time.Nanosecond), // node.DefaultSnapshotInterval will be used
-		Addresses:        strings.Split(nodeAddresses, ","),
+		NodeID:                    uint32(nodeID),
+		ClusterSize:               uint32(conf.GetInt("clusterSize", 1)),
+		TotalHashRanges:           uint32(conf.GetInt("totalHashRanges", node.DefaultTotalHashRanges)),
+		MaxFilesToList:            conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
+		SnapshotInterval:          conf.GetDuration("snapshotInterval", 0, time.Nanosecond), // node.DefaultSnapshotInterval will be used
+		GarbageCollectionInterval: conf.GetDuration("gcInterval", 0, time.Nanosecond),       // node.DefaultGarbageCollectionInterval will be used
+		Addresses:                 strings.Split(nodeAddresses, ","),
 	}
 
 	port := conf.GetInt("port", 50051)
@@ -100,8 +101,6 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewIntField("nodeId", int64(nodeConfig.NodeID)),
 		logger.NewIntField("clusterSize", int64(nodeConfig.ClusterSize)),
 		logger.NewIntField("totalHashRanges", int64(nodeConfig.TotalHashRanges)),
-		logger.NewDurationField("snapshotInterval", nodeConfig.SnapshotInterval),
-		logger.NewDurationField("gcInterval", nodeConfig.GarbageCollectionInterval),
 		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
 		logger.NewIntField("noOfAddresses", int64(len(nodeConfig.Addresses))),
 	)
