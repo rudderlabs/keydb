@@ -59,6 +59,10 @@ func (c *Cache) LoadSnapshot(r io.Reader) error {
 	return cachettl.LoadSnapshot(r, c.cache)
 }
 
+func (c *Cache) RunGarbageCollection() {
+	// no need to implement since we won't be using cachettl
+}
+
 // Close releases any resources held by the cache and performs any necessary cleanup.
 func (c *Cache) Close() error { // TODO implementation
 	return nil

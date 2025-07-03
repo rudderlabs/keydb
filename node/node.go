@@ -31,6 +31,9 @@ const (
 	// DefaultSnapshotInterval is the default interval for creating snapshots (in seconds)
 	DefaultSnapshotInterval = 24 * time.Hour
 
+	// DefaultGarbageCollectionInterval defines how often garbage collection should happen per cache
+	DefaultGarbageCollectionInterval = 5 * time.Minute
+
 	// DefaultMaxFilesToList defines the default maximum number of files to list in a single operation, set to 1000.
 	DefaultMaxFilesToList int64 = 1000
 )
@@ -53,6 +56,9 @@ type Config struct {
 
 	// SnapshotInterval is the interval for creating snapshots (in seconds)
 	SnapshotInterval time.Duration
+
+	// GarbageCollectionInterval defines the duration between automatic GC operation per cache
+	GarbageCollectionInterval time.Duration
 
 	// Addresses is a list of node addresses that this node will advertise to clients
 	Addresses []string
@@ -84,6 +90,7 @@ type Service struct {
 		errScalingCounter   stats.Counter
 		errWrongNodeCounter stats.Counter
 		errInternalCounter  stats.Counter
+		gcDuration          stats.Histogram
 	}
 }
 
@@ -101,6 +108,9 @@ type Cache interface {
 
 	// LoadSnapshot reads the cache contents from the provided reader
 	LoadSnapshot(r io.Reader) error
+
+	// RunGarbageCollection is designed to do GC while the cache is online
+	RunGarbageCollection()
 
 	// Close releases any resources associated with the cache and ensures proper cleanup. Returns an error if the operation fails.
 	Close() error
@@ -130,11 +140,12 @@ func NewService(
 	if config.TotalHashRanges == 0 {
 		config.TotalHashRanges = DefaultTotalHashRanges
 	}
-
 	if config.SnapshotInterval == 0 {
 		config.SnapshotInterval = DefaultSnapshotInterval
 	}
-
+	if config.GarbageCollectionInterval == 0 {
+		config.GarbageCollectionInterval = DefaultGarbageCollectionInterval
+	}
 	if config.MaxFilesToList == 0 {
 		config.MaxFilesToList = DefaultMaxFilesToList
 	}
@@ -150,7 +161,9 @@ func NewService(
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
-			logger.NewIntField("snapshotInterval", int64(config.SnapshotInterval.Seconds())),
+			logger.NewDurationField("snapshotInterval", config.SnapshotInterval),
+			logger.NewDurationField("garbageCollectionInterval", config.GarbageCollectionInterval),
+			logger.NewIntField("maxFilesToList", config.MaxFilesToList),
 		),
 	}
 
@@ -160,6 +173,7 @@ func NewService(
 	service.metrics.errInternalCounter = stat.NewTaggedStat("keydb_err_internal_count", stats.CountType, statsTags)
 	service.metrics.getKeysCounters = make(map[uint32]stats.Counter)
 	service.metrics.putKeysCounter = make(map[uint32]stats.Counter)
+	service.metrics.gcDuration = stat.NewTaggedStat("keydb_gc_duration_seconds", stats.HistogramType, statsTags)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx); err != nil {
@@ -169,6 +183,8 @@ func NewService(
 	// Start background snapshot creation
 	service.waitGroup.Add(1)
 	go service.snapshotLoop(ctx)
+	service.waitGroup.Add(1)
+	go service.garbageCollection(ctx)
 
 	return service, nil
 }
@@ -202,10 +218,51 @@ func (s *Service) snapshotLoop(ctx context.Context) {
 				}
 				if s.now().Sub(s.lastSnapshotTime) < s.config.SnapshotInterval { // TODO write a test for this
 					// we created a snapshot already recently due to a scaling operation
+					s.logger.Debugn("Skipping snapshot due to scaling operation")
 					return
 				}
 				if err := s.createSnapshots(ctx); err != nil {
 					s.logger.Errorn("Error creating snapshots", obskit.Error(err))
+				}
+			}()
+		}
+	}
+}
+
+func (s *Service) garbageCollection(ctx context.Context) {
+	defer s.waitGroup.Done()
+
+	ticker := time.NewTicker(s.config.GarbageCollectionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			func() {
+				s.mu.Lock() // TODO this might affect scaling operations
+				defer s.mu.Unlock()
+
+				if s.scaling {
+					s.logger.Warnn("Skipping garbage collection while scaling")
+					return
+				}
+
+				start := time.Now()
+				s.logger.Infon("Running garbage collection", logger.NewIntField("noOfCaches", int64(len(s.caches))))
+				defer func() {
+					elapsed := time.Since(start)
+					s.logger.Infon("Garbage collection finished",
+						logger.NewIntField("noOfCaches", int64(len(s.caches))),
+						logger.NewDurationField("duration", elapsed),
+					)
+					s.metrics.gcDuration.Observe(elapsed.Seconds())
+				}()
+
+				for _, cache := range s.caches {
+					// For now let's just run one GC at a time to avoid overwhelming the CPU
+					cache.RunGarbageCollection()
 				}
 			}()
 		}
@@ -542,6 +599,7 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 }
 
 // CreateSnapshot implements the CreateSnapshot RPC method
+// TODO should we trigger a Garbage Collection before taking a snapshot?
 // TODO this can be optimized a lot! For example we could snapshot on local disk every 10s and work only on the head
 // and tail of the file (i.e. remove expired from head and append new entries).
 // Then once a minute we can upload the whole file to S3.

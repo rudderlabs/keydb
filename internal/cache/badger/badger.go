@@ -24,6 +24,7 @@ var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
 type Cache struct {
 	cache            *badger.DB
 	compress         bool
+	discardRatio     float64
 	snapshotSince    uint64
 	snapshotting     bool
 	snapshottingLock sync.Mutex
@@ -83,8 +84,9 @@ func New(path string, conf *config.Config, log logger.Logger) (*Cache, error) {
 		return nil, err
 	}
 	return &Cache{
-		cache:    db,
-		compress: compress,
+		cache:        db,
+		compress:     compress,
+		discardRatio: conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
 	}, nil
 }
 
@@ -231,6 +233,14 @@ func (c *Cache) LoadSnapshot(r io.Reader) error {
 		defer func() { _ = r.(*gzip.Reader).Close() }()
 	}
 	return c.cache.Load(r, 16)
+}
+
+func (c *Cache) RunGarbageCollection() {
+again: // see https://dgraph.io/docs/badger/get-started/#garbage-collection
+	err := c.cache.RunValueLogGC(c.discardRatio)
+	if err == nil {
+		goto again
+	}
 }
 
 func (c *Cache) Close() error {

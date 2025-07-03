@@ -101,6 +101,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewIntField("clusterSize", int64(nodeConfig.ClusterSize)),
 		logger.NewIntField("totalHashRanges", int64(nodeConfig.TotalHashRanges)),
 		logger.NewDurationField("snapshotInterval", nodeConfig.SnapshotInterval),
+		logger.NewDurationField("gcInterval", nodeConfig.GarbageCollectionInterval),
 		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
 		logger.NewIntField("noOfAddresses", int64(len(nodeConfig.Addresses))),
 	)
