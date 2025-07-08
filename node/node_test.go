@@ -21,7 +21,6 @@ import (
 
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/cache/badger"
-	"github.com/rudderlabs/keydb/internal/cache/cachettl"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
@@ -93,11 +92,6 @@ func TestSimple(t *testing.T) {
 		cancel()
 		node0.Close()
 	}
-
-	t.Run("cachettl", func(t *testing.T) {
-		conf := config.New()
-		run(t, conf, getMemoryCache(t, conf))
-	})
 
 	t.Run("badger", func(t *testing.T) {
 		conf := config.New()
@@ -190,11 +184,6 @@ func TestScaleUpAndDown(t *testing.T) {
 		node0.Close()
 		node1.Close()
 	}
-
-	t.Run("cachettl", func(t *testing.T) {
-		conf := config.New()
-		run(t, conf, getMemoryCache(t, conf))
-	})
 
 	t.Run("badger", func(t *testing.T) {
 		conf := config.New()
@@ -300,11 +289,6 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		node2.Close()
 	}
 
-	t.Run("cachettl", func(t *testing.T) {
-		conf := config.New()
-		run(t, conf, getMemoryCache(t, conf))
-	})
-
 	t.Run("badger", func(t *testing.T) {
 		conf := config.New()
 		run(t, conf, getBadgerCache(t, conf))
@@ -328,13 +312,6 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (
 	require.NoError(t, err)
 
 	return minioClient, cloudStorage
-}
-
-func getMemoryCache(t testing.TB, _ *config.Config) cacheFactory {
-	return func(_ uint32) (Cache, error) {
-		t.Helper()
-		return cachettl.New(), nil
-	}
 }
 
 func getBadgerCache(t testing.TB, conf *config.Config) cacheFactory {
