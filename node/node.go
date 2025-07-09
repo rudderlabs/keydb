@@ -70,13 +70,12 @@ type Service struct {
 
 	config Config
 
-	// mu protects the caches and scaling operations
+	// mu protects the scaling operations
 	mu      sync.RWMutex
-	caches  map[uint32]Cache
+	cache   Cache
 	scaling bool
 
 	now              func() time.Time
-	cacheFactory     cacheFactory
 	lastSnapshotTime time.Time
 	maxFilesToList   int64
 	waitGroup        sync.WaitGroup
@@ -695,6 +694,14 @@ func (s *Service) loadSnapshot(ctx context.Context, cache Cache, filename string
 	}
 
 	return nil
+}
+
+func (s *Service) GetKeysByHashRange(keys []string) (map[uint32][]string, error) {
+	return hash.GetKeysByHashRange(keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+}
+
+func (s *Service) GetKeysByHashRangeWithIndexes(keys []string) (map[uint32][]string, map[string]int, error) {
+	return hash.GetKeysByHashRangeWithIndexes(keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
 }
 
 func getSnapshotFilenamePrefix() string {
