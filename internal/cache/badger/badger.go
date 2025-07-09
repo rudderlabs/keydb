@@ -160,70 +160,8 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 	return nil
 }
 
-// Len returns the number of elements in the cache
-// WARNING: this must be used in tests only TODO protect this with a testMode=false by default
-func (c *Cache) Len() int {
-	if !c.debugMode {
-		panic("Len() is only available in debug mode")
-	}
-
-	count := 0
-	err := c.cache.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-
-		for it.Rewind(); it.Valid(); it.Next() {
-			count++
-		}
-		return nil
-	})
-	if err != nil {
-		panic("failed to get cache length: " + err.Error())
-	}
-	return count
-}
-
-// String returns a string representation of the cache
-// WARNING: this must be used in tests only TODO protect this with a testMode=false by default
-func (c *Cache) String() string {
-	if !c.debugMode {
-		panic("String() is only available in debug mode")
-	}
-
-	sb := strings.Builder{}
-	sb.WriteString("{")
-
-	err := c.cache.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-
-		first := true
-		for it.Rewind(); it.Valid(); it.Next() {
-			if !first {
-				sb.WriteString(",")
-			}
-			first = false
-
-			item := it.Item()
-			key := string(item.Key())
-			sb.WriteString(fmt.Sprintf("%s:true", key))
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Sprintf("{error:%v}", err)
-	}
-
-	sb.WriteString("}")
-	return sb.String()
-}
-
-// CreateSnapshot writes the cache contents to the provided writer
-func (c *Cache) CreateSnapshot(ctx context.Context, w map[uint32]io.Writer) (uint64, error) {
+// CreateSnapshots writes the cache contents to the provided writers
+func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, error) {
 	c.snapshottingLock.Lock()
 	if c.snapshotting {
 		c.snapshottingLock.Unlock()
@@ -399,6 +337,68 @@ again: // see https://dgraph.io/docs/badger/get-started/#garbage-collection
 
 func (c *Cache) Close() error {
 	return c.cache.Close()
+}
+
+// Len returns the number of elements in the cache
+// WARNING: this must be used in tests only TODO protect this with a testMode=false by default
+func (c *Cache) Len() int {
+	if !c.debugMode {
+		panic("Len() is only available in debug mode")
+	}
+
+	count := 0
+	err := c.cache.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		panic("failed to get cache length: " + err.Error())
+	}
+	return count
+}
+
+// String returns a string representation of the cache
+// WARNING: this must be used in tests only TODO protect this with a testMode=false by default
+func (c *Cache) String() string {
+	if !c.debugMode {
+		panic("String() is only available in debug mode")
+	}
+
+	sb := strings.Builder{}
+	sb.WriteString("{")
+
+	err := c.cache.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		first := true
+		for it.Rewind(); it.Valid(); it.Next() {
+			if !first {
+				sb.WriteString(",")
+			}
+			first = false
+
+			item := it.Item()
+			key := string(item.Key())
+			sb.WriteString(fmt.Sprintf("%s:true", key))
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Sprintf("{error:%v}", err)
+	}
+
+	sb.WriteString("}")
+	return sb.String()
 }
 
 func (c *Cache) getKey(key string, hashRange uint32) []byte {
