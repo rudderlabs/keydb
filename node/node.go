@@ -15,8 +15,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/rudderlabs/keydb/internal/cache/badger"
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
+	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
@@ -115,8 +117,6 @@ type Cache interface {
 	Close() error
 }
 
-type cacheFactory func(hashRange uint32) (Cache, error)
-
 type cloudStorageReader interface {
 	Download(ctx context.Context, output io.WriterAt, key string) error
 	ListFilesWithPrefix(ctx context.Context, startAfter, prefix string, maxItems int64) filemanager.ListSession
@@ -133,7 +133,8 @@ type cloudStorage interface {
 
 // NewService creates a new NodeService
 func NewService(
-	ctx context.Context, config Config, cf cacheFactory, storage cloudStorage, stat stats.Stats, log logger.Logger,
+	ctx context.Context, config Config, storage cloudStorage,
+	stat stats.Stats, kitConf *config.Config, log logger.Logger,
 ) (*Service, error) {
 	// Set defaults for unspecified config values
 	if config.TotalHashRanges == 0 {
@@ -152,8 +153,6 @@ func NewService(
 	service := &Service{
 		now:            time.Now,
 		config:         config,
-		caches:         make(map[uint32]Cache),
-		cacheFactory:   cf,
 		storage:        storage,
 		maxFilesToList: config.MaxFilesToList,
 		stats:          stat,
@@ -164,6 +163,12 @@ func NewService(
 			logger.NewStringField("garbageCollectionInterval", config.GarbageCollectionInterval.String()),
 			logger.NewIntField("maxFilesToList", config.MaxFilesToList),
 		),
+	}
+
+	var err error
+	service.cache, err = badger.New(service, kitConf, log.Child("badger"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
 
 	statsTags := stats.Tags{"nodeID": strconv.Itoa(int(config.NodeID))}
@@ -190,10 +195,8 @@ func NewService(
 
 func (s *Service) Close() {
 	s.waitGroup.Wait()
-	for _, cache := range s.caches {
-		if err := cache.Close(); err != nil {
-			s.logger.Errorn("Error closing cache", obskit.Error(err))
-		}
+	if err := s.cache.Close(); err != nil {
+		s.logger.Errorn("Error closing cache", obskit.Error(err))
 	}
 }
 
@@ -249,35 +252,37 @@ func (s *Service) garbageCollection(ctx context.Context) {
 				}
 
 				start := time.Now()
-				s.logger.Infon("Running garbage collection", logger.NewIntField("noOfCaches", int64(len(s.caches))))
+				s.logger.Infon("Running garbage collection")
 				defer func() {
 					elapsed := time.Since(start)
 					s.logger.Infon("Garbage collection finished",
-						logger.NewIntField("noOfCaches", int64(len(s.caches))),
 						logger.NewStringField("duration", elapsed.String()),
 					)
 					s.metrics.gcDuration.Observe(elapsed.Seconds())
 				}()
 
-				for _, cache := range s.caches {
-					// For now let's just run one GC at a time to avoid overwhelming the CPU
-					cache.RunGarbageCollection()
-				}
+				s.cache.RunGarbageCollection()
 			}()
 		}
 	}
 }
 
+func (s *Service) getCurrentRanges() map[uint32]struct{} {
+	return hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+}
+
 // initCaches initializes the caches for all hash ranges this node handles
 func (s *Service) initCaches(ctx context.Context) error {
-	// Get hash ranges for this node
-	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+	ranges := s.getCurrentRanges() // gets the hash ranges for this node
 
 	// Remove caches and key maps for ranges this node no longer handles
-	for r := range s.caches {
+	for r := range s.metrics.getKeysCounters {
 		if _, shouldHandle := ranges[r]; !shouldHandle {
-			delete(s.caches, r)
 			delete(s.metrics.getKeysCounters, r)
+		}
+	}
+	for r := range s.metrics.putKeysCounter {
+		if _, shouldHandle := ranges[r]; !shouldHandle {
 			delete(s.metrics.putKeysCounter, r)
 		}
 	}
@@ -304,46 +309,50 @@ func (s *Service) initCaches(ctx context.Context) error {
 		filesByHashRange[uint32(hashRange)] = file.Key
 	}
 
-	// Create a cache for each hash range
-	group, gCtx := kitsync.NewEagerGroup(ctx, len(ranges))
+	var (
+		i           = 0
+		group, gCtx = kitsync.NewEagerGroup(ctx, len(ranges))
+		buffers     = make([]io.Reader, len(filesByHashRange))
+	)
 	for r := range ranges {
-		// Check if we already have a cache for this range
-		if _, exists := s.caches[r]; exists {
-			continue
-		}
-
-		// Create a new cache with no TTL refresh
-		cache, err := s.cacheFactory(r)
-		if err != nil {
-			return fmt.Errorf("failed to create cache for range %d: %w", r, err)
-		}
-		s.caches[r] = cache
-
-		statsTags := stats.Tags{
-			"nodeID":    strconv.Itoa(int(s.config.NodeID)),
-			"hashRange": strconv.Itoa(int(r)),
-		}
-		s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
-		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
-
-		snapshotFile := filesByHashRange[r]
-		if snapshotFile == "" {
-			continue
-		}
-
-		group.Go(func() error { // Try to load snapshot for this range
-			if err := s.loadSnapshot(gCtx, cache, snapshotFile); err != nil {
-				if errors.Is(err, filemanager.ErrKeyNotFound) {
-					s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
-					return nil
-				}
-				return fmt.Errorf("failed to load snapshot for range %d: %w", r, err)
+		func(i int, r uint32) {
+			statsTags := stats.Tags{
+				"nodeID":    strconv.Itoa(int(s.config.NodeID)),
+				"hashRange": strconv.Itoa(int(r)),
 			}
-			return nil
-		})
-	}
+			s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
+			s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 
-	return group.Wait()
+			snapshotFile := filesByHashRange[r]
+			if snapshotFile == "" {
+				s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", int64(r)))
+				return
+			}
+
+			group.Go(func() error { // Try to load snapshot for this range
+				buf := aws.NewWriteAtBuffer([]byte{})
+				err := s.storage.Download(gCtx, buf, snapshotFile)
+				if err != nil {
+					if errors.Is(err, filemanager.ErrKeyNotFound) {
+						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
+						return nil
+					}
+					// TODO what do we do if we can't load a snapshot due to an error?
+					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
+				}
+				buffers[i] = bytes.NewReader(buf.Bytes())
+				return nil
+			})
+		}(i, r)
+		i++
+	}
+	if err = group.Wait(); err != nil {
+		return fmt.Errorf("failed to initialize caches: %w", err)
+	}
+	if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
+		return fmt.Errorf("failed to load snapshots: %w", err)
+	}
+	return nil
 }
 
 // Get implements the Get RPC method
@@ -384,14 +393,8 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	group, _ := kitsync.NewEagerGroup(ctx, len(itemsByHashRange))
 	for hashRange, keys := range itemsByHashRange {
 		group.Go(func() error {
-			// Get the cache for this hash range
-			cache, exists := s.caches[hashRange]
-			if !exists {
-				return fmt.Errorf("no cache for hash range %d", hashRange)
-			}
-
 			// Check if the keys exist in the cache
-			existsValues, err := cache.Get(keys)
+			existsValues, err := s.cache.Get(keys)
 			if err != nil {
 				return fmt.Errorf("failed to get keys from cache: %w", err)
 			}
@@ -455,14 +458,8 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 	group, _ := kitsync.NewEagerGroup(ctx, len(itemsByHashRange))
 	for hashRange, keys := range itemsByHashRange {
 		group.Go(func() error {
-			// Get the cache for this hash range
-			cache, exists := s.caches[hashRange]
-			if !exists {
-				return fmt.Errorf("no cache for hash range %d", hashRange)
-			}
-
 			// Store the keys in the cache with the specified TTL
-			err := cache.Put(keys, ttl)
+			err := s.cache.Put(keys, ttl)
 			if err != nil {
 				return fmt.Errorf("failed to put keys into cache: %w", err)
 			}
@@ -633,65 +630,34 @@ func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequ
 // createSnapshots creates snapshots for all hash ranges this node handles
 func (s *Service) createSnapshots(ctx context.Context) error {
 	// Get hash ranges for this node
-	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+	ranges := s.getCurrentRanges()
+	writers := make(map[uint32]io.Writer, len(ranges))
 
-	// Create a snapshot for each hash range
-	group, ctx := kitsync.NewEagerGroup(context.TODO(), len(ranges))
-	for r := range ranges {
-		group.Go(func() error {
-			cache, exists := s.caches[r]
-			if !exists {
-				return fmt.Errorf("no cache for hash range %d", r)
-			}
+	for r := range writers {
+		buf := new(bytes.Buffer)
+		writers[r] = buf
+	}
 
-			if err := s.createSnapshot(ctx, r, cache); err != nil {
-				return fmt.Errorf("failed to create snapshot for range %d: %w", r, err)
-			}
-			return nil
-		})
+	since, err := s.cache.CreateSnapshots(ctx, writers) // TODO: this can create memory problems!
+	if err != nil {
+		return fmt.Errorf("failed to create snapshots: %w", err)
+	}
+
+	for hashRange, w := range writers {
+		buf := w.(*bytes.Buffer)
+		if buf.Len() == 0 {
+			continue // no data to upload
+		}
+
+		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, since)
+
+		_, err = s.storage.UploadReader(ctx, filename, buf)
+		if err != nil {
+			return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
+		}
 	}
 
 	s.lastSnapshotTime = time.Now()
-
-	return group.Wait()
-}
-
-// createSnapshot creates a snapshot for a specific hash range
-func (s *Service) createSnapshot(ctx context.Context, hashRange uint32, cache Cache) error {
-	// Create snapshot file
-
-	buf := new(bytes.Buffer)
-	since, err := cache.CreateSnapshot(buf)
-	if err != nil {
-		return fmt.Errorf("failed to create snapshot for range %d: %w", hashRange, err)
-	}
-
-	if len(buf.Bytes()) == 0 {
-		return nil // no data to upload
-	}
-
-	filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, since)
-
-	_, err = s.storage.UploadReader(ctx, filename, buf)
-	if err != nil {
-		return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
-	}
-
-	return nil
-}
-
-// loadSnapshot loads a snapshot for a specific hash range
-func (s *Service) loadSnapshot(ctx context.Context, cache Cache, filename string) error {
-	buf := aws.NewWriteAtBuffer([]byte{})
-	err := s.storage.Download(ctx, buf, filename)
-	if err != nil {
-		return fmt.Errorf("failed to download snapshot file %q: %w", filename, err)
-	}
-
-	reader := bytes.NewReader(buf.Bytes())
-	if err := cache.LoadSnapshot(reader); err != nil {
-		return fmt.Errorf("failed to load snapshot file %q: %w", filename, err)
-	}
 
 	return nil
 }
