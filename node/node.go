@@ -101,12 +101,12 @@ type Cache interface {
 	// Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
 	Put(keys []string, ttl time.Duration) error
 
-	// CreateSnapshot writes the cache contents to the provided writer
+	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
-	CreateSnapshot(w io.Writer) (uint64, error)
+	CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, error)
 
-	// LoadSnapshot reads the cache contents from the provided reader
-	LoadSnapshot(r io.Reader) error
+	// LoadSnapshots reads the cache contents from the provided readers
+	LoadSnapshots(ctx context.Context, r ...io.Reader) error
 
 	// RunGarbageCollection is designed to do GC while the cache is online
 	RunGarbageCollection()

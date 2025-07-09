@@ -1,6 +1,7 @@
 package badger
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -22,6 +23,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
@@ -314,7 +316,7 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 }
 
 // LoadSnapshots reads the cache contents from the provided readers
-func (c *Cache) LoadSnapshots(r ...io.Reader) error {
+func (c *Cache) LoadSnapshots(ctx context.Context, r ...io.Reader) error {
 	// TODO gzip should be configurable, maybe we want to use another algorithm with a different compression level
 	if c.compress {
 		var err error
@@ -334,7 +336,66 @@ func (c *Cache) LoadSnapshots(r ...io.Reader) error {
 		}()
 	}
 
-	// TODO implement custom load with KVLoader
+	// Create KVLoader for batch writing entries
+	maxPendingWrites := c.conf.GetInt("BadgerDB.Dedup.Snapshots.MaxPendingWrites", 256)
+	ldr := c.cache.NewKVLoader(maxPendingWrites)
+	ldrMu := sync.Mutex{}
+
+	group, _ := kitsync.NewEagerGroup(ctx, len(r))
+	for _, reader := range r {
+		group.Go(func() error {
+			br := bufio.NewReaderSize(reader, 16<<10)
+			unmarshalBuf := make([]byte, 1<<10)
+
+			for {
+				var sz uint64
+				err := binary.Read(br, binary.LittleEndian, &sz)
+				if err == io.EOF {
+					break
+				} else if err != nil {
+					return fmt.Errorf("reading size: %w", err)
+				}
+
+				if cap(unmarshalBuf) < int(sz) {
+					unmarshalBuf = make([]byte, sz)
+				}
+
+				if _, err = io.ReadFull(br, unmarshalBuf[:sz]); err != nil {
+					return fmt.Errorf("reading data: %w", err)
+				}
+
+				list := &pb.KVList{}
+				if err := proto.Unmarshal(unmarshalBuf[:sz], list); err != nil {
+					return fmt.Errorf("unmarshaling KVList: %w", err)
+				}
+
+				c.logger.Debugn("Loading KVList", logger.NewIntField("kvCount", int64(len(list.Kv))))
+
+				for _, kv := range list.Kv {
+					ldrMu.Lock()
+					err := ldr.Set(kv)
+					ldrMu.Unlock()
+					if err != nil {
+						return fmt.Errorf("setting KV: %w", err)
+					}
+				}
+			}
+
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for readers: %w", err)
+	}
+
+	if err := ldr.Finish(); err != nil {
+		return fmt.Errorf("finishing load: %w", err)
+	}
+
+	// Force a sync to ensure data is committed
+	if err := c.cache.Sync(); err != nil {
+		return fmt.Errorf("syncing after load: %w", err)
+	}
 
 	return nil
 }
