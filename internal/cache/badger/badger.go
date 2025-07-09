@@ -313,18 +313,30 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 	return since, nil
 }
 
-// LoadSnapshot reads the cache contents from the provided reader
-func (c *Cache) LoadSnapshot(r io.Reader) error {
+// LoadSnapshots reads the cache contents from the provided readers
+func (c *Cache) LoadSnapshots(r ...io.Reader) error {
 	// TODO gzip should be configurable, maybe we want to use another algorithm with a different compression level
 	if c.compress {
 		var err error
-		r, err = gzip.NewReader(r)
-		if err != nil {
-			return fmt.Errorf("failed to create gzip reader: %w", err)
+		for i, rdr := range r {
+			r[i], err = gzip.NewReader(rdr)
+			if err != nil {
+				return fmt.Errorf("failed to create gzip reader: %w", err)
+			}
 		}
-		defer func() { _ = r.(*gzip.Reader).Close() }()
+		defer func() {
+			for _, rdr := range r {
+				err := rdr.(*gzip.Reader).Close()
+				if err != nil {
+					c.logger.Errorn("failed to close gzip reader", obskit.Error(err))
+				}
+			}
+		}()
 	}
-	return c.cache.Load(r, 16)
+
+	// TODO implement custom load with KVLoader
+
+	return nil
 }
 
 func (c *Cache) RunGarbageCollection() {
