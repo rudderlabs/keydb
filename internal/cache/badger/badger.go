@@ -32,7 +32,7 @@ type hasher interface {
 	)
 	GetKeysByHashRangeWithIndexes(keys []string) (
 		map[uint32][]string, // itemsByHashRange
-		map[string]int, // indexes
+		map[string]int,      // indexes
 		error,
 	)
 }
@@ -81,7 +81,7 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 	}
 
 	compress := conf.GetBool("BadgerDB.Dedup.Compress", true)
-	if compress {
+	if compress { // TODO this was disabled manually anyway by commenting out the compression... FIX!!!
 		log.Infon("BadgerDB.Dedup.Compress is enabled, using gzip compression for snapshots")
 	}
 
