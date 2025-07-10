@@ -154,6 +154,8 @@ func TestScaleUpAndDown(t *testing.T) {
 		requireSnapshotFilename(t, 1, 0, files[1])
 		requireSnapshotFilename(t, 2, 0, files[2])
 
+		// Using a different path for the new node1 to avoid a conflict with node0
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
 			ClusterSize:      2,
@@ -196,7 +198,10 @@ func TestScaleUpAndDown(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		run(t, config.New())
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", false)
+		run(t, conf)
 	})
 }
 
@@ -239,6 +244,8 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		requireSnapshotFilename(t, 1, 0, files[1])
 		requireSnapshotFilename(t, 2, 0, files[2])
 
+		// Using a different path for the new node1 to avoid a conflict with node0
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
 			ClusterSize:      2,
@@ -256,6 +263,8 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.Equal(t, 2, c.ClusterSize(), "Now the cluster size should be updated to 2")
 
 		// Add a 3rd node to the cluster
+		// Using a different path for the new node2 to avoid a conflict with node0 and node1
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
 		node2, node2Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           2,
 			ClusterSize:      3,
@@ -299,7 +308,10 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		run(t, config.New())
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", false)
+		run(t, conf)
 	})
 }
 

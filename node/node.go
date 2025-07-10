@@ -312,6 +312,7 @@ func (s *Service) initCaches(ctx context.Context) error {
 	var (
 		group, gCtx = kitsync.NewEagerGroup(ctx, len(ranges))
 		buffers     = make([]io.Reader, 0, len(filesByHashRange))
+		buffersMu   sync.Mutex
 	)
 	for r := range ranges {
 		statsTags := stats.Tags{
@@ -338,7 +339,9 @@ func (s *Service) initCaches(ctx context.Context) error {
 				// TODO what do we do if we can't load a snapshot due to an error?
 				return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
 			}
+			buffersMu.Lock()
 			buffers = append(buffers, bytes.NewReader(buf.Bytes()))
+			buffersMu.Unlock()
 			return nil
 		})
 	}

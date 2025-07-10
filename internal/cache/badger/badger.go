@@ -21,7 +21,6 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
-	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 )
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
@@ -343,14 +342,11 @@ func (c *Cache) LoadSnapshots(ctx context.Context, r ...io.Reader) error {
 	// Use BadgerDB's built-in Load function which properly handles transaction timestamps
 	maxPendingWrites := c.conf.GetInt("BadgerDB.Dedup.Snapshots.MaxPendingWrites", 256)
 
-	group, _ := kitsync.ErrGroupWithContext(context.Background())
 	for _, reader := range r {
-		group.Go(func() error {
-			return c.cache.Load(reader, maxPendingWrites)
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return fmt.Errorf("failed to load snapshots: %w", err)
+		// The Load() method is not race safe so we have to load data sequentially
+		if err := c.cache.Load(reader, maxPendingWrites); err != nil {
+			return fmt.Errorf("failed to load snapshot: %w", err)
+		}
 	}
 
 	// Force a sync to ensure data is committed
