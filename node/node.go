@@ -310,41 +310,37 @@ func (s *Service) initCaches(ctx context.Context) error {
 	}
 
 	var (
-		i           = 0
 		group, gCtx = kitsync.NewEagerGroup(ctx, len(ranges))
-		buffers     = make([]io.Reader, len(filesByHashRange))
+		buffers     = make([]io.Reader, 0, len(filesByHashRange))
 	)
 	for r := range ranges {
-		func(i int, r uint32) {
-			statsTags := stats.Tags{
-				"nodeID":    strconv.Itoa(int(s.config.NodeID)),
-				"hashRange": strconv.Itoa(int(r)),
-			}
-			s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
-			s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
+		statsTags := stats.Tags{
+			"nodeID":    strconv.Itoa(int(s.config.NodeID)),
+			"hashRange": strconv.Itoa(int(r)),
+		}
+		s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
+		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 
-			snapshotFile := filesByHashRange[r]
-			if snapshotFile == "" {
-				s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", int64(r)))
-				return
-			}
+		snapshotFile := filesByHashRange[r]
+		if snapshotFile == "" {
+			s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", int64(r)))
+			continue
+		}
 
-			group.Go(func() error { // Try to load snapshot for this range
-				buf := aws.NewWriteAtBuffer([]byte{})
-				err := s.storage.Download(gCtx, buf, snapshotFile)
-				if err != nil {
-					if errors.Is(err, filemanager.ErrKeyNotFound) {
-						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
-						return nil
-					}
-					// TODO what do we do if we can't load a snapshot due to an error?
-					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
+		group.Go(func() error { // Try to load snapshot for this range
+			buf := aws.NewWriteAtBuffer([]byte{})
+			err := s.storage.Download(gCtx, buf, snapshotFile)
+			if err != nil {
+				if errors.Is(err, filemanager.ErrKeyNotFound) {
+					s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
+					return nil
 				}
-				buffers[i] = bytes.NewReader(buf.Bytes())
-				return nil
-			})
-		}(i, r)
-		i++
+				// TODO what do we do if we can't load a snapshot due to an error?
+				return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
+			}
+			buffers = append(buffers, bytes.NewReader(buf.Bytes()))
+			return nil
+		})
 	}
 	if err = group.Wait(); err != nil {
 		return fmt.Errorf("failed to initialize caches: %w", err)
@@ -514,10 +510,10 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	defer s.mu.Unlock()
 
 	log := s.logger.Withn(logger.NewIntField("newClusterSize", int64(req.NewClusterSize)))
-	log.Debugn("Scale request received")
+	log.Infon("Scale request received")
 
 	if s.scaling {
-		log.Debugn("Scaling operation already in progress")
+		log.Infon("Scaling operation already in progress")
 		return &pb.ScaleResponse{ // TODO we could have auto-healing here easily by attempting the scaling anyway
 			Success:             false,
 			ErrorMessage:        "scaling operation already in progress",
@@ -528,7 +524,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	// Validate new cluster size
 	if req.NewClusterSize == 0 {
-		log.Debugn("New cluster size must be greater than 0")
+		log.Warnn("New cluster size must be greater than 0")
 		return &pb.ScaleResponse{
 			Success:             false,
 			ErrorMessage:        "new cluster size must be greater than 0",
@@ -539,7 +535,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	// If the cluster size is not changing, do nothing
 	if req.NewClusterSize == s.config.ClusterSize {
-		log.Debugn("Cluster size is already set to the requested value")
+		log.Infon("Cluster size is already set to the requested value")
 		return &pb.ScaleResponse{
 			Success:             true,
 			PreviousClusterSize: s.config.ClusterSize,
@@ -574,7 +570,9 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	// WARNING: We don't clear the scaling flag here.
 	// The scaling flag will be cleared when the ScaleComplete RPC is called.
 
-	log.Infon("Scale complete")
+	log.Infon("Scale phase 1 of 2 completed successfully",
+		logger.NewIntField("previousClusterSize", int64(previousClusterSize)),
+	)
 
 	return &pb.ScaleResponse{
 		Success:             true,
@@ -590,6 +588,9 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 
 	// No need to check the s.scaling value, let's be optimistic and go ahead here for auto-healing purposes
 	s.scaling = false
+	s.logger.Infon("Scale phase 2 of 2 completed successfully",
+		logger.NewIntField("newClusterSize", int64(s.config.ClusterSize)),
+	)
 
 	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
@@ -604,7 +605,10 @@ func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequ
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	s.logger.Infon("Create snapshot request received")
+
 	if s.scaling {
+		s.logger.Warnn("Skipping snapshot while scaling")
 		return &pb.CreateSnapshotResponse{
 			Success:      false,
 			ErrorMessage: "scaling operation in progress",
@@ -614,6 +618,7 @@ func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequ
 
 	// Create snapshots for all hash ranges this node handles
 	if err := s.createSnapshots(ctx); err != nil {
+		s.logger.Errorn("Failed to create snapshots", obskit.Error(err))
 		return &pb.CreateSnapshotResponse{
 			Success:      false,
 			ErrorMessage: err.Error(),
@@ -633,9 +638,8 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 	ranges := s.getCurrentRanges()
 	writers := make(map[uint32]io.Writer, len(ranges))
 
-	for r := range writers {
-		buf := new(bytes.Buffer)
-		writers[r] = buf
+	for r := range ranges {
+		writers[r] = bytes.NewBuffer([]byte{})
 	}
 
 	since, err := s.cache.CreateSnapshots(ctx, writers) // TODO: this can create memory problems!
@@ -643,13 +647,24 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 		return fmt.Errorf("failed to create snapshots: %w", err)
 	}
 
+	s.logger.Infon("Uploading snapshots",
+		logger.NewIntField("since", int64(since)),
+		logger.NewIntField("numHashRanges", int64(len(ranges))),
+		logger.NewIntField("numWriters", int64(len(writers))),
+	)
+
 	for hashRange, w := range writers {
-		buf := w.(*bytes.Buffer)
-		if buf.Len() == 0 {
+		buf, ok := w.(*bytes.Buffer)
+		if ok && buf.Len() == 0 { // TODO How to check the size if it's a *gzip.Writer?
+			s.logger.Infon("No data to upload for hash range", logger.NewIntField("hashRange", int64(hashRange)))
 			continue // no data to upload
 		}
 
 		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, since)
+		s.logger.Infon("Uploading snapshot file",
+			logger.NewIntField("hashRange", int64(hashRange)),
+			logger.NewStringField("filename", filename),
+		)
 
 		_, err = s.storage.UploadReader(ctx, filename, buf)
 		if err != nil {

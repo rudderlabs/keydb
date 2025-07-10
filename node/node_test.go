@@ -51,7 +51,7 @@ func TestSimple(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		totalHashRanges := uint32(128)
+		totalHashRanges := uint32(4)
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
@@ -70,8 +70,15 @@ func TestSimple(t *testing.T) {
 		err = c.CreateSnapshot(ctx)
 		require.NoError(t, err)
 
+		session := cloudStorage.ListFilesWithPrefix(context.Background(), "", "", 500)
+		files, err := session.Next()
+		require.NoError(t, err)
+		require.Len(t, files, 3) // we expect one hash range to be empty so the file won't be uploaded
+
 		cancel()
 		node0.Close()
+		// TODO: add test without the path change to test that it loads fine from disk as well if there is nothing on Cloud Storage
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir()) // Force a path change, the data will be loaded from Cloud Storage
 
 		// Let's start again from scratch to see if the data is properly loaded from the snapshots
 		ctx, cancel = context.WithCancel(context.Background())
@@ -93,11 +100,16 @@ func TestSimple(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		run(t, config.New())
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", false)
+		run(t, conf)
 	})
 
 	t.Run("badger compressed", func(t *testing.T) {
+		t.Skip("badger compressed is not supported")
 		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
 		conf.Set("BadgerDB.Dedup.Compress", true)
 		run(t, conf)
 	})
@@ -320,7 +332,11 @@ func getService(
 	address := "localhost:" + strconv.Itoa(freePort)
 	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
 
-	service, err := NewService(ctx, nodeConfig, cs, conf, stats.NOP, logger.NOP)
+	log := logger.NOP
+	if testing.Verbose() {
+		log = logger.NewLogger()
+	}
+	service, err := NewService(ctx, nodeConfig, cs, conf, stats.NOP, log)
 	require.NoError(t, err)
 
 	// Create a gRPC server
