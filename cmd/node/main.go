@@ -22,7 +22,6 @@ import (
 	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 
-	"github.com/rudderlabs/keydb/cache"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/release"
@@ -105,10 +104,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewIntField("noOfAddresses", int64(len(nodeConfig.Addresses))),
 	)
 
-	badgerCacheFactory := func(hashRange uint32) (node.Cache, error) {
-		return cache.BadgerFactory(conf, log)(hashRange)
-	}
-	service, err := node.NewService(ctx, nodeConfig, badgerCacheFactory, cloudStorage, stat, log.Child("service"))
+	service, err := node.NewService(ctx, nodeConfig, cloudStorage, conf, stat, log.Child("service"))
 	if err != nil {
 		return fmt.Errorf("failed to create node service: %w", err)
 	}

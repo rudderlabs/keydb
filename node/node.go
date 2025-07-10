@@ -134,7 +134,7 @@ type cloudStorage interface {
 // NewService creates a new NodeService
 func NewService(
 	ctx context.Context, config Config, storage cloudStorage,
-	stat stats.Stats, kitConf *config.Config, log logger.Logger,
+	kitConf *config.Config, stat stats.Stats, log logger.Logger,
 ) (*Service, error) {
 	// Set defaults for unspecified config values
 	if config.TotalHashRanges == 0 {

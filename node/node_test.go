@@ -20,7 +20,6 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/internal/cache/badger"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
@@ -43,7 +42,7 @@ func TestSimple(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, conf *config.Config, cf cacheFactory) {
+	run := func(t *testing.T, conf *config.Config) {
 		t.Parallel()
 
 		_, cloudStorage := getCloudStorage(t, pool, conf)
@@ -58,7 +57,7 @@ func TestSimple(t *testing.T) {
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, cf)
+		}, conf)
 		c := getClient(t, totalHashRanges, node0Address)
 
 		// Test Put
@@ -82,7 +81,7 @@ func TestSimple(t *testing.T) {
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, cf)
+		}, conf)
 		c = getClient(t, totalHashRanges, node0Address)
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
@@ -94,14 +93,13 @@ func TestSimple(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		conf := config.New()
-		run(t, conf, getBadgerCache(t, conf))
+		run(t, config.New())
 	})
 
 	t.Run("badger compressed", func(t *testing.T) {
 		conf := config.New()
 		conf.Set("BadgerDB.Dedup.Compress", true)
-		run(t, conf, getBadgerCache(t, conf))
+		run(t, conf)
 	})
 }
 
@@ -110,7 +108,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, conf *config.Config, cf cacheFactory) {
+	run := func(t *testing.T, conf *config.Config) {
 		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -123,7 +121,7 @@ func TestScaleUpAndDown(t *testing.T) {
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, cf)
+		}, conf)
 		c := getClient(t, totalHashRanges, node0Address)
 
 		// Test Put
@@ -150,7 +148,7 @@ func TestScaleUpAndDown(t *testing.T) {
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
-		}, cf)
+		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
@@ -186,8 +184,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		conf := config.New()
-		run(t, conf, getBadgerCache(t, conf))
+		run(t, config.New())
 	})
 }
 
@@ -196,7 +193,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, conf *config.Config, cf cacheFactory) {
+	run := func(t *testing.T, conf *config.Config) {
 		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -209,7 +206,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, cf)
+		}, conf)
 		c := getClient(t, totalHashRanges, node0Address)
 
 		// Test Put
@@ -236,7 +233,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
-		}, cf)
+		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
@@ -253,7 +250,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address, node1Address},
-		}, cf)
+		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address, node2Address))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
@@ -290,8 +287,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		conf := config.New()
-		run(t, conf, getBadgerCache(t, conf))
+		run(t, config.New())
 	})
 }
 
@@ -314,15 +310,8 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (
 	return minioClient, cloudStorage
 }
 
-func getBadgerCache(t testing.TB, conf *config.Config) cacheFactory {
-	return func(_ uint32) (Cache, error) {
-		t.Helper()
-		return badger.New(t.TempDir(), conf, logger.NOP)
-	}
-}
-
 func getService(
-	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, cf cacheFactory,
+	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf *config.Config,
 ) (*Service, string) {
 	t.Helper()
 
@@ -331,7 +320,7 @@ func getService(
 	address := "localhost:" + strconv.Itoa(freePort)
 	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
 
-	service, err := NewService(ctx, nodeConfig, cf, cs, stats.NOP, logger.NOP)
+	service, err := NewService(ctx, nodeConfig, cs, conf, stats.NOP, logger.NOP)
 	require.NoError(t, err)
 
 	// Create a gRPC server

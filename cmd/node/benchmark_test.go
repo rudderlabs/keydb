@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/rudderlabs/keydb/cache"
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/node"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -54,10 +53,7 @@ func BenchmarkSingleNode(b *testing.B) {
 	conf := config.New()
 	conf.GetString("BadgerDB.Dedup.Path", b.TempDir())
 	cs := &mockedCloudStorage{}
-	cf := func(hashRange uint32) (node.Cache, error) {
-		return cache.BadgerFactory(conf, logger.NOP)(hashRange)
-	}
-	service, err := node.NewService(ctx, nodeConfig, cf, cs, stats.NOP, logger.NOP)
+	service, err := node.NewService(ctx, nodeConfig, cs, conf, stats.NOP, logger.NOP)
 	require.NoError(b, err)
 
 	// Create a gRPC server
