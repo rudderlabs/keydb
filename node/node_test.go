@@ -336,6 +336,7 @@ func getService(
 	if testing.Verbose() {
 		log = logger.NewLogger()
 	}
+	conf.Set("BadgerDB.Dedup.NopLogger", true)
 	service, err := NewService(ctx, nodeConfig, cs, conf, stats.NOP, log)
 	require.NoError(t, err)
 

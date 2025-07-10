@@ -3,7 +3,6 @@ package badger
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -24,7 +23,6 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
-	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
@@ -76,8 +74,13 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		WithValueThreshold(conf.GetInt64Var(10*bytesize.B, 1, "BadgerDB.Dedup.valueThreshold", "BadgerDB.valueThreshold")).
 		WithSyncWrites(conf.GetBoolVar(false, "BadgerDB.Dedup.syncWrites", "BadgerDB.syncWrites")).
 		WithBlockCacheSize(conf.GetInt64Var(0, 1, "BadgerDB.Dedup.blockCacheSize", "BadgerDB.blockCacheSize")).
-		WithDetectConflicts(conf.GetBoolVar(false, "BadgerDB.Dedup.detectConflicts", "BadgerDB.detectConflicts")).
-		WithLogger(loggerForBadger{log})
+		WithDetectConflicts(conf.GetBoolVar(false, "BadgerDB.Dedup.detectConflicts", "BadgerDB.detectConflicts"))
+
+	if conf.GetBool("BadgerDB.Dedup.NopLogger", false) {
+		opts = opts.WithLogger(loggerForBadger{logger.NOP})
+	} else {
+		opts = opts.WithLogger(loggerForBadger{log})
+	}
 
 	compress := conf.GetBool("BadgerDB.Dedup.Compress", true)
 	if compress {
@@ -176,17 +179,18 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 
 	// TODO gzip should be configurable, maybe we want to use another algorithm with a different compression level
 	if c.compress {
-		for hashRange, writer := range w {
-			w[hashRange] = gzip.NewWriter(writer)
-		}
-		defer func() {
-			for _, writer := range w {
-				err := writer.(*gzip.Writer).Close()
-				if err != nil {
-					c.logger.Errorn("failed to close gzip writer", obskit.Error(err))
-				}
-			}
-		}()
+		// TODO implement but check other algos as well, possibly zstd
+		//for hashRange, writer := range w {
+		//	w[hashRange] = gzip.NewWriter(writer)
+		//}
+		//defer func() {
+		//	for _, writer := range w {
+		//	err := writer.(*gzip.Writer).Close()
+		//	if err != nil {
+		//		c.logger.Errorn("failed to close gzip writer", obskit.Error(err))
+		//	}
+		//	}
+		//}()
 	}
 
 	hashRangesMap := make(map[uint32]struct{})
@@ -319,21 +323,22 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 func (c *Cache) LoadSnapshots(ctx context.Context, r ...io.Reader) error {
 	// TODO gzip should be configurable, maybe we want to use another algorithm with a different compression level
 	if c.compress {
-		var err error
-		for i, rdr := range r {
-			r[i], err = gzip.NewReader(rdr)
-			if err != nil {
-				return fmt.Errorf("failed to create gzip reader: %w", err)
-			}
-		}
-		defer func() {
-			for _, rdr := range r {
-				err := rdr.(*gzip.Reader).Close()
-				if err != nil {
-					c.logger.Errorn("failed to close gzip reader", obskit.Error(err))
-				}
-			}
-		}()
+		// TODO implement but check other algos as well, possibly zstd
+		//var err error
+		//for i, rdr := range r {
+		//	r[i], err = gzip.NewReader(rdr)
+		//	if err != nil {
+		//		return fmt.Errorf("failed to create gzip reader: %w", err)
+		//	}
+		//}
+		//defer func() {
+		//	for _, rdr := range r {
+		//		err := rdr.(*gzip.Reader).Close()
+		//		if err != nil {
+		//			c.logger.Errorn("failed to close gzip reader", obskit.Error(err))
+		//		}
+		//	}
+		//}()
 	}
 
 	// Create KVLoader for batch writing entries
