@@ -118,7 +118,7 @@ type Cache interface {
 }
 
 type cloudStorageReader interface {
-	Download(ctx context.Context, output io.WriterAt, key string) error
+	Download(ctx context.Context, output io.WriterAt, key string, opts ...filemanager.DownloadOption) error
 	ListFilesWithPrefix(ctx context.Context, startAfter, prefix string, maxItems int64) filemanager.ListSession
 }
 

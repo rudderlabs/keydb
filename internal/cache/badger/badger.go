@@ -1,7 +1,6 @@
 package badger
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -341,60 +340,17 @@ func (c *Cache) LoadSnapshots(ctx context.Context, r ...io.Reader) error {
 		//}()
 	}
 
-	// Create KVLoader for batch writing entries
+	// Use BadgerDB's built-in Load function which properly handles transaction timestamps
 	maxPendingWrites := c.conf.GetInt("BadgerDB.Dedup.Snapshots.MaxPendingWrites", 256)
-	ldr := c.cache.NewKVLoader(maxPendingWrites)
-	ldrMu := sync.Mutex{}
 
-	group, _ := kitsync.NewEagerGroup(ctx, len(r))
+	group, _ := kitsync.ErrGroupWithContext(context.Background())
 	for _, reader := range r {
 		group.Go(func() error {
-			br := bufio.NewReaderSize(reader, 16<<10)
-			unmarshalBuf := make([]byte, 1<<10)
-
-			for {
-				var sz uint64
-				err := binary.Read(br, binary.LittleEndian, &sz)
-				if err == io.EOF {
-					break
-				} else if err != nil {
-					return fmt.Errorf("reading size: %w", err)
-				}
-
-				if cap(unmarshalBuf) < int(sz) {
-					unmarshalBuf = make([]byte, sz)
-				}
-
-				if _, err = io.ReadFull(br, unmarshalBuf[:sz]); err != nil {
-					return fmt.Errorf("reading data: %w", err)
-				}
-
-				list := &pb.KVList{}
-				if err := proto.Unmarshal(unmarshalBuf[:sz], list); err != nil {
-					return fmt.Errorf("unmarshaling KVList: %w", err)
-				}
-
-				c.logger.Debugn("Loading KVList", logger.NewIntField("kvCount", int64(len(list.Kv))))
-
-				for _, kv := range list.Kv {
-					ldrMu.Lock()
-					err := ldr.Set(kv)
-					ldrMu.Unlock()
-					if err != nil {
-						return fmt.Errorf("setting KV: %w", err)
-					}
-				}
-			}
-
-			return nil
+			return c.cache.Load(reader, maxPendingWrites)
 		})
 	}
 	if err := group.Wait(); err != nil {
-		return fmt.Errorf("waiting for readers: %w", err)
-	}
-
-	if err := ldr.Finish(); err != nil {
-		return fmt.Errorf("finishing load: %w", err)
+		return fmt.Errorf("failed to load snapshots: %w", err)
 	}
 
 	// Force a sync to ensure data is committed
