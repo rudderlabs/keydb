@@ -185,8 +185,9 @@ func NewService(
 	}
 
 	// Start background snapshot creation
-	service.waitGroup.Add(1)
-	go service.snapshotLoop(ctx)
+	// TODO restore automatic daily snapshot creation
+	// service.waitGroup.Add(1)
+	// go service.snapshotLoop(ctx)
 	service.waitGroup.Add(1)
 	go service.garbageCollection(ctx)
 
