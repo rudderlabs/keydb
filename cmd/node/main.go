@@ -58,12 +58,13 @@ func main() {
 	}
 
 	if err := run(ctx, cancel, conf, stat, log); err != nil {
-		log.Fataln("failed to run", obskit.Error(err))
+		log.Fataln("Failed to run", obskit.Error(err))
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Stats, log logger.Logger) error {
+	defer log.Infon("Service terminated")
 	defer cancel()
 
 	cloudStorage, err := cloudstorage.GetCloudStorage(conf, log)
@@ -118,6 +119,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
+		log.Infon("Terminating service")
 		service.Close() // TODO test graceful shutdown
 	}()
 
