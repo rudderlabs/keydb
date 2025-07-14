@@ -107,7 +107,6 @@ func TestSimple(t *testing.T) {
 	})
 
 	t.Run("badger compressed", func(t *testing.T) {
-		t.Skip("badger compressed is not supported")
 		conf := config.New()
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
 		conf.Set("BadgerDB.Dedup.Compress", true)

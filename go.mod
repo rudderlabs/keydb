@@ -3,6 +3,7 @@ module github.com/rudderlabs/keydb
 go 1.24.4
 
 require (
+	github.com/DataDog/zstd v1.5.7
 	github.com/aws/aws-sdk-go v1.55.7
 	github.com/dgraph-io/badger/v4 v4.7.0
 	github.com/dgraph-io/ristretto/v2 v2.2.0

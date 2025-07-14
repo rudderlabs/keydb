@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DataDog/zstd"
 	"github.com/dgraph-io/badger/v4"
 	"github.com/dgraph-io/badger/v4/options"
 	"github.com/dgraph-io/badger/v4/pb"
@@ -21,6 +22,10 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+)
+
+const (
+	defaultCompressionLevel = zstd.DefaultCompression
 )
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
@@ -43,6 +48,7 @@ type Cache struct {
 	conf             *config.Config
 	logger           logger.Logger
 	compress         bool
+	compressionLevel int
 	discardRatio     float64
 	snapshotSince    uint64
 	snapshotting     bool
@@ -80,9 +86,19 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		opts = opts.WithLogger(loggerForBadger{log})
 	}
 
-	compress := conf.GetBool("BadgerDB.Dedup.Compress", true)
-	if compress { // TODO this was disabled manually anyway by commenting out the compression... FIX!!!
-		log.Infon("BadgerDB.Dedup.Compress is enabled, using gzip compression for snapshots")
+	var (
+		compressionLevel int
+		compress         = conf.GetBool("BadgerDB.Dedup.Compress", true)
+	)
+	if compress {
+		compressionLevel = conf.GetInt("BadgerDB.Dedup.CompressionLevel", defaultCompressionLevel)
+		if compressionLevel < 1 || compressionLevel > 20 {
+			log.Warnn("BadgerDB.Dedup.CompressionLevel must be >= 1 and <= 20", logger.NewIntField("level", int64(compressionLevel)))
+			compressionLevel = defaultCompressionLevel
+		}
+		log.Infon("BadgerDB.Dedup.Compress is enabled, using zstd-cgo compression for snapshots",
+			logger.NewIntField("level", int64(compressionLevel)),
+		)
 	}
 
 	log.Infon("Starting BadgerDB", logger.NewStringField("path", path))
@@ -92,13 +108,14 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		return nil, err
 	}
 	return &Cache{
-		hasher:       h,
-		cache:        db,
-		conf:         conf,
-		logger:       log,
-		compress:     compress,
-		discardRatio: conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
-		debugMode:    conf.GetBool("BadgerDB.DebugMode", false),
+		hasher:           h,
+		cache:            db,
+		conf:             conf,
+		logger:           log,
+		compress:         compress,
+		compressionLevel: compressionLevel,
+		discardRatio:     conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
+		debugMode:        conf.GetBool("BadgerDB.DebugMode", false),
 	}, nil
 }
 
@@ -175,22 +192,6 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 	c.snapshotting = true
 	c.snapshottingLock.Unlock()
 
-	// TODO gzip should be configurable, maybe we want to use another algorithm with a different compression level
-	if c.compress {
-		// TODO implement but check other algos as well, possibly zstd
-		//for hashRange, writer := range w {
-		//	w[hashRange] = gzip.NewWriter(writer)
-		//}
-		//defer func() {
-		//	for _, writer := range w {
-		//	err := writer.(*gzip.Writer).Close()
-		//	if err != nil {
-		//		c.logger.Errorn("failed to close gzip writer", obskit.Error(err))
-		//	}
-		//	}
-		//}()
-	}
-
 	hashRangesMap := make(map[uint32]struct{})
 	for hashRange := range w {
 		hashRangesMap[hashRange] = struct{}{}
@@ -260,12 +261,17 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 
 		// Write to appropriate writers by hash range
 		for hashRange, kvs := range kvsByHashRange {
-			writer := w[hashRange]
+			var writer io.Writer
+			if c.compress {
+				writer = zstd.NewWriterLevel(w[hashRange], c.compressionLevel)
+			} else {
+				writer = w[hashRange]
+			}
 
 			// Create a new KVList for this hash range
 			rangeList := &pb.KVList{Kv: kvs}
 
-			if err := writeTo(rangeList, writer); err != nil {
+			if err := c.writeTo(rangeList, writer); err != nil {
 				return fmt.Errorf("failed to write to hash range %d: %w", hashRange, err)
 			}
 		}
@@ -318,32 +324,18 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 }
 
 // LoadSnapshots reads the cache contents from the provided readers
-func (c *Cache) LoadSnapshots(ctx context.Context, r ...io.Reader) error {
-	// TODO gzip should be configurable, maybe we want to use another algorithm with a different compression level
-	if c.compress {
-		// TODO implement but check other algos as well, possibly zstd
-		//var err error
-		//for i, rdr := range r {
-		//	r[i], err = gzip.NewReader(rdr)
-		//	if err != nil {
-		//		return fmt.Errorf("failed to create gzip reader: %w", err)
-		//	}
-		//}
-		//defer func() {
-		//	for _, rdr := range r {
-		//		err := rdr.(*gzip.Reader).Close()
-		//		if err != nil {
-		//			c.logger.Errorn("failed to close gzip reader", obskit.Error(err))
-		//		}
-		//	}
-		//}()
-	}
-
-	// Use BadgerDB's built-in Load function which properly handles transaction timestamps
+func (c *Cache) LoadSnapshots(ctx context.Context, readers ...io.Reader) error {
+	// Use BadgerDB's built-in Load() function which properly handles transaction timestamps
 	maxPendingWrites := c.conf.GetInt("BadgerDB.Dedup.Snapshots.MaxPendingWrites", 256)
 
-	for _, reader := range r {
+	for _, r := range readers {
 		// The Load() method is not race safe so we have to load data sequentially
+		var reader io.Reader
+		if c.compress {
+			reader = zstd.NewReader(r)
+		} else {
+			reader = r
+		}
 		if err := c.cache.Load(reader, maxPendingWrites); err != nil {
 			return fmt.Errorf("failed to load snapshot: %w", err)
 		}
@@ -435,16 +427,29 @@ func (c *Cache) getKey(key string, hashRange uint32) []byte {
 	return []byte("hr" + strconv.Itoa(int(hashRange)) + ":" + key)
 }
 
-func writeTo(list *pb.KVList, w io.Writer) error {
-	if err := binary.Write(w, binary.LittleEndian, uint64(proto.Size(list))); err != nil {
-		return err
+func (c *Cache) writeTo(list *pb.KVList, w io.Writer) (err error) {
+	wc, ok := w.(io.WriteCloser)
+	if ok {
+		defer func() {
+			closeErr := wc.Close()
+			if err == nil {
+				err = closeErr
+			}
+		}()
 	}
-	buf, err := proto.Marshal(list)
+
+	if err = binary.Write(w, binary.LittleEndian, uint64(proto.Size(list))); err != nil {
+		return
+	}
+
+	var buf []byte
+	buf, err = proto.Marshal(list)
 	if err != nil {
-		return err
+		return
 	}
+
 	_, err = w.Write(buf)
-	return err
+	return
 }
 
 type loggerForBadger struct {
