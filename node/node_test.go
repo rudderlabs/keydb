@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -314,6 +315,96 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	})
 }
 
+func TestIncrementalSnapshots(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, conf *config.Config) {
+		t.Parallel()
+
+		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Create the node service
+		totalHashRanges := uint32(4)
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, conf)
+		c := getClient(t, totalHashRanges, node0Address)
+
+		// Test Put
+		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
+
+		exists, err := c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		require.NoError(t, c.CreateSnapshot(ctx))
+		// we expect one hash range to be empty so the file won't be uploaded
+		requireExpectedFiles(ctx, t, bucket, "hr_", minioClient,
+			regexp.MustCompile("^hr_1_s_0.snapshot$"),
+			regexp.MustCompile("^hr_2_s_0.snapshot$"),
+			regexp.MustCompile("^hr_3_s_0.snapshot$"),
+		)
+
+		require.NoError(t, c.Put(ctx, []string{"key5"}, testTTL))
+		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false, true}, exists)
+
+		require.NoError(t, c.CreateSnapshot(ctx))
+		requireExpectedFiles(ctx, t, bucket, "hr_", minioClient,
+			regexp.MustCompile("^hr_1_s_0.snapshot$"),
+			regexp.MustCompile("^hr_2_s_0.snapshot$"),
+			regexp.MustCompile("^hr_3_s_0.snapshot$"),
+			regexp.MustCompile("^hr_3_s_([1-9])+.snapshot$"),
+		)
+
+		cancel()
+		node0.Close()
+		// TODO: add test without the path change to test that it loads fine from disk as well if there is nothing on Cloud Storage
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir()) // Force a path change, the data will be loaded from Cloud Storage
+
+		// Let's start again from scratch to see if the data is properly loaded from the snapshots
+		ctx, cancel = context.WithCancel(context.Background())
+		defer cancel()
+		node0, node0Address = getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, conf)
+		c = getClient(t, totalHashRanges, node0Address)
+
+		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false, true}, exists)
+
+		cancel()
+		node0.Close()
+	}
+
+	t.Run("badger", func(t *testing.T) {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", false)
+		run(t, conf)
+	})
+
+	t.Run("badger compressed", func(t *testing.T) {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		run(t, conf)
+	})
+}
+
 func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (*minio.Client, cloudStorage) {
 	t.Helper()
 
@@ -485,4 +576,21 @@ func getContents(ctx context.Context, bucket, prefix string, client *minio.Clien
 	})
 
 	return contents, nil
+}
+
+func requireExpectedFiles(ctx context.Context, t *testing.T, bucket, prefix string, client *minio.Client, expectedFiles ...*regexp.Regexp) {
+	t.Helper()
+	files, err := getContents(ctx, bucket, prefix, client)
+	require.NoError(t, err)
+	require.Len(t, files, len(expectedFiles))
+	for _, file := range files {
+		var found bool
+		for _, expectedFile := range expectedFiles {
+			if expectedFile.MatchString(file.Key) {
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "Unexpected file: %s", file.Key)
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -296,7 +297,7 @@ func (s *Service) initCaches(ctx context.Context) error {
 		return fmt.Errorf("failed to list snapshot files: %w", err)
 	}
 
-	filesByHashRange := make(map[uint32]string, len(files))
+	filesByHashRange := make(map[uint32][]string, len(files))
 	for _, file := range files {
 		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
 		if len(matches) != 3 {
@@ -307,7 +308,13 @@ func (s *Service) initCaches(ctx context.Context) error {
 			s.logger.Warnn("Invalid snapshot filename", logger.NewStringField("filename", file.Key))
 			continue
 		}
-		filesByHashRange[uint32(hashRange)] = file.Key
+		if filesByHashRange[uint32(hashRange)] == nil {
+			filesByHashRange[uint32(hashRange)] = make([]string, 0, 1)
+		}
+		filesByHashRange[uint32(hashRange)] = append(filesByHashRange[uint32(hashRange)], file.Key)
+	}
+	for i := range filesByHashRange {
+		sort.Strings(filesByHashRange[i])
 	}
 
 	var (
@@ -323,26 +330,28 @@ func (s *Service) initCaches(ctx context.Context) error {
 		s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
 		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 
-		snapshotFile := filesByHashRange[r]
-		if snapshotFile == "" {
+		snapshotFiles := filesByHashRange[r]
+		if len(snapshotFiles) == 0 {
 			s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", int64(r)))
 			continue
 		}
 
 		group.Go(func() error { // Try to load snapshot for this range
-			buf := aws.NewWriteAtBuffer([]byte{})
-			err := s.storage.Download(gCtx, buf, snapshotFile)
-			if err != nil {
-				if errors.Is(err, filemanager.ErrKeyNotFound) {
-					s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
-					return nil
+			for _, snapshotFile := range snapshotFiles {
+				buf := aws.NewWriteAtBuffer([]byte{})
+				err := s.storage.Download(gCtx, buf, snapshotFile)
+				if err != nil {
+					if errors.Is(err, filemanager.ErrKeyNotFound) {
+						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
+						return nil
+					}
+					// TODO what do we do if we can't load a snapshot due to an error?
+					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
 				}
-				// TODO what do we do if we can't load a snapshot due to an error?
-				return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
+				buffersMu.Lock()
+				buffers = append(buffers, bytes.NewReader(buf.Bytes()))
+				buffersMu.Unlock()
 			}
-			buffersMu.Lock()
-			buffers = append(buffers, bytes.NewReader(buf.Bytes()))
-			buffersMu.Unlock()
 			return nil
 		})
 	}
@@ -659,7 +668,10 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 
 	for hashRange, w := range writers {
 		buf, ok := w.(*bytes.Buffer)
-		if ok && buf.Len() == 0 { // TODO How to check the size if it's a *gzip.Writer?
+		if !ok {
+			return fmt.Errorf("invalid writer type %T for hash range: %d", w, hashRange)
+		}
+		if buf.Len() == 0 {
 			s.logger.Infon("No data to upload for hash range", logger.NewIntField("hashRange", int64(hashRange)))
 			continue // no data to upload
 		}
