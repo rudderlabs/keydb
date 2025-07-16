@@ -181,7 +181,7 @@ func NewService(
 	service.metrics.gcDuration = stat.NewTaggedStat("keydb_gc_duration_seconds", stats.HistogramType, statsTags)
 
 	// Initialize caches for all hash ranges this node handles
-	if err := service.initCaches(ctx); err != nil {
+	if err := service.initCaches(ctx, false); err != nil {
 		return nil, err
 	}
 
@@ -274,7 +274,7 @@ func (s *Service) getCurrentRanges() map[uint32]struct{} {
 }
 
 // initCaches initializes the caches for all hash ranges this node handles
-func (s *Service) initCaches(ctx context.Context) error {
+func (s *Service) initCaches(ctx context.Context, download bool) error {
 	ranges := s.getCurrentRanges() // gets the hash ranges for this node
 
 	// Remove caches and key maps for ranges this node no longer handles
@@ -287,6 +287,19 @@ func (s *Service) initCaches(ctx context.Context) error {
 		if _, shouldHandle := ranges[r]; !shouldHandle {
 			delete(s.metrics.putKeysCounter, r)
 		}
+	}
+
+	for r := range ranges {
+		statsTags := stats.Tags{
+			"nodeID":    strconv.Itoa(int(s.config.NodeID)),
+			"hashRange": strconv.Itoa(int(r)),
+		}
+		s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
+		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
+	}
+
+	if !download {
+		return nil
 	}
 
 	// List all files in the bucket
@@ -323,13 +336,6 @@ func (s *Service) initCaches(ctx context.Context) error {
 		buffersMu   sync.Mutex
 	)
 	for r := range ranges {
-		statsTags := stats.Tags{
-			"nodeID":    strconv.Itoa(int(s.config.NodeID)),
-			"hashRange": strconv.Itoa(int(r)),
-		}
-		s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
-		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
-
 		snapshotFiles := filesByHashRange[r]
 		if len(snapshotFiles) == 0 {
 			s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", int64(r)))
@@ -568,7 +574,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	// Reinitialize caches for the new cluster size
 	// TODO check this ctx, a client cancellation from the Operator client might leave the node in a unwanted state
-	if err := s.initCaches(ctx); err != nil { // Revert to previous cluster size on error
+	if err := s.initCaches(ctx, true); err != nil { // Revert to previous cluster size on error
 		log.Errorn("Failed to initialize caches", obskit.Error(err))
 		s.config.ClusterSize = previousClusterSize
 		s.scaling = false
