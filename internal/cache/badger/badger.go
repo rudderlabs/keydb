@@ -37,7 +37,7 @@ type hasher interface {
 	)
 	GetKeysByHashRangeWithIndexes(keys []string) (
 		map[uint32][]string, // itemsByHashRange
-		map[string]int, // indexes
+		map[string]int,      // indexes
 		error,
 	)
 }
@@ -181,6 +181,8 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 }
 
 // CreateSnapshots writes the cache contents to the provided writers
+// TODO CreateSnapshots should take an optional "since" parameter that the node service that infer from the filenames on S3
+// Otherwise the current "since" will be lost after a node restart.
 func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, error) {
 	c.snapshottingLock.Lock()
 	if c.snapshotting {
