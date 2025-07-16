@@ -31,8 +31,11 @@ func newHTTPServer(client *client.Client, addr string) *httpServer {
 	mux.HandleFunc("/scaleComplete", s.handleScaleComplete)
 
 	s.server = &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Minute, // using very long timeouts for now to allow for long operator ops
+		WriteTimeout: 10 * time.Minute,
+		IdleTimeout:  10 * time.Minute,
 	}
 
 	return s

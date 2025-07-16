@@ -609,8 +609,7 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 }
 
 // CreateSnapshot implements the CreateSnapshot RPC method
-// TODO should we trigger a Garbage Collection before taking a snapshot?
-// TODO this can be optimized a lot! For example we could snapshot on local disk every 10s and work only on the head
+// TODO FIX "snapshot already in progress" error when context gets canceled (e.g. if client calling operator cancels req)
 // and tail of the file (i.e. remove expired from head and append new entries).
 // Then once a minute we can upload the whole file to S3.
 // The file that we upload could be compressed, for example by using zstd with dictionaries.
