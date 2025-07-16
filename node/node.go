@@ -344,6 +344,8 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 
 		group.Go(func() error { // Try to load snapshot for this range
 			for _, snapshotFile := range snapshotFiles {
+				s.logger.Infon("Loading snapshot file", logger.NewStringField("filename", snapshotFile))
+
 				buf := aws.NewWriteAtBuffer([]byte{})
 				err := s.storage.Download(gCtx, buf, snapshotFile)
 				if err != nil {
@@ -552,15 +554,9 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 		}, nil
 	}
 
-	// If the cluster size is not changing, do nothing
-	if req.NewClusterSize == s.config.ClusterSize {
-		log.Infon("Cluster size is already set to the requested value")
-		return &pb.ScaleResponse{
-			Success:             true,
-			PreviousClusterSize: s.config.ClusterSize,
-			NewClusterSize:      s.config.ClusterSize,
-		}, nil
-	}
+	// WARNING!
+	// We don't check if the cluster size is already at the desired size to allow for auto-healing
+	// and to force the node to load the desired snapshots from S3.
 
 	// Set scaling flag
 	s.scaling = true

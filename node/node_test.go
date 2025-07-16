@@ -382,6 +382,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, conf)
 		c = getClient(t, totalHashRanges, node0Address)
+		require.NoError(t, c.LoadSnapshots(ctx))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
 		require.NoError(t, err)
