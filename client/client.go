@@ -438,6 +438,51 @@ func (c *Client) CreateSnapshot(ctx context.Context) error {
 	return group.Wait()
 }
 
+// LoadSnapshots forces all nodes to load snapshots from cloud storage
+// This method is meant to be used by an Operator process only!
+func (c *Client) LoadSnapshots(ctx context.Context) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
+	for nodeID, client := range c.clients {
+		group.Go(func() error {
+			req := &pb.LoadSnapshotsRequest{}
+
+			var err error
+			var resp *pb.LoadSnapshotsResponse
+			for i := 0; i <= c.config.RetryCount; i++ {
+				resp, err = client.LoadSnapshots(ctx, req)
+				if err == nil && resp != nil && resp.Success {
+					break
+				}
+
+				// If this is the last retry, return the error
+				if i == c.config.RetryCount {
+					errMsg := "unknown error"
+					if err != nil {
+						errMsg = err.Error()
+					} else if resp != nil {
+						errMsg = resp.ErrorMessage
+					}
+					return fmt.Errorf("failed to load snapshots on node %d: %s", nodeID, errMsg)
+				}
+
+				// Wait before retrying
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(c.config.RetryDelay):
+				}
+			}
+
+			return nil
+		})
+	}
+
+	return group.Wait()
+}
+
 // Scale changes the number of nodes in the cluster
 // This method is meant to be used by an Operator process only!
 func (c *Client) Scale(ctx context.Context, addresses ...string) error {

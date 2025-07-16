@@ -27,6 +27,7 @@ func newHTTPServer(client *client.Client, addr string) *httpServer {
 	mux.HandleFunc("/put", s.handlePut)
 	mux.HandleFunc("/info", s.handleInfo)
 	mux.HandleFunc("/snapshot", s.handleSnapshot)
+	mux.HandleFunc("/loadSnapshots", s.handleLoadSnapshots)
 	mux.HandleFunc("/scale", s.handleScale)
 	mux.HandleFunc("/scaleComplete", s.handleScaleComplete)
 
@@ -172,6 +173,24 @@ func (s *httpServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	// Create snapshot
 	if err := s.client.CreateSnapshot(r.Context()); err != nil {
 		http.Error(w, fmt.Sprintf("Error creating snapshot: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Write response
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// handleLoadSnapshots handles POST /loadSnapshots requests
+func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Load snapshots from cloud storage
+	if err := s.client.LoadSnapshots(r.Context()); err != nil {
+		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
 		return
 	}
 

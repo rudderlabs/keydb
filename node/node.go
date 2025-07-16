@@ -614,6 +614,40 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
 
+// LoadSnapshots forces the node to load all snapshots from cloud storage
+func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsRequest) (*pb.LoadSnapshotsResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.logger.Infon("Load snapshots request received")
+
+	if s.scaling {
+		s.logger.Warnn("Skipping snapshot loading while scaling")
+		return &pb.LoadSnapshotsResponse{
+			Success:      false,
+			ErrorMessage: "scaling operation in progress",
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	// Load snapshots for all hash ranges this node handles
+	if err := s.initCaches(ctx, true); err != nil {
+		s.logger.Errorn("Failed to load snapshots", obskit.Error(err))
+		return &pb.LoadSnapshotsResponse{
+			Success:      false,
+			ErrorMessage: err.Error(),
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	s.logger.Infon("Successfully loaded snapshots from cloud storage")
+
+	return &pb.LoadSnapshotsResponse{
+		Success: true,
+		NodeId:  s.config.NodeID,
+	}, nil
+}
+
 // CreateSnapshot implements the CreateSnapshot RPC method
 // TODO FIX "snapshot already in progress" error when context gets canceled (e.g. if client calling operator cancels req)
 // and tail of the file (i.e. remove expired from head and append new entries).

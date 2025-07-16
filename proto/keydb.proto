@@ -17,6 +17,9 @@ service NodeService {
   // GetNodeInfo returns information about the node and the cluster
   rpc GetNodeInfo(GetNodeInfoRequest) returns (GetNodeInfoResponse) {}
 
+  // LoadSnapshots forces the node to load all snapshots from cloud storage
+  rpc LoadSnapshots(LoadSnapshotsRequest) returns (LoadSnapshotsResponse) {}
+
   // CreateSnapshot forces the creation of snapshots for all hash ranges
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse) {}
 
@@ -79,6 +82,16 @@ message GetNodeInfoResponse {
   repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
   repeated uint32 hash_ranges = 4; // Hash ranges handled by this node
   uint64 last_snapshot_timestamp = 5; // Unix timestamp of the last snapshot
+}
+
+// LoadSnapshotsRequest initiates loading snapshots from cloud storage
+message LoadSnapshotsRequest {}
+
+// LoadSnapshotsResponse contains the result of the snapshot loading operation
+message LoadSnapshotsResponse {
+  bool success = 1;
+  string error_message = 2; // Error message if the operation failed
+  uint32 node_id = 3; // ID of the node that processed the request
 }
 
 // CreateSnapshotRequest initiates snapshot creation
