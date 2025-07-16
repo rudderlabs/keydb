@@ -37,7 +37,7 @@ type hasher interface {
 	)
 	GetKeysByHashRangeWithIndexes(keys []string) (
 		map[uint32][]string, // itemsByHashRange
-		map[string]int,      // indexes
+		map[string]int, // indexes
 		error,
 	)
 }
