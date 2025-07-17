@@ -126,6 +126,7 @@ go run cmd/node/main.go
 To scale the KeyDB cluster, use the client's `CreateSnapshots`, `Scale` and `ScaleComplete` methods:
 Before scaling the cluster you should call `/createSnapshots` on the Operator HTTP API to force all nodes to create
 snapshots of the hash ranges that need moving.
+
 If the `CreateSnapshots` operation is skipped, new nodes added to the cluster during a scale operation, won't be
 able to get the data for the hash ranges that they are going to serve, leading to missing data.
 
@@ -193,16 +194,11 @@ fmt.Printf("Last Snapshot: %s\n", time.Unix(int64(nodeInfo.LastSnapshotTimestamp
 
 # Known issues
 
-* During scaling operations the nodes might not be available
+* Scaling operations have not been tested during failures (e.g. operator crash, nodes crash, etc...)
 * New nodes are to be created first before scaling
-* Creating and uploading very big snapshots can become a performance issue
-  * A possible solution is that we could snapshot on local disk every 10s and work only on the head and tail of the
-    file (i.e. remove expired from head and append new entries at the end of the file).
-    This would allow us to hold the lock for a much smaller amount of time.
-    Then once a minute we can upload the whole file to S3. The file that we upload could be compressed, 
-    for example by using zstd with dictionaries.
+* Creating and uploading snapshots isn't optimal at the moment
+* Compaction is creating latencies at times
 * Missing metrics and logs (observability is poor)
 * Missing Kubernetes health probes
 * Missing linters
 * Missing Continuos Integration
-
