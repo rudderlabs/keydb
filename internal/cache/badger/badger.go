@@ -37,7 +37,7 @@ type hasher interface {
 	)
 	GetKeysByHashRangeWithIndexes(keys []string) (
 		map[uint32][]string, // itemsByHashRange
-		map[string]int, // indexes
+		map[string]int,      // indexes
 		error,
 	)
 }
@@ -74,7 +74,7 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		WithBaseLevelSize(conf.GetInt64Var(5*bytesize.MB, 1, "BadgerDB.Dedup.baseLevelSize", "BadgerDB.baseLevelSize")).
 		WithLevelSizeMultiplier(conf.GetIntVar(10, 1, "BadgerDB.Dedup.levelSizeMultiplier", "BadgerDB.levelSizeMultiplier")).
 		WithMaxLevels(conf.GetIntVar(7, 1, "BadgerDB.Dedup.maxLevels", "BadgerDB.maxLevels")).
-		WithNumCompactors(conf.GetIntVar(1, 1, "BadgerDB.Dedup.numCompactors", "BadgerDB.numCompactors")).
+		WithNumCompactors(conf.GetIntVar(2, 1, "BadgerDB.Dedup.numCompactors", "BadgerDB.numCompactors")).
 		WithValueThreshold(conf.GetInt64Var(10*bytesize.B, 1, "BadgerDB.Dedup.valueThreshold", "BadgerDB.valueThreshold")).
 		WithSyncWrites(conf.GetBoolVar(false, "BadgerDB.Dedup.syncWrites", "BadgerDB.syncWrites")).
 		WithBlockCacheSize(conf.GetInt64Var(0, 1, "BadgerDB.Dedup.blockCacheSize", "BadgerDB.blockCacheSize")).
