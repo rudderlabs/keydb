@@ -159,6 +159,7 @@ func (c *Client) get(
 		if _, alreadyFetched := results[key]; alreadyFetched {
 			continue
 		}
+		// TODO we could cache this and invalidate the cache if the cluster size changes
 		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
