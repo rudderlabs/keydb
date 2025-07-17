@@ -26,7 +26,7 @@ func newHTTPServer(client *client.Client, addr string) *httpServer {
 	mux.HandleFunc("/get", s.handleGet)
 	mux.HandleFunc("/put", s.handlePut)
 	mux.HandleFunc("/info", s.handleInfo)
-	mux.HandleFunc("/snapshot", s.handleSnapshot)
+	mux.HandleFunc("/createSnapshots", s.createSnapshots)
 	mux.HandleFunc("/loadSnapshots", s.handleLoadSnapshots)
 	mux.HandleFunc("/scale", s.handleScale)
 	mux.HandleFunc("/scaleComplete", s.handleScaleComplete)
@@ -163,8 +163,8 @@ func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSnapshot handles POST /snapshot requests
-func (s *httpServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+// createSnapshots handles POST /createSnapshots requests
+func (s *httpServer) createSnapshots(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
