@@ -342,6 +342,8 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 			continue
 		}
 
+		// TODO what if we were already managing a hash range? loading it up would be unnecessary
+
 		group.Go(func() error { // Try to load snapshot for this range
 			for _, snapshotFile := range snapshotFiles {
 				s.logger.Infon("Loading snapshot file", logger.NewStringField("filename", snapshotFile))
