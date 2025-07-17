@@ -1,21 +1,26 @@
 # KeyDB
 
-KeyDB is a distributed key store (not a key-value store) designed to be fast, scalable, and eventually consistent. It provides a simple API for checking the existence of keys with TTL (Time To Live) support.
+KeyDB is a distributed key store (not a key-value store) designed to be fast, scalable, and eventually consistent. 
+It provides a simple API for checking the existence of keys with TTL (Time To Live) support.
 
 ## Summary
 
 KeyDB is a distributed system that allows you to:
-- Store keys with configurable TTL
+- Store keys (no values) with configurable TTL
 - Check for key existence
 - Scale horizontally by adding or removing nodes
 - Persist data through snapshots to cloud storage
+  * Snapshots are used to scale the cluster since new nodes will download the hash ranges they need to manage directly
+    from cloud storage
 
-Key features:
+### Key features
+
 - **Distributed Architecture**: Supports multiple nodes with automatic key distribution
 - **Scalability**: Dynamically scale the cluster by adding or removing nodes
 - **Eventual Consistency**: Changes propagate through the system over time
 - **TTL Support**: Keys automatically expire after their time-to-live
-- **Persistence**: Snapshots are stored in cloud storage for durability
+- **Persistence**: Snapshots are stored in cloud storage for scaling the system without needing nodes to communicate
+  with each other
 
 ## Client
 
@@ -49,20 +54,10 @@ defer keydbClient.Close()
 To add keys with TTL:
 
 ```go
-// Create items with TTL
-items := []*pb.KeyWithTTL{
-    {
-        Key:        "user:123",
-        TtlSeconds: 3600, // 1 hour TTL
-    },
-    {
-        Key:        "session:456",
-        TtlSeconds: 86400, // 24 hours TTL
-    },
-}
+keys := []string{"key1", "key2", "key3"}
 
 // Put the keys
-err := keydbClient.Put(context.Background(), items)
+err := keydbClient.Put(context.Background(), keys, 24*time.Hour)
 if err != nil {
     // Handle error
 }
@@ -101,7 +96,7 @@ for i, key := range keys {
 
 ## Operator
 
-The Operator is responsible for managing the KeyDB cluster, including scaling operations and monitoring.
+The Operator is responsible for managing the KeyDB cluster, including scaling operations.
 
 ### Starting a Node
 
@@ -128,8 +123,11 @@ go run cmd/node/main.go
 
 ### Scaling the Cluster
 
-To scale the KeyDB cluster, use the client's `CreateSnapshot`, `Scale` and `ScaleComplete` methods:
-Before scaling the cluster it is good practice to call `CreateSnapshot`.
+To scale the KeyDB cluster, use the client's `CreateSnapshots`, `Scale` and `ScaleComplete` methods:
+Before scaling the cluster you should call `/createSnapshots` on the Operator HTTP API to force all nodes to create
+snapshots of the hash ranges that need moving.
+If the `CreateSnapshots` operation is skipped, new nodes added to the cluster during a scale operation, won't be
+able to get the data for the hash ranges that they are going to serve, leading to missing data.
 
 ```go
 // Create a client for operator operations
@@ -147,7 +145,7 @@ if err != nil {
 defer operatorClient.Close()
 
 // Let's force a snapshot creation on the old nodes first
-err = operatorClient.CreateSnapshot(context.Background())
+err = operatorClient.CreateSnapshots(context.Background())
 if err != nil {
     // Handle error
 }

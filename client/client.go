@@ -396,21 +396,21 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 	return resp, nil
 }
 
-// CreateSnapshot forces the creation of snapshots on a node
+// CreateSnapshots forces the creation of snapshots on a node
 // This method is meant to be used by an Operator process only!
-func (c *Client) CreateSnapshot(ctx context.Context) error {
+func (c *Client) CreateSnapshots(ctx context.Context) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
 	for nodeID, client := range c.clients {
 		group.Go(func() error {
-			req := &pb.CreateSnapshotRequest{}
+			req := &pb.CreateSnapshotsRequest{}
 
 			var err error
-			var resp *pb.CreateSnapshotResponse
+			var resp *pb.CreateSnapshotsResponse
 			for i := 0; i <= c.config.RetryCount; i++ {
-				resp, err = client.CreateSnapshot(ctx, req)
+				resp, err = client.CreateSnapshots(ctx, req)
 				if err == nil {
 					break
 				}

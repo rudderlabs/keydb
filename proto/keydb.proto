@@ -20,8 +20,8 @@ service NodeService {
   // LoadSnapshots forces the node to load all snapshots from cloud storage
   rpc LoadSnapshots(LoadSnapshotsRequest) returns (LoadSnapshotsResponse) {}
 
-  // CreateSnapshot forces the creation of snapshots for all hash ranges
-  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse) {}
+  // CreateSnapshots forces the creation of snapshots for all hash ranges
+  rpc CreateSnapshots(CreateSnapshotsRequest) returns (CreateSnapshotsResponse) {}
 
   // Scale changes the number of nodes in the cluster
   rpc Scale(ScaleRequest) returns (ScaleResponse) {}
@@ -94,11 +94,11 @@ message LoadSnapshotsResponse {
   uint32 node_id = 3; // ID of the node that processed the request
 }
 
-// CreateSnapshotRequest initiates snapshot creation
-message CreateSnapshotRequest {}
+// CreateSnapshotRequests initiates snapshot creation
+message CreateSnapshotsRequest {}
 
-// CreateSnapshotResponse contains the result of the snapshot creation
-message CreateSnapshotResponse {
+// CreateSnapshotsResponse contains the result of the snapshot creation
+message CreateSnapshotsResponse {
   bool success = 1;
   string error_message = 2; // Error message if the operation failed
   uint32 node_id = 3; // ID of the node that processed the request

@@ -646,20 +646,20 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 	}, nil
 }
 
-// CreateSnapshot implements the CreateSnapshot RPC method
+// CreateSnapshots implements the CreateSnapshots RPC method
 // TODO FIX "snapshot already in progress" error when context gets canceled (e.g. if client calling operator cancels req)
 // and tail of the file (i.e. remove expired from head and append new entries).
 // Then once a minute we can upload the whole file to S3.
 // The file that we upload could be compressed, for example by using zstd with dictionaries.
-func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequest) (*pb.CreateSnapshotResponse, error) {
+func (s *Service) CreateSnapshots(ctx context.Context, req *pb.CreateSnapshotsRequest) (*pb.CreateSnapshotsResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	s.logger.Infon("Create snapshot request received")
+	s.logger.Infon("Create snapshots request received")
 
 	if s.scaling {
 		s.logger.Warnn("Skipping snapshot while scaling")
-		return &pb.CreateSnapshotResponse{
+		return &pb.CreateSnapshotsResponse{
 			Success:      false,
 			ErrorMessage: "scaling operation in progress",
 			NodeId:       s.config.NodeID,
@@ -669,14 +669,14 @@ func (s *Service) CreateSnapshot(ctx context.Context, req *pb.CreateSnapshotRequ
 	// Create snapshots for all hash ranges this node handles
 	if err := s.createSnapshots(ctx); err != nil {
 		s.logger.Errorn("Failed to create snapshots", obskit.Error(err))
-		return &pb.CreateSnapshotResponse{
+		return &pb.CreateSnapshotsResponse{
 			Success:      false,
 			ErrorMessage: err.Error(),
 			NodeId:       s.config.NodeID,
 		}, nil
 	}
 
-	return &pb.CreateSnapshotResponse{
+	return &pb.CreateSnapshotsResponse{
 		Success: true,
 		NodeId:  s.config.NodeID,
 	}, nil

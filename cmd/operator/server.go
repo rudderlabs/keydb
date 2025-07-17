@@ -171,7 +171,7 @@ func (s *httpServer) createSnapshots(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create snapshot
-	if err := s.client.CreateSnapshot(r.Context()); err != nil {
+	if err := s.client.CreateSnapshots(r.Context()); err != nil {
 		http.Error(w, fmt.Sprintf("Error creating snapshot: %v", err), http.StatusInternalServerError)
 		return
 	}

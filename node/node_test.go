@@ -68,7 +68,7 @@ func TestSimple(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		err = c.CreateSnapshot(ctx)
+		err = c.CreateSnapshots(ctx)
 		require.NoError(t, err)
 
 		session := cloudStorage.ListFilesWithPrefix(context.Background(), "", "", 500)
@@ -146,7 +146,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
 		operator := getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, operator.CreateSnapshot(ctx))
+		require.NoError(t, operator.CreateSnapshots(ctx))
 
 		files, err := getContents(ctx, bucket, "", minioClient)
 		require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		// Scale down by removing node1. Then node0 should pick up all keys.
 		// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
 		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
-		require.NoError(t, operator.CreateSnapshot(ctx))
+		require.NoError(t, operator.CreateSnapshots(ctx))
 		require.NoError(t, operator.Scale(ctx, node0Address))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
@@ -236,7 +236,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
 		operator := getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, operator.CreateSnapshot(ctx))
+		require.NoError(t, operator.CreateSnapshots(ctx))
 
 		files, err := getContents(ctx, bucket, "", minioClient)
 		require.NoError(t, err)
@@ -294,7 +294,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// Scale down by removing node1 and node2. Then node0 should pick up all keys.
 		// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
 		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
-		require.NoError(t, operator.CreateSnapshot(ctx))
+		require.NoError(t, operator.CreateSnapshots(ctx))
 		require.NoError(t, operator.Scale(ctx, node0Address))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
@@ -346,7 +346,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		require.NoError(t, c.CreateSnapshot(ctx))
+		require.NoError(t, c.CreateSnapshots(ctx))
 		// we expect one hash range to be empty so the file won't be uploaded
 		requireExpectedFiles(ctx, t, bucket, "hr_", minioClient,
 			regexp.MustCompile("^hr_1_s_0.snapshot$"),
@@ -359,7 +359,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false, true}, exists)
 
-		require.NoError(t, c.CreateSnapshot(ctx))
+		require.NoError(t, c.CreateSnapshots(ctx))
 		requireExpectedFiles(ctx, t, bucket, "hr_", minioClient,
 			regexp.MustCompile("^hr_1_s_0.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0.snapshot$"),

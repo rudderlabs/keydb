@@ -19,13 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NodeService_Get_FullMethodName            = "/keydb.NodeService/Get"
-	NodeService_Put_FullMethodName            = "/keydb.NodeService/Put"
-	NodeService_GetNodeInfo_FullMethodName    = "/keydb.NodeService/GetNodeInfo"
-	NodeService_LoadSnapshots_FullMethodName  = "/keydb.NodeService/LoadSnapshots"
-	NodeService_CreateSnapshot_FullMethodName = "/keydb.NodeService/CreateSnapshot"
-	NodeService_Scale_FullMethodName          = "/keydb.NodeService/Scale"
-	NodeService_ScaleComplete_FullMethodName  = "/keydb.NodeService/ScaleComplete"
+	NodeService_Get_FullMethodName             = "/keydb.NodeService/Get"
+	NodeService_Put_FullMethodName             = "/keydb.NodeService/Put"
+	NodeService_GetNodeInfo_FullMethodName     = "/keydb.NodeService/GetNodeInfo"
+	NodeService_LoadSnapshots_FullMethodName   = "/keydb.NodeService/LoadSnapshots"
+	NodeService_CreateSnapshots_FullMethodName = "/keydb.NodeService/CreateSnapshots"
+	NodeService_Scale_FullMethodName           = "/keydb.NodeService/Scale"
+	NodeService_ScaleComplete_FullMethodName   = "/keydb.NodeService/ScaleComplete"
 )
 
 // NodeServiceClient is the client API for NodeService service.
@@ -42,8 +42,8 @@ type NodeServiceClient interface {
 	GetNodeInfo(ctx context.Context, in *GetNodeInfoRequest, opts ...grpc.CallOption) (*GetNodeInfoResponse, error)
 	// LoadSnapshots forces the node to load all snapshots from cloud storage
 	LoadSnapshots(ctx context.Context, in *LoadSnapshotsRequest, opts ...grpc.CallOption) (*LoadSnapshotsResponse, error)
-	// CreateSnapshot forces the creation of snapshots for all hash ranges
-	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error)
+	// CreateSnapshots forces the creation of snapshots for all hash ranges
+	CreateSnapshots(ctx context.Context, in *CreateSnapshotsRequest, opts ...grpc.CallOption) (*CreateSnapshotsResponse, error)
 	// Scale changes the number of nodes in the cluster
 	Scale(ctx context.Context, in *ScaleRequest, opts ...grpc.CallOption) (*ScaleResponse, error)
 	// ScaleComplete is used by the operator to notify all nodes that the scale is complete and they can now start serving traffic again
@@ -98,10 +98,10 @@ func (c *nodeServiceClient) LoadSnapshots(ctx context.Context, in *LoadSnapshots
 	return out, nil
 }
 
-func (c *nodeServiceClient) CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error) {
+func (c *nodeServiceClient) CreateSnapshots(ctx context.Context, in *CreateSnapshotsRequest, opts ...grpc.CallOption) (*CreateSnapshotsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CreateSnapshotResponse)
-	err := c.cc.Invoke(ctx, NodeService_CreateSnapshot_FullMethodName, in, out, cOpts...)
+	out := new(CreateSnapshotsResponse)
+	err := c.cc.Invoke(ctx, NodeService_CreateSnapshots_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +142,8 @@ type NodeServiceServer interface {
 	GetNodeInfo(context.Context, *GetNodeInfoRequest) (*GetNodeInfoResponse, error)
 	// LoadSnapshots forces the node to load all snapshots from cloud storage
 	LoadSnapshots(context.Context, *LoadSnapshotsRequest) (*LoadSnapshotsResponse, error)
-	// CreateSnapshot forces the creation of snapshots for all hash ranges
-	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error)
+	// CreateSnapshots forces the creation of snapshots for all hash ranges
+	CreateSnapshots(context.Context, *CreateSnapshotsRequest) (*CreateSnapshotsResponse, error)
 	// Scale changes the number of nodes in the cluster
 	Scale(context.Context, *ScaleRequest) (*ScaleResponse, error)
 	// ScaleComplete is used by the operator to notify all nodes that the scale is complete and they can now start serving traffic again
@@ -170,8 +170,8 @@ func (UnimplementedNodeServiceServer) GetNodeInfo(context.Context, *GetNodeInfoR
 func (UnimplementedNodeServiceServer) LoadSnapshots(context.Context, *LoadSnapshotsRequest) (*LoadSnapshotsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method LoadSnapshots not implemented")
 }
-func (UnimplementedNodeServiceServer) CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method CreateSnapshot not implemented")
+func (UnimplementedNodeServiceServer) CreateSnapshots(context.Context, *CreateSnapshotsRequest) (*CreateSnapshotsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateSnapshots not implemented")
 }
 func (UnimplementedNodeServiceServer) Scale(context.Context, *ScaleRequest) (*ScaleResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Scale not implemented")
@@ -272,20 +272,20 @@ func _NodeService_LoadSnapshots_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
-func _NodeService_CreateSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateSnapshotRequest)
+func _NodeService_CreateSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateSnapshotsRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(NodeServiceServer).CreateSnapshot(ctx, in)
+		return srv.(NodeServiceServer).CreateSnapshots(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: NodeService_CreateSnapshot_FullMethodName,
+		FullMethod: NodeService_CreateSnapshots_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NodeServiceServer).CreateSnapshot(ctx, req.(*CreateSnapshotRequest))
+		return srv.(NodeServiceServer).CreateSnapshots(ctx, req.(*CreateSnapshotsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -350,8 +350,8 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _NodeService_LoadSnapshots_Handler,
 		},
 		{
-			MethodName: "CreateSnapshot",
-			Handler:    _NodeService_CreateSnapshot_Handler,
+			MethodName: "CreateSnapshots",
+			Handler:    _NodeService_CreateSnapshots_Handler,
 		},
 		{
 			MethodName: "Scale",
