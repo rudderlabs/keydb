@@ -200,11 +200,7 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 		hashRangesMap[hashRange] = struct{}{}
 	}
 
-	var (
-		maxVersion     uint64
-		keysToDelete   = make([][]byte, 0)
-		keysToDeleteMu = sync.Mutex{}
-	)
+	var maxVersion uint64
 	stream := c.cache.NewStream()
 	stream.NumGo = c.conf.GetInt("BadgerDB.Dedup.Snapshots.NumGoroutines", 10)
 	stream.Prefix = []byte("hr")
@@ -216,13 +212,7 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 			hashRange, _ := strconv.ParseUint(string(parts[0][2:]), 10, 32)
 			_, ok = hashRangesMap[uint32(hashRange)]
 		}
-		if hasExpired || !ok {
-			keysToDeleteMu.Lock()
-			keysToDelete = append(keysToDelete, item.Key())
-			keysToDeleteMu.Unlock()
-			return false
-		}
-		return true
+		return ok
 	}
 	stream.Send = func(buf *z.Buffer) error {
 		list, err := badger.BufferToKVList(buf)
@@ -291,37 +281,6 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 	c.snapshotSince = maxVersion
 	c.snapshotting = false
 	c.snapshottingLock.Unlock()
-
-	if len(keysToDelete) > 0 {
-		batchSize := c.conf.GetInt("BadgerDB.Dedup.Snapshots.DeleteBatchSize", 1000)
-		keysToDeleteBatch := make([][]byte, 0, batchSize)
-		deleteKeys := func() error {
-			err := c.cache.Update(func(txn *badger.Txn) error {
-				for _, key := range keysToDeleteBatch {
-					return txn.Delete(key)
-				}
-				return nil
-			})
-			if err != nil {
-				return fmt.Errorf("failed to delete keys: %w", err)
-			}
-			keysToDeleteBatch = make([][]byte, 0, batchSize)
-			return nil
-		}
-		for _, key := range keysToDelete {
-			keysToDeleteBatch = append(keysToDeleteBatch, key)
-			if len(keysToDeleteBatch) == batchSize {
-				if err := deleteKeys(); err != nil {
-					return 0, fmt.Errorf("failed to delete keys: %w", err)
-				}
-			}
-		}
-		if len(keysToDeleteBatch) > 0 {
-			if err := deleteKeys(); err != nil {
-				return 0, fmt.Errorf("failed to delete keys: %w", err)
-			}
-		}
-	}
 
 	return since, nil
 }
