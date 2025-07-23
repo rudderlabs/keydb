@@ -1,4 +1,4 @@
-# Ignore cryptographic false positives
-.*nistec.*
-.*P521.*
-.*elliptic.*
+# Exclude specific files or directories
+vendor/
+go.mod
+go.sum
