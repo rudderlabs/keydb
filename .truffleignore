@@ -1,2 +1,4 @@
-# Regex pattern to ignore nistec.P521Point
-.*nistec\.P521Point.*
+# Ignore cryptographic false positives
+.*nistec.*
+.*P521.*
+.*elliptic.*
