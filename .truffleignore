@@ -1,1 +1,4 @@
-/keydb
+# Binary files
+*.tar
+# blobs directory
+blobs/
