@@ -1,7 +1,7 @@
 # Define build arguments
 # GO_VERSION is updated automatically to match go.mod, see Makefile
 ARG GO_VERSION=1.24.4
-ARG ALPINE_VERSION=3.21
+ARG ALPINE_VERSION=3.22
 ARG PKG_NAME=github.com/rudderlabs/keydb
 
 # Build stage
