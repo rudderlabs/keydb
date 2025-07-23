@@ -1,0 +1,2 @@
+# Ignore nistec.P521Point false positive
+nistec\.P521Point
