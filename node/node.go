@@ -106,7 +106,7 @@ type Cache interface {
 
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
-	CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, error)
+	CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, map[uint32]bool, error)
 
 	// LoadSnapshots reads the cache contents from the provided readers
 	LoadSnapshots(ctx context.Context, r ...io.Reader) error
@@ -199,37 +199,6 @@ func (s *Service) Close() {
 	s.waitGroup.Wait()
 	if err := s.cache.Close(); err != nil {
 		s.logger.Errorn("Error closing cache", obskit.Error(err))
-	}
-}
-
-// snapshotLoop periodically creates snapshots
-func (s *Service) snapshotLoop(ctx context.Context) {
-	defer s.waitGroup.Done()
-
-	ticker := time.NewTicker(s.config.SnapshotInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			func() {
-				s.mu.Lock()
-				defer s.mu.Unlock()
-				if s.scaling {
-					return
-				}
-				if s.now().Sub(s.lastSnapshotTime) < s.config.SnapshotInterval { // TODO write a test for this
-					// we created a snapshot already recently due to a scaling operation
-					s.logger.Debugn("Skipping snapshot due to scaling operation")
-					return
-				}
-				if err := s.createSnapshots(ctx); err != nil {
-					s.logger.Errorn("Error creating snapshots", obskit.Error(err))
-				}
-			}()
-		}
 	}
 }
 
@@ -692,7 +661,7 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 		writers[r] = bytes.NewBuffer([]byte{})
 	}
 
-	since, err := s.cache.CreateSnapshots(ctx, writers) // TODO: this can create memory problems!
+	since, hasData, err := s.cache.CreateSnapshots(ctx, writers) // TODO: this can create memory problems!
 	if err != nil {
 		return fmt.Errorf("failed to create snapshots: %w", err)
 	}
@@ -708,7 +677,7 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 		if !ok {
 			return fmt.Errorf("invalid writer type %T for hash range: %d", w, hashRange)
 		}
-		if buf.Len() == 0 {
+		if !hasData[hashRange] {
 			s.logger.Infon("No data to upload for hash range", logger.NewIntField("hashRange", int64(hashRange)))
 			continue // no data to upload
 		}

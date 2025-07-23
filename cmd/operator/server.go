@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 
 	"github.com/rudderlabs/keydb/client"
 )
@@ -77,7 +78,7 @@ func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+	if err := jsonrs.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -98,7 +99,7 @@ func (s *httpServer) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req PutRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -157,7 +158,7 @@ func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(info); err != nil {
+	if err := jsonrs.NewEncoder(w).Encode(info); err != nil {
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -213,7 +214,7 @@ func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req ScaleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}

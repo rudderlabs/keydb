@@ -151,9 +151,9 @@ func TestScaleUpAndDown(t *testing.T) {
 		files, err := getContents(ctx, bucket, "", minioClient)
 		require.NoError(t, err)
 		require.Len(t, files, 3)
-		requireSnapshotFilename(t, 0, 0, files[0])
-		requireSnapshotFilename(t, 1, 0, files[1])
-		requireSnapshotFilename(t, 2, 0, files[2])
+		requireSnapshotFilename(t, 0, files[0])
+		requireSnapshotFilename(t, 1, files[1])
+		requireSnapshotFilename(t, 2, files[2])
 
 		// Using a different path for the new node1 to avoid a conflict with node0
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
@@ -241,9 +241,9 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		files, err := getContents(ctx, bucket, "", minioClient)
 		require.NoError(t, err)
 		require.Len(t, files, 3)
-		requireSnapshotFilename(t, 0, 0, files[0])
-		requireSnapshotFilename(t, 1, 0, files[1])
-		requireSnapshotFilename(t, 2, 0, files[2])
+		requireSnapshotFilename(t, 0, files[0])
+		requireSnapshotFilename(t, 1, files[1])
+		requireSnapshotFilename(t, 2, files[2])
 
 		// Using a different path for the new node1 to avoid a conflict with node0
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
@@ -478,9 +478,9 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 	return c
 }
 
-func requireSnapshotFilename(t testing.TB, hashRange int64, since uint64, file File) {
+func requireSnapshotFilename(t testing.TB, hashRange int64, file File) {
 	t.Helper()
-	expectedFilename := "hr_" + strconv.FormatInt(hashRange, 10) + "_s_" + strconv.FormatUint(since, 10) + ".snapshot"
+	expectedFilename := "hr_" + strconv.FormatInt(hashRange, 10) + "_s_0" + ".snapshot"
 	require.Equal(t, expectedFilename, file.Key)
 }
 

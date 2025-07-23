@@ -1,0 +1,91 @@
+version: "2"
+linters:
+  enable:
+    - bodyclose
+    - decorder
+    - depguard
+    - forbidigo
+    - makezero
+    - misspell
+    - nilerr
+    - nilnil
+    - rowserrcheck
+    - unconvert
+    - unparam
+    - wastedassign
+  settings:
+    depguard:
+      rules:
+        main:
+          files:
+            - $all
+            - '!**/uuid_test.go'
+          deny:
+            - pkg: github.com/gofrs/uuid
+              desc: use github.com/google/uuid instead
+            - pkg: golang.org/x/exp/slices
+              desc: use "slices" instead
+            - pkg: github.com/rudderlabs/sonnet
+              desc: use "jsonrs" instead
+    forbidigo:
+      forbid:
+        - pattern: ^json\.Marshal.*$
+          pkg: ^encoding/json$
+          msg: use jsonrs.Marshal instead
+        - pattern: ^json\.Unmarshal$
+          pkg: ^encoding/json$
+          msg: use jsonrs.UnMarshal instead
+        - pattern: ^json\.NewDecoder.*$
+          pkg: ^encoding/json$
+          msg: use jsonrs.NewDecoder instead
+        - pattern: ^json\.NewEncoder.*$
+          pkg: ^encoding/json$
+          msg: use jsonrs.NewEncoder instead
+        # Rules for enforcing the go-kit non-sugared logger
+        - pattern: Logger.Debug(f|w)?$
+          pkg: ^github.com/rudderlabs/rudder-go-kit/logger$
+          msg: use Logger.Debugn instead
+        - pattern: Logger\.Info(f|w)?$
+          pkg: ^github.com/rudderlabs/rudder-go-kit/logger$
+          msg: use Logger.Infon instead
+        - pattern: Logger.Warn(f|w)?$
+          pkg: ^github.com/rudderlabs/rudder-go-kit/logger$
+          msg: use Logger.Warnn instead
+        - pattern: Logger.Error(f|w)?$
+          pkg: ^github.com/rudderlabs/rudder-go-kit/logger$
+          msg: use Logger.Errorn instead
+        - pattern: Logger.Fatal(f|w)?$
+          pkg: ^github.com/rudderlabs/rudder-go-kit/logger$
+          msg: use Logger.Fataln instead
+        - pattern: Logger.With$
+          pkg: ^github.com/rudderlabs/rudder-go-kit/logger$
+          msg: use Logger.Withn instead
+        - pattern: NewField$
+          pkg: ^github.com/rudderlabs/rudder-go-kit/logger$
+          msg: use type specific counterpart e.g. NewStringField, NewIntField, etc...
+        - pattern: NewErrorField$
+          pkg: ^github.com/rudderlabs/rudder-go-kit/logger$
+          msg: use rudder-observability-kit Error function
+      analyze-types: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10
+  new: false
+formatters:
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
