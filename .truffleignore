@@ -1,1 +1,2 @@
-vendor/
+# Regex pattern to ignore nistec.P521Point
+.*nistec\.P521Point.*
