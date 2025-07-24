@@ -1,0 +1,9 @@
+*
+!cache
+!client
+!cmd
+!internal
+!node
+!proto
+!go.mod
+!go.sum

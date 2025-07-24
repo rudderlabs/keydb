@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-keydb-operator
+  labels:
+    app: {{ .Release.Name }}-keydb-operator
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-keydb-operator
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-keydb-operator
+        release: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: KEYDB_OPERATOR_SERVER_ADDR
+              value: ":8080"
+            {{- if .Values.nodeAddresses }}
+            - name: KEYDB_OPERATOR_NODE_ADDRESSES
+              value: {{ join "," .Values.nodeAddresses | quote }}
+            {{- end }}
+            - name: KEYDB_OPERATOR_TOTAL_HASH_RANGES
+              value: "{{ .Values.config.totalHashRanges }}"
+            - name: KEYDB_OPERATOR_RETRY_COUNT
+              value: "{{ .Values.config.retryCount }}"
+            - name: KEYDB_OPERATOR_RETRY_DELAY
+              value: "{{ .Values.config.retryDelay }}"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
