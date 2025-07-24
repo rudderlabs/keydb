@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
 	"github.com/rudderlabs/rudder-go-kit/config"
@@ -44,6 +45,13 @@ func main() {
 		stats.WithServiceName(serviceName),
 		stats.WithServiceVersion(releaseInfo.Version),
 		stats.WithDefaultHistogramBuckets(defaultHistogramBuckets),
+	}
+	if conf.GetBool("enableBadgerMetric", true) {
+		registerer := prometheus.DefaultRegisterer
+		gatherer := prometheus.DefaultGatherer
+		badgerMetrics := NewBadgerMetricsCollector()
+		registerer.MustRegister(badgerMetrics)
+		statsOptions = append(statsOptions, stats.WithPrometheusRegistry(registerer, gatherer))
 	}
 	for histogramName, buckets := range customBuckets {
 		statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
