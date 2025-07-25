@@ -149,17 +149,17 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 }
 
 func (c *Client) initMetrics() {
-	c.metrics.getReqCount = c.stats.NewTaggedStat("keydb_req_count", stats.CountType, stats.Tags{"method": "get"})
-	c.metrics.getReqLatency = c.stats.NewTaggedStat("keydb_req_latency_seconds", stats.TimerType, stats.Tags{"method": "get"})
-	c.metrics.getReqFailures = c.stats.NewTaggedStat("keydb_req_failures", stats.CountType, stats.Tags{"method": "get"})
-	c.metrics.getReqRetries = c.stats.NewTaggedStat("keydb_req_retries", stats.CountType, stats.Tags{"method": "get"})
-	c.metrics.getKeysQueried = c.stats.NewStat("keydb_get_keys_queried", stats.CountType)
-	c.metrics.getKeysFound = c.stats.NewStat("keydb_get_keys_found", stats.CountType)
+	c.metrics.getReqCount = c.stats.NewTaggedStat("keydb_client_req_count", stats.CountType, stats.Tags{"method": "get"})
+	c.metrics.getReqLatency = c.stats.NewTaggedStat("keydb_client_req_latency_seconds", stats.TimerType, stats.Tags{"method": "get"})
+	c.metrics.getReqFailures = c.stats.NewTaggedStat("keydb_client_req_failures", stats.CountType, stats.Tags{"method": "get"})
+	c.metrics.getReqRetries = c.stats.NewTaggedStat("keydb_client_req_retries", stats.CountType, stats.Tags{"method": "get"})
+	c.metrics.getKeysQueried = c.stats.NewStat("keydb_client_get_keys_queried", stats.CountType)
+	c.metrics.getKeysFound = c.stats.NewStat("keydb_client_get_keys_found", stats.CountType)
 
-	c.metrics.putReqCount = c.stats.NewTaggedStat("keydb_req_count", stats.CountType, stats.Tags{"method": "put"})
-	c.metrics.putReqLatency = c.stats.NewTaggedStat("keydb_req_latency", stats.TimerType, stats.Tags{"method": "put"})
-	c.metrics.putReqFailures = c.stats.NewTaggedStat("keydb_req_failures", stats.CountType, stats.Tags{"method": "put"})
-	c.metrics.putReqRetries = c.stats.NewTaggedStat("keydb_req_retries", stats.CountType, stats.Tags{"method": "put"})
+	c.metrics.putReqCount = c.stats.NewTaggedStat("keydb_client_req_count", stats.CountType, stats.Tags{"method": "put"})
+	c.metrics.putReqLatency = c.stats.NewTaggedStat("keydb_client_req_latency", stats.TimerType, stats.Tags{"method": "put"})
+	c.metrics.putReqFailures = c.stats.NewTaggedStat("keydb_client_req_failures", stats.CountType, stats.Tags{"method": "put"})
+	c.metrics.putReqRetries = c.stats.NewTaggedStat("keydb_client_req_retries", stats.CountType, stats.Tags{"method": "put"})
 }
 
 // Close closes all connections
