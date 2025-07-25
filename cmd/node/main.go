@@ -51,8 +51,8 @@ func main() {
 	if conf.GetBool("enableBadgerMetric", true) {
 		registerer := prometheus.DefaultRegisterer
 		gatherer := prometheus.DefaultGatherer
-		//badgerMetrics := NewBadgerMetricsCollector()
-		//registerer.MustRegister(badgerMetrics)
+		badgerMetrics := NewBadgerMetricsCollector()
+		registerer.MustRegister(badgerMetrics)
 		statsOptions = append(statsOptions, stats.WithPrometheusRegistry(registerer, gatherer))
 	}
 	for histogramName, buckets := range customBuckets {
