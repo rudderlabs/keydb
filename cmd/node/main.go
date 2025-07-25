@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	_ "expvar"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
@@ -123,6 +125,15 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		cancel()
 		wg.Wait()
 	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := http.ListenAndServe(":8080", nil); err != nil {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
