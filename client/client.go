@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rudderlabs/rudder-go-kit/stats"
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -61,10 +64,34 @@ type Client struct {
 	mu sync.RWMutex
 
 	logger logger.Logger
+
+	stats stats.Stats
+
+	metrics struct {
+		getReqCount    stats.Counter
+		getReqLatency  stats.Timer
+		getReqFailures stats.Counter
+		getReqRetries  stats.Counter
+		getKeysQueried stats.Counter
+		getKeysFound   stats.Counter
+
+		putReqCount    stats.Counter
+		putReqLatency  stats.Timer
+		putReqFailures stats.Counter
+		putReqRetries  stats.Counter
+	}
+}
+
+type Opts func(*Client)
+
+func WithStats(stats stats.Stats) Opts {
+	return func(client *Client) {
+		client.stats = stats
+	}
 }
 
 // NewClient creates a new KeyDB client
-func NewClient(config Config, log logger.Logger) (*Client, error) {
+func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) {
 	if len(config.Addresses) == 0 {
 		return nil, fmt.Errorf("no addresses provided")
 	}
@@ -89,6 +116,16 @@ func NewClient(config Config, log logger.Logger) (*Client, error) {
 		logger:      log,
 	}
 
+	for _, opt := range opts {
+		opt(client)
+	}
+
+	if client.stats == nil {
+		client.stats = stats.Default
+	}
+
+	client.initMetrics()
+
 	// Connect to all nodes
 	for i, addr := range config.Addresses {
 		conn, err := grpc.NewClient(addr,
@@ -109,6 +146,20 @@ func NewClient(config Config, log logger.Logger) (*Client, error) {
 	}
 
 	return client, nil
+}
+
+func (c *Client) initMetrics() {
+	c.metrics.getReqCount = c.stats.NewTaggedStat("keydb_req_count", stats.CountType, stats.Tags{"method": "get"})
+	c.metrics.getReqLatency = c.stats.NewTaggedStat("keydb_req_latency_seconds", stats.TimerType, stats.Tags{"method": "get"})
+	c.metrics.getReqFailures = c.stats.NewTaggedStat("keydb_req_failures", stats.CountType, stats.Tags{"method": "get"})
+	c.metrics.getReqRetries = c.stats.NewTaggedStat("keydb_req_retries", stats.CountType, stats.Tags{"method": "get"})
+	c.metrics.getKeysQueried = c.stats.NewStat("keydb_get_keys_queried", stats.CountType)
+	c.metrics.getKeysFound = c.stats.NewStat("keydb_get_keys_found", stats.CountType)
+
+	c.metrics.putReqCount = c.stats.NewTaggedStat("keydb_req_count", stats.CountType, stats.Tags{"method": "put"})
+	c.metrics.putReqLatency = c.stats.NewTaggedStat("keydb_req_latency", stats.TimerType, stats.Tags{"method": "put"})
+	c.metrics.putReqFailures = c.stats.NewTaggedStat("keydb_req_failures", stats.CountType, stats.Tags{"method": "put"})
+	c.metrics.putReqRetries = c.stats.NewTaggedStat("keydb_req_retries", stats.CountType, stats.Tags{"method": "put"})
 }
 
 // Close closes all connections
@@ -138,6 +189,8 @@ func (c *Client) ClusterSize() int {
 
 // Get retrieves values for multiple keys
 func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
+	defer c.metrics.getReqLatency.RecordDuration()()
+	c.metrics.getReqCount.Increment()
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -145,7 +198,12 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	results := make(map[string]bool)
 	resultsMu := sync.Mutex{}
 
-	return c.get(ctx, keys, results, &resultsMu)
+	res, err := c.get(ctx, keys, results, &resultsMu)
+	if err != nil {
+		c.metrics.getReqFailures.Increment()
+		return res, err
+	}
+	return res, nil
 }
 
 func (c *Client) get(
@@ -189,6 +247,10 @@ func (c *Client) get(
 			var resp *pb.GetResponse
 
 			for i := 0; i <= c.config.RetryCount; i++ {
+				// Increment retry counter (except for the first attempt)
+				if i > 0 {
+					c.metrics.getReqRetries.Increment()
+				}
 				resp, err = client.Get(gCtx, req)
 				if err == nil && resp != nil {
 					if resp.ErrorCode == pb.ErrorCode_NO_ERROR {
@@ -196,17 +258,22 @@ func (c *Client) get(
 					}
 				}
 
-				// TODO add some logging and metrics here
-
 				if resp != nil && c.clusterSize != resp.ClusterSize {
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
 
+				if err != nil {
+					c.logger.Errorn("get keys from node", logger.NewIntField("nodeID", int64(nodeID)), logger.NewIntField("attempt", int64(i+1)), obskit.Error(err))
+				}
+
 				// If this is the last retry, return the error
 				if i == c.config.RetryCount {
 					cancel()
+					if err != nil {
+						return fmt.Errorf("failed to get keys from node %d: no retries left, err:%w", nodeID, err)
+					}
 					return fmt.Errorf("failed to get keys from node %d: no retries left", nodeID)
 				}
 
@@ -248,19 +315,32 @@ func (c *Client) get(
 
 	// Convert results map to slice in the same order as input keys
 	exists := make([]bool, len(keys))
+	existsCount := 0
 	for i, key := range keys {
 		exists[i] = results[key]
+		if exists[i] {
+			existsCount++
+		}
 	}
 
+	c.metrics.getKeysQueried.Count(len(keys))
+	c.metrics.getKeysFound.Count(existsCount)
 	return exists, nil
 }
 
 // Put stores multiple key-value pairs with TTL
 func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) error {
+	defer c.metrics.putReqLatency.RecordDuration()()
+	c.metrics.putReqCount.Increment()
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	return c.put(ctx, keys, ttl)
+	err := c.put(ctx, keys, ttl)
+	if err != nil {
+		c.metrics.putReqFailures.Increment()
+		return err
+	}
+	return nil
 }
 
 func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) error {
@@ -295,6 +375,10 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 			var err error
 			var resp *pb.PutResponse
 			for i := 0; i <= c.config.RetryCount; i++ {
+				// Increment retry counter (except for the first attempt)
+				if i > 0 {
+					c.metrics.putReqRetries.Increment()
+				}
 				resp, err = client.Put(gCtx, req)
 				if err == nil && resp != nil {
 					if resp.Success && resp.ErrorCode == pb.ErrorCode_NO_ERROR {
@@ -302,17 +386,22 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 					}
 				}
 
-				// TODO add some logging and metrics here
-
 				if resp != nil && c.clusterSize != resp.ClusterSize {
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
 
+				if err != nil {
+					c.logger.Errorn("put keys in node", logger.NewIntField("nodeID", int64(nodeID)), logger.NewIntField("attempt", int64(i+1)), obskit.Error(err))
+				}
+
 				// If this is the last retry, return the error
 				if i == c.config.RetryCount {
 					cancel()
+					if err != nil {
+						return fmt.Errorf("failed to get keys from node %d: no retries left, err: %w", nodeID, err)
+					}
 					return fmt.Errorf("failed to get keys from node %d: no retries left", nodeID)
 				}
 
