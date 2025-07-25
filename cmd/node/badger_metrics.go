@@ -33,7 +33,7 @@ func NewBadgerMetricsCollector() *BadgerMetricsCollector {
 		"badger_get_num_lsm": prometheus.NewDesc(
 			"badger_get_num_lsm",
 			"Number of LSM gets",
-			nil, nil,
+			[]string{"level"}, nil,
 		),
 		"badger_get_num_memtable": prometheus.NewDesc(
 			"badger_get_num_memtable",
@@ -53,7 +53,7 @@ func NewBadgerMetricsCollector() *BadgerMetricsCollector {
 		"badger_hit_num_lsm_bloom_filter": prometheus.NewDesc(
 			"badger_hit_num_lsm_bloom_filter",
 			"Number of LSM bloom filter hits",
-			nil, nil,
+			[]string{"level"}, nil,
 		),
 		"badger_iterator_num_user": prometheus.NewDesc(
 			"badger_iterator_num_user",
@@ -94,6 +94,31 @@ func NewBadgerMetricsCollector() *BadgerMetricsCollector {
 			"badger_write_pending_num_memtable",
 			"Number of pending writes in memtable",
 			[]string{"path"}, nil, // With labels
+		),
+		"badger_size_bytes_vlog": prometheus.NewDesc(
+			"badger_size_bytes_vlog",
+			"Size of value log",
+			[]string{"path"}, nil,
+		),
+		"badger_read_num_vlog": prometheus.NewDesc(
+			"badger_read_num_vlog",
+			"cumulative number of reads from vlog",
+			nil, nil,
+		),
+		"badger_write_num_vlog": prometheus.NewDesc(
+			"badger_write_num_vlog",
+			"cumulative number of writes to vlog",
+			nil, nil,
+		),
+		"badger_read_bytes_vlog": prometheus.NewDesc(
+			"badger_read_bytes_vlog",
+			"cumulative number of bytes read from vlog",
+			nil, nil,
+		),
+		"badger_write_bytes_vlog": prometheus.NewDesc(
+			"badger_write_bytes_vlog",
+			"cumulative number of bytes written to vlog",
+			nil, nil,
 		),
 	}
 	metrics := map[string]string{
