@@ -135,8 +135,17 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		service.Close() // TODO test graceful shutdown
 	}()
 
-	// Create a gRPC server
-	server := grpc.NewServer()
+	// create a gRPC server with latency interceptors
+	server := grpc.NewServer(
+		// Unary interceptor to record latency for unary RPCs
+		grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+			start := time.Now()
+			resp, err := handler(ctx, req)
+			stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{"method": info.FullMethod}).Since(start)
+			return resp, err
+		}),
+	)
+
 	pb.RegisterNodeServiceServer(server, service)
 
 	// Start listening
