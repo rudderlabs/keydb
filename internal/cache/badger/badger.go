@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -179,7 +180,8 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 			for _, key := range keys {
 				entry := badger.NewEntry(c.getKey(key, hashRange), []byte{})
 				if ttl > 0 {
-					entry = entry.WithTTL(ttl)
+					jitter := time.Duration(rand.Int63n(int64(c.conf.GetDuration("cache.ttlJitter", 1, time.Hour))))
+					entry = entry.WithTTL(ttl + jitter)
 				}
 				if err := txn.SetEntry(entry); err != nil {
 					return fmt.Errorf("failed to put key %s: %w", key, err)
