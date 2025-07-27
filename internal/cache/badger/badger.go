@@ -185,7 +185,7 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 		bw := c.cache.NewWriteBatch()
 		for hashRange, keys := range itemsByHashRange {
 			for _, key := range keys {
-				entry := badger.NewEntry(c.getKey(key, hashRange), []byte{})
+				entry := badger.NewEntry(c.getKey(key, hashRange), nil)
 				if ttl > 0 {
 					entry = entry.WithTTL(c.getTTL(ttl))
 				}
@@ -199,7 +199,7 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 		err = c.cache.Update(func(txn *badger.Txn) error {
 			for hashRange, keys := range itemsByHashRange {
 				for _, key := range keys {
-					entry := badger.NewEntry(c.getKey(key, hashRange), []byte{})
+					entry := badger.NewEntry(c.getKey(key, hashRange), nil)
 					if ttl > 0 {
 						entry = entry.WithTTL(c.getTTL(ttl))
 					}
