@@ -369,7 +369,6 @@ func (c *Cache) LoadSnapshots(ctx context.Context, readers ...io.Reader) error {
 }
 
 func (c *Cache) RunGarbageCollection() {
-	c.logger.Infon("levels before garbage collection", logger.NewStringField("levels", c.cache.LevelsToString()))
 again: // see https://dgraph.io/docs/badger/get-started/#garbage-collection
 	err := c.cache.RunValueLogGC(c.discardRatio)
 	if err == nil {
