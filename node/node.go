@@ -250,7 +250,7 @@ func (s *Service) logCacheLevels(ctx context.Context) {
 	s.logger.Infon("Cache levels",
 		logger.NewStringField("levels", s.cache.LevelsToString()),
 	)
-	ticker := time.NewTicker(2 * time.Minute)
+	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
