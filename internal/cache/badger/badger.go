@@ -44,17 +44,20 @@ type hasher interface {
 }
 
 type Cache struct {
-	hasher           hasher
-	cache            *badger.DB
-	conf             *config.Config
-	logger           logger.Logger
-	compress         bool
-	compressionLevel int
-	discardRatio     float64
-	snapshotSince    uint64
-	snapshotting     bool
-	snapshottingLock sync.Mutex
-	debugMode        bool
+	hasher             hasher
+	cache              *badger.DB
+	conf               *config.Config
+	logger             logger.Logger
+	compress           bool
+	compressionLevel   int
+	discardRatio       float64
+	snapshotSince      uint64
+	snapshotting       bool
+	snapshottingLock   sync.Mutex
+	debugMode          bool
+	jitterEnabled      bool
+	jitterDuration     time.Duration
+	batchWriterEnabled bool
 }
 
 func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
@@ -124,14 +127,17 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		return nil, err
 	}
 	return &Cache{
-		hasher:           h,
-		cache:            db,
-		conf:             conf,
-		logger:           log,
-		compress:         compress,
-		compressionLevel: compressionLevel,
-		discardRatio:     conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
-		debugMode:        conf.GetBool("BadgerDB.DebugMode", false),
+		hasher:             h,
+		cache:              db,
+		conf:               conf,
+		logger:             log,
+		compress:           compress,
+		compressionLevel:   compressionLevel,
+		discardRatio:       conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
+		debugMode:          conf.GetBool("BadgerDB.DebugMode", false),
+		jitterEnabled:      conf.GetBool("cache.ttlJitter.enabled", true),
+		jitterDuration:     conf.GetDuration("cache.ttlJitter", 1, time.Hour),
+		batchWriterEnabled: conf.GetBool("BadgerDB.Dedup.batchWriterEnabled", true),
 	}, nil
 }
 
@@ -175,29 +181,49 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 		return fmt.Errorf("cache put keys: %w", err)
 	}
 
-	err = c.cache.Update(func(txn *badger.Txn) error {
+	if c.batchWriterEnabled {
+		bw := c.cache.NewWriteBatch()
 		for hashRange, keys := range itemsByHashRange {
 			for _, key := range keys {
 				entry := badger.NewEntry(c.getKey(key, hashRange), []byte{})
 				if ttl > 0 {
-					if c.conf.GetBool("cache.ttlJitter.enabled", true) {
-						jitter := time.Duration(rand.Int63n(int64(c.conf.GetDuration("cache.ttlJitter", 1, time.Hour))))
-						ttl = ttl + jitter
-					}
-					entry = entry.WithTTL(ttl)
+					entry = entry.WithTTL(c.getTTL(ttl))
 				}
-				if err := txn.SetEntry(entry); err != nil {
+				if err := bw.SetEntry(entry); err != nil {
 					return fmt.Errorf("failed to put key %s: %w", key, err)
 				}
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		return err
+		return bw.Flush()
+	} else {
+		err = c.cache.Update(func(txn *badger.Txn) error {
+			for hashRange, keys := range itemsByHashRange {
+				for _, key := range keys {
+					entry := badger.NewEntry(c.getKey(key, hashRange), []byte{})
+					if ttl > 0 {
+						entry = entry.WithTTL(c.getTTL(ttl))
+					}
+					if err := txn.SetEntry(entry); err != nil {
+						return fmt.Errorf("failed to put key %s: %w", key, err)
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+func (c *Cache) getTTL(ttl time.Duration) time.Duration {
+	if ttl > 0 && c.jitterEnabled && c.jitterDuration > 0 {
+		jitter := time.Duration(rand.Int63n(int64(c.jitterDuration)))
+		ttl = ttl + jitter
+	}
+	return ttl
 }
 
 // CreateSnapshots writes the cache contents to the provided writers
