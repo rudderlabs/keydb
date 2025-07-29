@@ -49,10 +49,10 @@ func TestSnapshots(t *testing.T) {
 			require.NoError(t, bdb.Close())
 		})
 
-		err = bdb.Put([]string{"key1", "key2"}, time.Hour)
+		err = bdb.Put([]string{"key1", "key2"}, time.Hour, 0)
 		require.NoError(t, err)
 
-		exists, err := bdb.Get([]string{"key1", "key2"})
+		exists, err := bdb.Get([]string{"key1", "key2"}, 0)
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true}, exists)
 
@@ -73,9 +73,9 @@ func TestSnapshots(t *testing.T) {
 		require.Len(t, files, 1)
 		t.Logf("1st snapshot created: %+v", uploadedFile1)
 
-		err = bdb.Put([]string{"key3", "key4"}, time.Hour)
+		err = bdb.Put([]string{"key3", "key4"}, time.Hour, 0)
 		require.NoError(t, err)
-		exists, err = bdb.Get([]string{"key1", "key2", "key3", "key4"})
+		exists, err = bdb.Get([]string{"key1", "key2", "key3", "key4"}, 0)
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, true}, exists)
 
@@ -113,7 +113,7 @@ func TestSnapshots(t *testing.T) {
 		err = newBdb.LoadSnapshots(context.Background(), tmpFile)
 		require.NoError(t, err)
 
-		exists, err = newBdb.Get([]string{"key1", "key2", "key3", "key4"})
+		exists, err = newBdb.Get([]string{"key1", "key2", "key3", "key4"}, 0)
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, false, false}, exists)
 
@@ -127,7 +127,7 @@ func TestSnapshots(t *testing.T) {
 		err = newBdb.LoadSnapshots(context.Background(), tmpFile2)
 		require.NoError(t, err)
 
-		exists, err = newBdb.Get([]string{"key1", "key2", "key3", "key4"})
+		exists, err = newBdb.Get([]string{"key1", "key2", "key3", "key4"}, 0)
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, true}, exists)
 	}
