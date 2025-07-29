@@ -206,6 +206,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	case <-ctx.Done():
 		log.Infon("Shutting down HTTP server")
 		server.GracefulStop()
+		err := lis.Close()
+		if err != nil {
+			return err
+		}
 		return ctx.Err()
 	case err := <-serverErrCh:
 		return err
