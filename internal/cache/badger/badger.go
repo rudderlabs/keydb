@@ -135,7 +135,7 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		compressionLevel:   compressionLevel,
 		discardRatio:       conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
 		debugMode:          conf.GetBool("BadgerDB.DebugMode", false),
-		jitterEnabled:      conf.GetBool("cache.ttlJitter.enabled", true),
+		jitterEnabled:      conf.GetBool("cache.ttlJitter.enabled", false),
 		jitterDuration:     conf.GetDuration("cache.ttlJitter", 1, time.Hour),
 		batchWriterEnabled: conf.GetBool("BadgerDB.Dedup.batchWriterEnabled", true),
 	}, nil
