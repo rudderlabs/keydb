@@ -65,6 +65,9 @@ type Config struct {
 
 	// Addresses is a list of node addresses that this node will advertise to clients
 	Addresses []string
+
+	// logTableStructureDuration defines the duration for which the table structure is logged
+	LogTableStructureDuration time.Duration
 }
 
 // Service implements the NodeService gRPC service
@@ -250,7 +253,10 @@ func (s *Service) logCacheLevels(ctx context.Context) {
 	s.logger.Infon("Cache levels",
 		logger.NewStringField("levels", s.cache.LevelsToString()),
 	)
-	ticker := time.NewTicker(10 * time.Minute)
+	if s.config.LogTableStructureDuration == 0 {
+		return
+	}
+	ticker := time.NewTicker(s.config.LogTableStructureDuration)
 	defer ticker.Stop()
 	for {
 		select {

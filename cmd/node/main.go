@@ -109,6 +109,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			0, time.Nanosecond,
 		),
 		Addresses: strings.Split(nodeAddresses, ","),
+		LogTableStructureDuration: conf.GetDuration("logTableStructureDuration", 10, time.Minute),
 	}
 
 	port := conf.GetInt("port", 50051)
