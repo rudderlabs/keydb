@@ -13,6 +13,7 @@ linters:
     - unconvert
     - unparam
     - wastedassign
+    - lll
   settings:
     lll:
       # Max line length, lines longer will be reported.
