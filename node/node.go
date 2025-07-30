@@ -190,10 +190,14 @@ func NewService(
 	service.metrics.getKeysCounters = make(map[uint32]stats.Counter)
 	service.metrics.putKeysCounter = make(map[uint32]stats.Counter)
 	service.metrics.gcDuration = stat.NewTaggedStat("keydb_gc_duration_seconds", stats.HistogramType, statsTags)
-	service.metrics.getKeysHashingDuration = stat.NewTaggedStat("keydb_keys_hashing_duration_seconds", stats.TimerType, stats.Tags{"method": "get"})
-	service.metrics.getFromCacheDuration = stat.NewTaggedStat("keydb_grpc_cache_get_duration_seconds", stats.TimerType, statsTags)
-	service.metrics.putKeysHashingDuration = stat.NewTaggedStat("keydb_keys_hashing_duration_seconds", stats.TimerType, stats.Tags{"method": "put"})
-	service.metrics.putFromCacheDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds", stats.TimerType, statsTags)
+	service.metrics.getKeysHashingDuration = stat.NewTaggedStat("keydb_keys_hashing_duration_seconds", stats.TimerType,
+		stats.Tags{"method": "get"})
+	service.metrics.getFromCacheDuration = stat.NewTaggedStat("keydb_grpc_cache_get_duration_seconds",
+		stats.TimerType, statsTags)
+	service.metrics.putKeysHashingDuration = stat.NewTaggedStat("keydb_keys_hashing_duration_seconds", stats.TimerType,
+		stats.Tags{"method": "put"})
+	service.metrics.putFromCacheDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds", stats.TimerType,
+		statsTags)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false); err != nil {

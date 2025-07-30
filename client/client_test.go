@@ -65,7 +65,9 @@ func (m *mockNodeServiceServer) Put(ctx context.Context, req *proto.PutRequest) 
 	}, nil
 }
 
-func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
+func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *proto.GetNodeInfoRequest) (
+	*proto.GetNodeInfoResponse, error,
+) {
 	if m.getNodeInfoFunc != nil {
 		return m.getNodeInfoFunc(ctx, req)
 	}
@@ -81,7 +83,9 @@ func (m *mockNodeServiceServer) Scale(ctx context.Context, req *proto.ScaleReque
 	return &proto.ScaleResponse{Success: true}, nil
 }
 
-func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *proto.ScaleCompleteRequest) (*proto.ScaleCompleteResponse, error) {
+func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *proto.ScaleCompleteRequest) (
+	*proto.ScaleCompleteResponse, error,
+) {
 	if m.scaleCompleteFunc != nil {
 		return m.scaleCompleteFunc(ctx, req)
 	}
@@ -89,7 +93,9 @@ func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *proto.Sc
 	return &proto.ScaleCompleteResponse{Success: true}, nil
 }
 
-func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.CreateSnapshotsRequest) (*proto.CreateSnapshotsResponse, error) {
+func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.CreateSnapshotsRequest) (
+	*proto.CreateSnapshotsResponse, error,
+) {
 	if m.createSnapFunc != nil {
 		return m.createSnapFunc(ctx, req)
 	}
@@ -97,7 +103,9 @@ func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.
 	return &proto.CreateSnapshotsResponse{Success: true}, nil
 }
 
-func (m *mockNodeServiceServer) LoadSnapshots(ctx context.Context, req *proto.LoadSnapshotsRequest) (*proto.LoadSnapshotsResponse, error) {
+func (m *mockNodeServiceServer) LoadSnapshots(ctx context.Context, req *proto.LoadSnapshotsRequest) (
+	*proto.LoadSnapshotsResponse, error,
+) {
 	if m.loadSnapFunc != nil {
 		return m.loadSnapFunc(ctx, req)
 	}

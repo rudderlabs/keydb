@@ -146,7 +146,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		case <-doneCh:
 			return
 		case <-time.After(conf.GetDuration("shutdownTimeout", 15, time.Second)):
-			log.Errorn("graceful termination failed", logger.NewDurationField("timeoutAfter", time.Since(shutdownStarted)))
+			log.Errorn("graceful termination failed",
+				logger.NewDurationField("timeoutAfter", time.Since(shutdownStarted)))
 			fmt.Print("\n\n")
 			_ = pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
 			fmt.Print("\n\n")
