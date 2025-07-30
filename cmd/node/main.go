@@ -32,6 +32,10 @@ import (
 
 var podNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
 
+type keyDBResponse interface {
+	GetSuccess() bool
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM)
 
@@ -137,7 +141,23 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 			start := time.Now()
 			resp, err := handler(ctx, req)
-			stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{"method": info.FullMethod}).Since(start)
+			if err == nil {
+				if keyDBResp, ok := resp.(keyDBResponse); ok && !keyDBResp.GetSuccess() {
+					stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{
+						"method":  info.FullMethod,
+						"success": "false",
+					}).Since(start)
+				}
+				stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{
+					"method":  info.FullMethod,
+					"success": "true",
+				}).Since(start)
+			} else {
+				stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{
+					"method":  info.FullMethod,
+					"success": "false",
+				}).Since(start)
+			}
 			return resp, err
 		}),
 	)
