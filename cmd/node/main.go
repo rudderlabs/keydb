@@ -142,21 +142,24 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	// create a gRPC server with latency interceptors
 	server := grpc.NewServer(
 		// Unary interceptor to record latency for unary RPCs
-		grpc.UnaryInterceptor(func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-			start := time.Now()
-			resp, err := handler(ctx, req)
-			success := err != nil
-			if err == nil {
-				if keyDBResp, ok := resp.(keyDBResponse); ok && !keyDBResp.GetSuccess() {
-					success = false
+		grpc.UnaryInterceptor(
+			func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (
+				interface{}, error,
+			) {
+				start := time.Now()
+				resp, err := handler(ctx, req)
+				success := err != nil
+				if err == nil {
+					if keyDBResp, ok := resp.(keyDBResponse); ok && !keyDBResp.GetSuccess() {
+						success = false
+					}
 				}
-			}
-			stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{
-				"method":  info.FullMethod,
-				"success": strconv.FormatBool(success),
-			}).Since(start)
-			return resp, err
-		}),
+				stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{
+					"method":  info.FullMethod,
+					"success": strconv.FormatBool(success),
+				}).Since(start)
+				return resp, err
+			}),
 	)
 
 	pb.RegisterNodeServiceServer(server, service)
