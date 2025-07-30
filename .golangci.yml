@@ -14,6 +14,12 @@ linters:
     - unparam
     - wastedassign
   settings:
+    lll:
+      # Max line length, lines longer will be reported.
+      # Default: 120.
+      line-length: 120
+      # Tab width in spaces.
+      tab-width: 4
     depguard:
       rules:
         main:
