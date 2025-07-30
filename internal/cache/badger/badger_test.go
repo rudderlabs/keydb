@@ -7,19 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
-	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/httputil"
@@ -41,12 +40,10 @@ func TestSnapshots(t *testing.T) {
 	run := func(t *testing.T, compress bool) {
 		t.Parallel()
 
-		hasher := getHasher(0, 1, 1) // TODO do a proper test with multiple hash ranges
-
 		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
 		conf.Set("BadgerDB.Dedup.Compress", compress)
-		bdb, err := New(hasher, conf, logger.NOP)
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		bdb, err := New(&mockHasher{}, conf, logger.NOP)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			require.NoError(t, bdb.Close())
@@ -61,7 +58,10 @@ func TestSnapshots(t *testing.T) {
 
 		// Create snapshot
 		buf := new(bytes.Buffer)
-		since, err := bdb.CreateSnapshots(context.Background(), map[uint32]io.Writer{0: buf})
+		mp := map[uint32]io.Writer{
+			0: buf,
+		}
+		since, _, err := bdb.CreateSnapshots(context.Background(), mp)
 		require.NoError(t, err)
 
 		filename := fmt.Sprintf("snapshot-%d.badger", since)
@@ -80,8 +80,11 @@ func TestSnapshots(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, true}, exists)
 
 		// Create another snapshot which should contain also key3 and key4
-		buf = new(bytes.Buffer)
-		since, err = bdb.CreateSnapshots(context.Background(), map[uint32]io.Writer{0: buf})
+		buf.Reset()
+		mp = map[uint32]io.Writer{
+			0: buf,
+		}
+		since, _, err = bdb.CreateSnapshots(context.Background(), mp)
 		require.NoError(t, err)
 
 		filename = fmt.Sprintf("snapshot-%d.badger", since)
@@ -94,26 +97,34 @@ func TestSnapshots(t *testing.T) {
 
 		// Load 1st snapshot into a new BadgerDB
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		newBdb, err := New(hasher, conf, logger.NOP)
+		newBdb, err := New(&mockHasher{}, conf, logger.NOP)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			require.NoError(t, newBdb.Close())
 		})
 
-		waBuf := aws.NewWriteAtBuffer([]byte{})
-		err = cloudStorage.Download(context.Background(), waBuf, uploadedFile1.ObjectName)
+		tmpFile, err := os.CreateTemp(t.TempDir(), "snapshot-*.badger")
 		require.NoError(t, err)
-		err = newBdb.LoadSnapshots(context.Background(), bytes.NewReader(waBuf.Bytes()))
+		defer func(name string) {
+			_ = os.Remove(name)
+		}(tmpFile.Name())
+		err = cloudStorage.Download(context.Background(), tmpFile, uploadedFile1.ObjectName)
+		require.NoError(t, err)
+		err = newBdb.LoadSnapshots(context.Background(), tmpFile)
 		require.NoError(t, err)
 
 		exists, err = newBdb.Get([]string{"key1", "key2", "key3", "key4"})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, false, false}, exists)
 
-		waBuf = aws.NewWriteAtBuffer([]byte{})
-		err = cloudStorage.Download(context.Background(), waBuf, uploadedFile2.ObjectName)
+		tmpFile2, err := os.CreateTemp(t.TempDir(), "snapshot-*.badger")
 		require.NoError(t, err)
-		err = newBdb.LoadSnapshots(context.Background(), bytes.NewReader(waBuf.Bytes()))
+		defer func(name string) {
+			_ = os.Remove(name)
+		}(tmpFile2.Name())
+		err = cloudStorage.Download(context.Background(), tmpFile2, uploadedFile2.ObjectName)
+		require.NoError(t, err)
+		err = newBdb.LoadSnapshots(context.Background(), tmpFile2)
 		require.NoError(t, err)
 
 		exists, err = newBdb.Get([]string{"key1", "key2", "key3", "key4"})
@@ -121,7 +132,13 @@ func TestSnapshots(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, true}, exists)
 	}
 
-	run(t, false) // TODO test with compression
+	t.Run("no compression", func(t *testing.T) {
+		run(t, false)
+	})
+
+	t.Run("compression", func(t *testing.T) {
+		run(t, true)
+	})
 }
 
 func createMinioResource(
@@ -239,24 +256,27 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (
 	return minioClient, cloudStorage
 }
 
-type hasherImpl struct {
-	nodeID          uint32
-	numberOfNodes   uint32
-	totalHashRanges uint32
+type mockHasher struct{}
+
+func (m *mockHasher) GetKeysByHashRange(keys []string) (
+	map[uint32][]string, // itemsByHashRange
+	error,
+) {
+	mp := make(map[uint32][]string)
+	mp[0] = append(mp[0], keys...)
+	return mp, nil
 }
 
-func (h *hasherImpl) GetKeysByHashRange(keys []string) (map[uint32][]string, error) {
-	return hash.GetKeysByHashRange(keys, h.nodeID, h.numberOfNodes, h.totalHashRanges)
-}
-
-func (h *hasherImpl) GetKeysByHashRangeWithIndexes(keys []string) (map[uint32][]string, map[string]int, error) {
-	return hash.GetKeysByHashRangeWithIndexes(keys, h.nodeID, h.numberOfNodes, h.totalHashRanges)
-}
-
-func getHasher(nodeID, noOfNodes, totalHashRanges uint32) hasher {
-	return &hasherImpl{
-		nodeID:          nodeID,
-		numberOfNodes:   noOfNodes,
-		totalHashRanges: totalHashRanges,
+func (m *mockHasher) GetKeysByHashRangeWithIndexes(keys []string) (
+	map[uint32][]string, // itemsByHashRange
+	map[string]int, // indexes
+	error,
+) {
+	mp := make(map[uint32][]string)
+	indexes := make(map[string]int, len(keys))
+	for i, key := range keys {
+		mp[0] = append(mp[0], key)
+		indexes[key] = i
 	}
+	return mp, indexes, nil
 }

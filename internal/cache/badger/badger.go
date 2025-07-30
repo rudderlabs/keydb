@@ -184,11 +184,11 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 // CreateSnapshots writes the cache contents to the provided writers
 // TODO CreateSnapshots should take an optional "since" parameter that the node service that infer from the filenames on S3
 // Otherwise the current "since" will be lost after a node restart.
-func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, error) {
+func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, map[uint32]bool, error) {
 	c.snapshottingLock.Lock()
 	if c.snapshotting {
 		c.snapshottingLock.Unlock()
-		return 0, ErrSnapshotInProgress
+		return 0, nil, ErrSnapshotInProgress
 	}
 
 	since := c.snapshotSince
@@ -196,9 +196,44 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 	c.snapshottingLock.Unlock()
 
 	hashRangesMap := make(map[uint32]struct{})
+	// we need to know which hash ranges are being written to, as buffers will have zstd footer in case compression is enabled
+	// so we can't use the buff.Len() to check if the writer has data
+	hasData := make(map[uint32]bool)
 	for hashRange := range w {
 		hashRangesMap[hashRange] = struct{}{}
+		hasData[hashRange] = false
 	}
+
+	// Create synchronized writers for each hash range
+	type lockedWriter struct {
+		mu     sync.Mutex
+		writer io.Writer
+		closer io.Closer // for zstd writers
+	}
+	writers := make(map[uint32]*lockedWriter)
+	for hr := range w {
+		lw := &lockedWriter{}
+		if c.compress {
+			zw := zstd.NewWriterLevel(w[hr], c.compressionLevel)
+			lw.writer = zw
+			lw.closer = zw
+		} else {
+			lw.writer = w[hr]
+			if wc, ok := w[hr].(io.Closer); ok {
+				lw.closer = wc
+			}
+		}
+		writers[hr] = lw
+	}
+
+	// Ensure writers are closed at the end
+	defer func() {
+		for _, lw := range writers {
+			if lw.closer != nil {
+				_ = lw.closer.Close()
+			}
+		}
+	}()
 
 	var maxVersion uint64
 	stream := c.cache.NewStream()
@@ -248,25 +283,23 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 				// Only include if we have a writer for this hash range
 				if _, exists := w[hashRange32]; exists {
 					kvsByHashRange[hashRange32] = append(kvsByHashRange[hashRange32], kv)
+					hasData[hashRange32] = true
 				}
 			}
 		}
 
 		// Write to appropriate writers by hash range
 		for hashRange, kvs := range kvsByHashRange {
-			var writer io.Writer
-			if c.compress {
-				writer = zstd.NewWriterLevel(w[hashRange], c.compressionLevel)
-			} else {
-				writer = w[hashRange]
-			}
+			lw := writers[hashRange]
 
+			lw.mu.Lock()
 			// Create a new KVList for this hash range
 			rangeList := &pb.KVList{Kv: kvs}
 
-			if err := c.writeTo(rangeList, writer); err != nil {
+			if err := c.writeTo(rangeList, lw.writer); err != nil {
 				return fmt.Errorf("failed to write to hash range %d: %w", hashRange, err)
 			}
+			lw.mu.Unlock()
 		}
 
 		return nil
@@ -274,7 +307,7 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 
 	err := stream.Orchestrate(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create snapshot: %w", err)
+		return 0, nil, fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
 	c.snapshottingLock.Lock()
@@ -282,7 +315,7 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 	c.snapshotting = false
 	c.snapshottingLock.Unlock()
 
-	return since, nil
+	return since, hasData, nil
 }
 
 // LoadSnapshots reads the cache contents from the provided readers
@@ -390,16 +423,6 @@ func (c *Cache) getKey(key string, hashRange uint32) []byte {
 }
 
 func (c *Cache) writeTo(list *pb.KVList, w io.Writer) (err error) {
-	wc, ok := w.(io.WriteCloser)
-	if ok {
-		defer func() {
-			closeErr := wc.Close()
-			if err == nil {
-				err = closeErr
-			}
-		}()
-	}
-
 	if err = binary.Write(w, binary.LittleEndian, uint64(proto.Size(list))); err != nil {
 		return
 	}
