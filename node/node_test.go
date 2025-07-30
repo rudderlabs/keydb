@@ -78,7 +78,8 @@ func TestSimple(t *testing.T) {
 
 		cancel()
 		node0.Close()
-		// TODO: add test without the path change to test that it loads fine from disk as well if there is nothing on Cloud Storage
+		// TODO: add test without the path change to test that it loads fine from disk as well if there is nothing
+		// on Cloud Storage
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir()) // Force a path change, the data will be loaded from Cloud Storage
 
 		// Let's start again from scratch to see if the data is properly loaded from the snapshots
@@ -182,8 +183,10 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
 		// Scale down by removing node1. Then node0 should pick up all keys.
-		// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
-		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
+		// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node
+		// then it will be node2 and the clusterSize will be 3
+		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't
+		// remove node0, you have to remove node1
 		require.NoError(t, operator.CreateSnapshots(ctx))
 		require.NoError(t, operator.Scale(ctx, node0Address))
 		require.NoError(t, operator.ScaleComplete(ctx))
@@ -292,8 +295,10 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false, true}, exists)
 
 		// Scale down by removing node1 and node2. Then node0 should pick up all keys.
-		// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node then it will be node2 and the clusterSize will be 3
-		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove node0, you have to remove node1
+		// WARNING: when scaling up you can only add nodes to the right e.g. if the clusterSize is 2, and you add a node
+		// then it will be node2 and the clusterSize will be 3
+		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove
+		// node0, you have to remove node1
 		require.NoError(t, operator.CreateSnapshots(ctx))
 		require.NoError(t, operator.Scale(ctx, node0Address))
 		require.NoError(t, operator.ScaleComplete(ctx))
@@ -369,7 +374,8 @@ func TestIncrementalSnapshots(t *testing.T) {
 
 		cancel()
 		node0.Close()
-		// TODO: add test without the path change to test that it loads fine from disk as well if there is nothing on Cloud Storage
+		// TODO: add test without the path change to test that it loads fine from disk as well if there is nothing
+		// on Cloud Storage
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir()) // Force a path change, the data will be loaded from Cloud Storage
 
 		// Let's start again from scratch to see if the data is properly loaded from the snapshots
@@ -580,7 +586,9 @@ func getContents(ctx context.Context, bucket, prefix string, client *minio.Clien
 	return contents, nil
 }
 
-func requireExpectedFiles(ctx context.Context, t *testing.T, bucket, prefix string, client *minio.Client, expectedFiles ...*regexp.Regexp) {
+func requireExpectedFiles(
+	ctx context.Context, t *testing.T, bucket, prefix string, client *minio.Client, expectedFiles ...*regexp.Regexp,
+) {
 	t.Helper()
 	files, err := getContents(ctx, bucket, prefix, client)
 	require.NoError(t, err)

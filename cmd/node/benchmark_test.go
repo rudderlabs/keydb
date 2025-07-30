@@ -145,7 +145,9 @@ func (m *mockedFilemanagerSession) Next() (fileObjects []*filemanager.FileInfo, 
 
 type mockedCloudStorage struct{}
 
-func (m *mockedCloudStorage) Download(_ context.Context, _ io.WriterAt, _ string, _ ...filemanager.DownloadOption) error {
+func (m *mockedCloudStorage) Download(
+	_ context.Context, _ io.WriterAt, _ string, _ ...filemanager.DownloadOption,
+) error {
 	return nil
 }
 

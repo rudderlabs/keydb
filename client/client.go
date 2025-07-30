@@ -149,17 +149,33 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 }
 
 func (c *Client) initMetrics() {
-	c.metrics.getReqCount = c.stats.NewTaggedStat("keydb_client_req_total", stats.CountType, stats.Tags{"method": "get"})
-	c.metrics.getReqLatency = c.stats.NewTaggedStat("keydb_client_req_latency_seconds", stats.TimerType, stats.Tags{"method": "get"})
-	c.metrics.getReqFailures = c.stats.NewTaggedStat("keydb_client_req_failures_total", stats.CountType, stats.Tags{"method": "get"})
-	c.metrics.getReqRetries = c.stats.NewTaggedStat("keydb_client_req_retries_total", stats.CountType, stats.Tags{"method": "get"})
+	c.metrics.getReqCount = c.stats.NewTaggedStat("keydb_client_req_total", stats.CountType, stats.Tags{
+		"method": "get",
+	})
+	c.metrics.getReqLatency = c.stats.NewTaggedStat("keydb_client_req_latency_seconds", stats.TimerType, stats.Tags{
+		"method": "get",
+	})
+	c.metrics.getReqFailures = c.stats.NewTaggedStat("keydb_client_req_failures_total", stats.CountType, stats.Tags{
+		"method": "get",
+	})
+	c.metrics.getReqRetries = c.stats.NewTaggedStat("keydb_client_req_retries_total", stats.CountType, stats.Tags{
+		"method": "get",
+	})
 	c.metrics.getKeysQueried = c.stats.NewStat("keydb_client_get_keys_queried_total", stats.CountType)
 	c.metrics.getKeysFound = c.stats.NewStat("keydb_client_get_keys_found_total", stats.CountType)
 
-	c.metrics.putReqCount = c.stats.NewTaggedStat("keydb_client_req_count_total", stats.CountType, stats.Tags{"method": "put"})
-	c.metrics.putReqLatency = c.stats.NewTaggedStat("keydb_client_req_latency", stats.TimerType, stats.Tags{"method": "put"})
-	c.metrics.putReqFailures = c.stats.NewTaggedStat("keydb_client_req_failures_total", stats.CountType, stats.Tags{"method": "put"})
-	c.metrics.putReqRetries = c.stats.NewTaggedStat("keydb_client_req_retries_total", stats.CountType, stats.Tags{"method": "put"})
+	c.metrics.putReqCount = c.stats.NewTaggedStat("keydb_client_req_count_total", stats.CountType, stats.Tags{
+		"method": "put",
+	})
+	c.metrics.putReqLatency = c.stats.NewTaggedStat("keydb_client_req_latency_seconds", stats.TimerType, stats.Tags{
+		"method": "put",
+	})
+	c.metrics.putReqFailures = c.stats.NewTaggedStat("keydb_client_req_failures_total", stats.CountType, stats.Tags{
+		"method": "put",
+	})
+	c.metrics.putReqRetries = c.stats.NewTaggedStat("keydb_client_req_retries_total", stats.CountType, stats.Tags{
+		"method": "put",
+	})
 }
 
 // Close closes all connections
@@ -265,16 +281,25 @@ func (c *Client) get(
 				}
 
 				if err != nil {
-					c.logger.Errorn("get keys from node", logger.NewIntField("nodeId", int64(nodeID)), logger.NewIntField("attempt", int64(i+1)), obskit.Error(err))
+					c.logger.Errorn("get keys from node",
+						logger.NewIntField("nodeId", int64(nodeID)),
+						logger.NewIntField("attempt", int64(i+1)),
+						obskit.Error(err))
 				}
 
 				// If this is the last retry, return the error
 				if i == c.config.RetryCount {
 					cancel()
 					if err != nil {
-						return fmt.Errorf("failed to get keys from node %d: no retries left, err:%w", nodeID, err)
+						return fmt.Errorf(
+							"failed to get keys from node %d: no retries left, err:%w", nodeID, err)
 					}
-					return fmt.Errorf("failed to get keys from node %d, errCode %s: no retries left", nodeID, resp.ErrorCode.String())
+					if resp != nil {
+						return fmt.Errorf(
+							"failed to get keys from node %d, errCode %s: no retries left",
+							nodeID, resp.ErrorCode.String())
+					}
+					return fmt.Errorf("failed to get keys from node %d: no retries left", nodeID)
 				}
 
 				// Wait before retrying
@@ -393,7 +418,9 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 				}
 
 				if err != nil {
-					c.logger.Errorn("put keys in node", logger.NewIntField("nodeID", int64(nodeID)), logger.NewIntField("attempt", int64(i+1)), obskit.Error(err))
+					c.logger.Errorn("put keys in node",
+						logger.NewIntField("nodeID", int64(nodeID)),
+						logger.NewIntField("attempt", int64(i+1)), obskit.Error(err))
 				}
 
 				// If this is the last retry, return the error
@@ -402,7 +429,11 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 					if err != nil {
 						return fmt.Errorf("failed to get keys from node %d: no retries left, err: %w", nodeID, err)
 					}
-					return fmt.Errorf("failed to get keys from node %d, errCode %s: no retries left", nodeID, resp.ErrorCode.String())
+					if resp != nil {
+						return fmt.Errorf("failed to get keys from node %d, errCode %s: no retries left",
+							nodeID, resp.ErrorCode.String())
+					}
+					return fmt.Errorf("failed to get keys from node %d: no retries left", nodeID)
 				}
 
 				// Wait before retrying
