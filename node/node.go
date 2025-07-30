@@ -114,7 +114,8 @@ type Cache interface {
 	// RunGarbageCollection is designed to do GC while the cache is online
 	RunGarbageCollection()
 
-	// Close releases any resources associated with the cache and ensures proper cleanup. Returns an error if the operation fails.
+	// Close releases any resources associated with the cache and ensures proper cleanup.
+	// Returns an error if the operation fails.
 	Close() error
 }
 
@@ -475,7 +476,9 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 
 	// If a specific node ID was requested, check if it matches this node
 	if req.NodeId != 0 && req.NodeId != s.config.NodeID {
-		return nil, status.Errorf(codes.InvalidArgument, "node ID mismatch: requested %d, this node is %d", req.NodeId, s.config.NodeID)
+		return nil, status.Errorf(codes.InvalidArgument,
+			"node ID mismatch: requested %d, this node is %d", req.NodeId, s.config.NodeID,
+		)
 	}
 
 	// Get hash ranges for this node
@@ -616,11 +619,11 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 }
 
 // CreateSnapshots implements the CreateSnapshots RPC method
-// TODO FIX "snapshot already in progress" error when context gets canceled (e.g. if client calling operator cancels req)
-// and tail of the file (i.e. remove expired from head and append new entries).
-// Then once a minute we can upload the whole file to S3.
-// The file that we upload could be compressed, for example by using zstd with dictionaries.
-func (s *Service) CreateSnapshots(ctx context.Context, req *pb.CreateSnapshotsRequest) (*pb.CreateSnapshotsResponse, error) {
+// TODO FIX "snapshot already in progress" error when context gets canceled (e.g. if client calling operator cancels
+// the request).
+func (s *Service) CreateSnapshots(
+	ctx context.Context, req *pb.CreateSnapshotsRequest,
+) (*pb.CreateSnapshotsResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

@@ -63,20 +63,32 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		WithNumVersionsToKeep(1).
 		WithNumGoroutines(conf.GetInt("BadgerDB.Dedup.NumGoroutines", 128/3)).
 		WithBloomFalsePositive(conf.GetFloat64("BadgerDB.Dedup.BloomFalsePositive", 0.000001)).
-		WithIndexCacheSize(conf.GetInt64Var(16*bytesize.MB, 1, "BadgerDB.Dedup.indexCacheSize", "BadgerDB.indexCacheSize")).
-		WithValueLogFileSize(conf.GetInt64Var(1*bytesize.MB, 1, "BadgerDB.Dedup.valueLogFileSize", "BadgerDB.valueLogFileSize")).
+		WithIndexCacheSize(conf.GetInt64Var(
+			16*bytesize.MB, 1, "BadgerDB.Dedup.indexCacheSize", "BadgerDB.indexCacheSize",
+		)).
+		WithValueLogFileSize(conf.GetInt64Var(
+			1*bytesize.MB, 1, "BadgerDB.Dedup.valueLogFileSize", "BadgerDB.valueLogFileSize",
+		)).
 		WithBlockSize(conf.GetIntVar(int(4*bytesize.KB), 1, "BadgerDB.Dedup.blockSize", "BadgerDB.blockSize")).
 		WithMemTableSize(conf.GetInt64Var(20*bytesize.MB, 1, "BadgerDB.Dedup.memTableSize", "BadgerDB.memTableSize")).
 		WithNumMemtables(conf.GetIntVar(5, 1, "BadgerDB.Dedup.numMemtable", "BadgerDB.numMemtable")).
-		WithNumLevelZeroTables(conf.GetIntVar(5, 1, "BadgerDB.Dedup.numLevelZeroTables", "BadgerDB.numLevelZeroTables")).
-		WithNumLevelZeroTablesStall(conf.GetIntVar(10, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall")).
+		WithNumLevelZeroTables(conf.GetIntVar(
+			5, 1, "BadgerDB.Dedup.numLevelZeroTables", "BadgerDB.numLevelZeroTables",
+		)).
+		WithNumLevelZeroTablesStall(conf.GetIntVar(
+			10, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall",
+		)).
 		WithBaseTableSize(conf.GetInt64Var(1*bytesize.MB, 1, "BadgerDB.Dedup.baseTableSize", "BadgerDB.baseTableSize")).
 		WithBaseLevelSize(conf.GetInt64Var(5*bytesize.MB, 1, "BadgerDB.Dedup.baseLevelSize", "BadgerDB.baseLevelSize")).
-		WithLevelSizeMultiplier(conf.GetIntVar(10, 1, "BadgerDB.Dedup.levelSizeMultiplier", "BadgerDB.levelSizeMultiplier")).
+		WithLevelSizeMultiplier(conf.GetIntVar(
+			10, 1, "BadgerDB.Dedup.levelSizeMultiplier", "BadgerDB.levelSizeMultiplier",
+		)).
 		WithMaxLevels(conf.GetIntVar(7, 1, "BadgerDB.Dedup.maxLevels", "BadgerDB.maxLevels")).
 		// Cannot have 1 compactor. Need at least 2
 		WithNumCompactors(conf.GetIntVar(2, 1, "BadgerDB.Dedup.numCompactors", "BadgerDB.numCompactors")).
-		WithValueThreshold(conf.GetInt64Var(10*bytesize.B, 1, "BadgerDB.Dedup.valueThreshold", "BadgerDB.valueThreshold")).
+		WithValueThreshold(conf.GetInt64Var(
+			10*bytesize.B, 1, "BadgerDB.Dedup.valueThreshold", "BadgerDB.valueThreshold",
+		)).
 		WithSyncWrites(conf.GetBoolVar(false, "BadgerDB.Dedup.syncWrites", "BadgerDB.syncWrites")).
 		WithBlockCacheSize(conf.GetInt64Var(0, 1, "BadgerDB.Dedup.blockCacheSize", "BadgerDB.blockCacheSize")).
 		WithDetectConflicts(conf.GetBoolVar(false, "BadgerDB.Dedup.detectConflicts", "BadgerDB.detectConflicts"))
@@ -94,7 +106,9 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 	if compress {
 		compressionLevel = conf.GetInt("BadgerDB.Dedup.CompressionLevel", defaultCompressionLevel)
 		if compressionLevel < 1 || compressionLevel > 20 {
-			log.Warnn("BadgerDB.Dedup.CompressionLevel must be >= 1 and <= 20", logger.NewIntField("level", int64(compressionLevel)))
+			log.Warnn("BadgerDB.Dedup.CompressionLevel must be >= 1 and <= 20",
+				logger.NewIntField("level", int64(compressionLevel)),
+			)
 			compressionLevel = defaultCompressionLevel
 		}
 		log.Infon("BadgerDB.Dedup.Compress is enabled, using zstd-cgo compression for snapshots",
@@ -182,7 +196,8 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 }
 
 // CreateSnapshots writes the cache contents to the provided writers
-// TODO CreateSnapshots should take an optional "since" parameter that the node service that infer from the filenames on S3
+// TODO CreateSnapshots should take an optional "since" parameter that the node service that infer
+// from the filenames on S3.
 // Otherwise the current "since" will be lost after a node restart.
 func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, map[uint32]bool, error) {
 	c.snapshottingLock.Lock()
@@ -196,8 +211,8 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 	c.snapshottingLock.Unlock()
 
 	hashRangesMap := make(map[uint32]struct{})
-	// we need to know which hash ranges are being written to, as buffers will have zstd footer in case compression is enabled
-	// so we can't use the buff.Len() to check if the writer has data
+	// we need to know which hash ranges are being written to, as buffers will have zstd footer in case compression is
+	// enabled, so we can't use the buff.Len() to check if the writer has data
 	hasData := make(map[uint32]bool)
 	for hashRange := range w {
 		hashRangesMap[hashRange] = struct{}{}

@@ -94,13 +94,17 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	nodeConfig := node.Config{
-		NodeID:                    uint32(nodeID),
-		ClusterSize:               uint32(conf.GetInt("clusterSize", 1)),
-		TotalHashRanges:           uint32(conf.GetInt("totalHashRanges", node.DefaultTotalHashRanges)),
-		MaxFilesToList:            conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
-		SnapshotInterval:          conf.GetDuration("snapshotInterval", 0, time.Nanosecond), // node.DefaultSnapshotInterval will be used
-		GarbageCollectionInterval: conf.GetDuration("gcInterval", 0, time.Nanosecond),       // node.DefaultGarbageCollectionInterval will be used
-		Addresses:                 strings.Split(nodeAddresses, ","),
+		NodeID:          uint32(nodeID),
+		ClusterSize:     uint32(conf.GetInt("clusterSize", 1)),
+		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", node.DefaultTotalHashRanges)),
+		MaxFilesToList:  conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
+		SnapshotInterval: conf.GetDuration("snapshotInterval",
+			0, time.Nanosecond, // node.DefaultSnapshotInterval will be used
+		),
+		GarbageCollectionInterval: conf.GetDuration("gcInterval", // node.DefaultGarbageCollectionInterval will be used
+			0, time.Nanosecond,
+		),
+		Addresses: strings.Split(nodeAddresses, ","),
 	}
 
 	port := conf.GetInt("port", 50051)
