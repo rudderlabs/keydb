@@ -43,7 +43,7 @@ func TestSnapshots(t *testing.T) {
 		conf := config.New()
 		conf.Set("BadgerDB.Dedup.Compress", compress)
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		bdb, err := New(&mockHasher{}, conf, logger.NOP)
+		bdb, err := New(conf, logger.NOP)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			require.NoError(t, bdb.Close())
@@ -97,7 +97,7 @@ func TestSnapshots(t *testing.T) {
 
 		// Load 1st snapshot into a new BadgerDB
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		newBdb, err := New(&mockHasher{}, conf, logger.NOP)
+		newBdb, err := New(conf, logger.NOP)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			require.NoError(t, newBdb.Close())
@@ -254,29 +254,4 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (
 	require.NoError(t, err)
 
 	return minioClient, cloudStorage
-}
-
-type mockHasher struct{}
-
-func (m *mockHasher) GetKeysByHashRange(keys []string) (
-	map[uint32][]string, // itemsByHashRange
-	error,
-) {
-	mp := make(map[uint32][]string)
-	mp[0] = append(mp[0], keys...)
-	return mp, nil
-}
-
-func (m *mockHasher) GetKeysByHashRangeWithIndexes(keys []string) (
-	map[uint32][]string, // itemsByHashRange
-	map[string]int, // indexes
-	error,
-) {
-	mp := make(map[uint32][]string)
-	indexes := make(map[string]int, len(keys))
-	for i, key := range keys {
-		mp[0] = append(mp[0], key)
-		indexes[key] = i
-	}
-	return mp, indexes, nil
 }

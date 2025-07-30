@@ -178,7 +178,7 @@ func NewService(
 	}
 
 	var err error
-	service.cache, err = badger.New(service, kitConf, log.Child("badger"))
+	service.cache, err = badger.New(kitConf, log.Child("badger"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
