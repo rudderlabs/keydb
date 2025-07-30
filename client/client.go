@@ -292,14 +292,17 @@ func (c *Client) get(
 					cancel()
 					if err != nil {
 						return fmt.Errorf(
-							"failed to get keys from node %d: no retries left, err:%w", nodeID, err)
+							"failed to get keys from node %d: no retries left, err: %w", nodeID, err)
 					}
 					if resp != nil {
 						return fmt.Errorf(
 							"failed to get keys from node %d, errCode %s: no retries left",
 							nodeID, resp.ErrorCode.String())
 					}
-					return fmt.Errorf("failed to get keys from node %d: no retries left", nodeID)
+					return fmt.Errorf(
+						"critical: failed to get keys from node %d: "+
+							"no retries left while both error and response are nil", nodeID,
+					)
 				}
 
 				// Wait before retrying
@@ -427,13 +430,16 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 				if i == c.config.RetryCount {
 					cancel()
 					if err != nil {
-						return fmt.Errorf("failed to get keys from node %d: no retries left, err: %w", nodeID, err)
+						return fmt.Errorf("failed to put keys from node %d: no retries left, err: %w", nodeID, err)
 					}
 					if resp != nil {
-						return fmt.Errorf("failed to get keys from node %d, errCode %s: no retries left",
+						return fmt.Errorf("failed to put keys from node %d, errCode %s: no retries left",
 							nodeID, resp.ErrorCode.String())
 					}
-					return fmt.Errorf("failed to get keys from node %d: no retries left", nodeID)
+					return fmt.Errorf(
+						"critical: failed to put keys from node %d: "+
+							"no retries left while both error and response are nil", nodeID,
+					)
 				}
 
 				// Wait before retrying
