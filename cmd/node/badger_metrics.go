@@ -4,15 +4,18 @@ import (
 	"expvar"
 	"strconv"
 
+	"github.com/rudderlabs/rudder-go-kit/logger"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 type BadgerMetricsCollector struct {
 	descs   map[string]*prometheus.Desc
 	metrics map[string]string
+	logger  logger.Logger
 }
 
-type MetricWithValue struct {
+type metricWithValue struct {
 	Value  float64
 	Labels map[string]string
 }
@@ -22,101 +25,103 @@ const (
 	counter = "Counter"
 )
 
+// NewBadgerMetricsCollector creates a new BadgerMetricsCollector
+// It initializes the collector with predefined metrics that are commonly used in BadgerDB monitoring.
 // ref: https://github.com/hypermodeinc/badger/blob/main/y/metrics.go
-func NewBadgerMetricsCollector() *BadgerMetricsCollector {
+func NewBadgerMetricsCollector(log logger.Logger) *BadgerMetricsCollector {
 	descs := map[string]*prometheus.Desc{
 		"badger_compaction_current_num_lsm": prometheus.NewDesc(
-			"badger_compaction_current_num_lsm",
+			"badger_lsm_compaction_current_num_total",
 			"Number of LSM compactions currently running",
 			nil, nil,
 		),
 		"badger_get_num_lsm": prometheus.NewDesc(
-			"badger_get_num_lsm",
+			"badger_lsm_get_num_total",
 			"Number of LSM gets",
 			[]string{"level"}, nil,
 		),
 		"badger_get_num_memtable": prometheus.NewDesc(
-			"badger_get_num_memtable",
+			"badger_memtable_get_num_total",
 			"Number of memtable gets",
 			nil, nil,
 		),
 		"badger_get_num_user": prometheus.NewDesc(
-			"badger_get_num_user",
+			"badger_user_get_num_total",
 			"Number of user gets",
 			nil, nil,
 		),
 		"badger_get_with_result_num_user": prometheus.NewDesc(
-			"badger_get_with_result_num_user",
+			"badger_user_get_with_result_num_total",
 			"Number of user gets with results",
 			nil, nil,
 		),
 		"badger_hit_num_lsm_bloom_filter": prometheus.NewDesc(
-			"badger_hit_num_lsm_bloom_filter",
+			"badger_hit_num_lsm_bloom_filter_total",
 			"Number of LSM bloom filter hits",
 			[]string{"level"}, nil,
 		),
 		"badger_iterator_num_user": prometheus.NewDesc(
-			"badger_iterator_num_user",
+			"badger_iterator_num_user_total",
 			"Number of user iterators",
 			nil, nil,
 		),
 		"badger_put_num_user": prometheus.NewDesc(
-			"badger_put_num_user",
+			"badger_user_put_num_total",
 			"Number of user puts",
 			nil, nil,
 		),
 		"badger_read_bytes_lsm": prometheus.NewDesc(
-			"badger_read_bytes_lsm",
+			"badger_lsm_read_bytes",
 			"Bytes read from LSM",
 			nil, nil,
 		),
 		"badger_size_bytes_lsm": prometheus.NewDesc(
-			"badger_size_bytes_lsm",
+			"badger_lsm_size_bytes",
 			"Size of LSM in bytes",
 			[]string{"path"}, nil, // With labels if needed
 		),
 		"badger_write_bytes_compaction": prometheus.NewDesc(
-			"badger_write_bytes_compaction",
+			"badger_compaction_write_bytes",
 			"Bytes written during compaction",
 			[]string{"level"}, nil, // With labels
 		),
 		"badger_write_bytes_l0": prometheus.NewDesc(
-			"badger_write_bytes_l0",
+			"badger_l0_write_bytes",
 			"Bytes written to L0",
 			nil, nil,
 		),
 		"badger_write_bytes_user": prometheus.NewDesc(
-			"badger_write_bytes_user",
+			"badger_user_write_bytes",
 			"Bytes written by user",
 			nil, nil,
 		),
 		"badger_write_pending_num_memtable": prometheus.NewDesc(
-			"badger_write_pending_num_memtable",
+			"badger_pending_num_memtable_write_total",
 			"Number of pending writes in memtable",
 			[]string{"path"}, nil, // With labels
 		),
 		"badger_size_bytes_vlog": prometheus.NewDesc(
-			"badger_size_bytes_vlog",
+			"badger_vlog_size_bytes",
 			"Size of value log",
 			[]string{"path"}, nil,
 		),
 		"badger_read_num_vlog": prometheus.NewDesc(
-			"badger_read_num_vlog",
+			"badger_read_num_vlog_total",
 			"cumulative number of reads from vlog",
 			nil, nil,
 		),
 		"badger_write_num_vlog": prometheus.NewDesc(
-			"badger_write_num_vlog",
+			"badger_write_num_vlog_total",
 			"cumulative number of writes to vlog",
 			nil, nil,
 		),
 		"badger_read_bytes_vlog": prometheus.NewDesc(
-			"badger_read_bytes_vlog",
+			"badger_read_vlog_bytes",
 			"cumulative number of bytes read from vlog",
 			nil, nil,
 		),
 		"badger_write_bytes_vlog": prometheus.NewDesc(
-			"badger_write_bytes_vlog",
+			"badger_write_vlog_bytes",
 			"cumulative number of bytes written to vlog",
 			nil, nil,
 		),
@@ -145,6 +150,7 @@ func NewBadgerMetricsCollector() *BadgerMetricsCollector {
 	return &BadgerMetricsCollector{
 		descs:   descs,
 		metrics: metrics,
+		logger:  log,
 	}
 }
 
@@ -159,7 +165,7 @@ func (c *BadgerMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 	// and create the appropriate metric type
 	for name, desc := range c.descs {
 		// get value from expvar
-		metrics := getExpvarValueWithLabels(name)
+		metrics := c.getExpvarValueWithLabels(name)
 		for _, m := range metrics {
 			var labelValues []string
 			if m.Labels != nil && m.Labels["key"] != "" {
@@ -167,13 +173,14 @@ func (c *BadgerMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 			switch c.metrics[name] {
 			case counter:
-				// treat as Counter or Gauge depending on behavior
+				// treat as Counter
 				ch <- prometheus.MustNewConstMetric(desc, prometheus.CounterValue, m.Value, labelValues...)
 			case gauge:
 				// treat as Gauge
 				ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, m.Value, labelValues...)
 			default:
-				// Default to Gauge
+				// default to Gauge
+				c.logger.Warnn("unknown metric type", logger.NewStringField("metricName", name))
 				ch <- prometheus.MustNewConstMetric(desc, prometheus.GaugeValue, m.Value, labelValues...)
 			}
 		}
@@ -181,19 +188,19 @@ func (c *BadgerMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // If you need to handle map-type metrics like badger_size_bytes_lsm
-func getExpvarValueWithLabels(name string) []MetricWithValue {
+func (c *BadgerMetricsCollector) getExpvarValueWithLabels(name string) []metricWithValue {
 	v := expvar.Get(name)
 	if v == nil {
 		return nil
 	}
 
-	var result []MetricWithValue
+	var result []metricWithValue
 
 	switch val := v.(type) {
 	case *expvar.Int:
-		result = append(result, MetricWithValue{Value: float64(val.Value())})
+		result = append(result, metricWithValue{Value: float64(val.Value())})
 	case *expvar.Float:
-		result = append(result, MetricWithValue{Value: val.Value()})
+		result = append(result, metricWithValue{Value: val.Value()})
 	case *expvar.Map:
 		val.Do(func(kv expvar.KeyValue) {
 			var value float64
@@ -205,14 +212,15 @@ func getExpvarValueWithLabels(name string) []MetricWithValue {
 				value = f
 			}
 
-			result = append(result, MetricWithValue{
+			result = append(result, metricWithValue{
 				Value:  value,
 				Labels: map[string]string{"key": kv.Key},
 			})
 		})
 	default:
+		c.logger.Warnn("unknown dtype for value", logger.NewStringField("metricName", name))
 		if f, err := strconv.ParseFloat(v.String(), 64); err == nil {
-			result = append(result, MetricWithValue{Value: f})
+			result = append(result, metricWithValue{Value: f})
 		}
 	}
 

@@ -46,10 +46,10 @@ func main() {
 		stats.WithServiceVersion(releaseInfo.Version),
 		stats.WithDefaultHistogramBuckets(defaultHistogramBuckets),
 	}
-	if conf.GetBool("enableBadgerMetric", true) {
+	if conf.GetBool("enableBadgerMetrics", true) {
 		registerer := prometheus.DefaultRegisterer
 		gatherer := prometheus.DefaultGatherer
-		badgerMetrics := NewBadgerMetricsCollector()
+		badgerMetrics := NewBadgerMetricsCollector(log.Child("badger-metrics-exporter"))
 		registerer.MustRegister(badgerMetrics)
 		statsOptions = append(statsOptions, stats.WithPrometheusRegistry(registerer, gatherer))
 	}
