@@ -77,12 +77,14 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		WithMemTableSize(conf.GetInt64Var(64*bytesize.MB, 1, "BadgerDB.Dedup.memTableSize", "BadgerDB.memTableSize")).
 		WithNumMemtables(conf.GetIntVar(5, 1, "BadgerDB.Dedup.numMemtable", "BadgerDB.numMemtable")).
 		WithNumLevelZeroTables(conf.GetIntVar(
-			5, 1, "BadgerDB.Dedup.numLevelZeroTables", "BadgerDB.numLevelZeroTables",
+			10, 1, "BadgerDB.Dedup.numLevelZeroTables", "BadgerDB.numLevelZeroTables",
 		)).
 		WithNumLevelZeroTablesStall(conf.GetIntVar(
 			40, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall",
 		)).
-		WithBaseTableSize(conf.GetInt64Var(16*bytesize.MB, 1, "BadgerDB.Dedup.baseTableSize", "BadgerDB.baseTableSize")).
+		WithBaseTableSize(conf.GetInt64Var(
+			16*bytesize.MB, 1, "BadgerDB.Dedup.baseTableSize", "BadgerDB.baseTableSize",
+		)).
 		WithBaseLevelSize(conf.GetInt64Var(1*bytesize.GB, 1, "BadgerDB.Dedup.baseLevelSize", "BadgerDB.baseLevelSize")).
 		WithLevelSizeMultiplier(conf.GetIntVar(
 			5, 1, "BadgerDB.Dedup.levelSizeMultiplier", "BadgerDB.levelSizeMultiplier",

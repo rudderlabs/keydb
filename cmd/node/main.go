@@ -108,7 +108,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		GarbageCollectionInterval: conf.GetDuration("gcInterval", // node.DefaultGarbageCollectionInterval will be used
 			0, time.Nanosecond,
 		),
-		Addresses: strings.Split(nodeAddresses, ","),
+		Addresses:                 strings.Split(nodeAddresses, ","),
 		LogTableStructureDuration: conf.GetDuration("logTableStructureDuration", 10, time.Minute),
 	}
 
