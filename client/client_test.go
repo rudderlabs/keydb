@@ -18,193 +18,6 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
-// mockNodeServiceServer implements the NodeServiceServer interface for testing
-type mockNodeServiceServer struct {
-	proto.UnimplementedNodeServiceServer
-	getFunc           func(context.Context, *proto.GetRequest) (*proto.GetResponse, error)
-	putFunc           func(context.Context, *proto.PutRequest) (*proto.PutResponse, error)
-	getNodeInfoFunc   func(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error)
-	scaleFunc         func(context.Context, *proto.ScaleRequest) (*proto.ScaleResponse, error)
-	scaleCompleteFunc func(context.Context, *proto.ScaleCompleteRequest) (*proto.ScaleCompleteResponse, error)
-	createSnapFunc    func(context.Context, *proto.CreateSnapshotsRequest) (*proto.CreateSnapshotsResponse, error)
-	loadSnapFunc      func(context.Context, *proto.LoadSnapshotsRequest) (*proto.LoadSnapshotsResponse, error)
-	clusterSize       uint32
-	nodesAddresses    []string
-}
-
-func (m *mockNodeServiceServer) Get(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
-	if m.getFunc != nil {
-		return m.getFunc(ctx, req)
-	}
-
-	// Default implementation
-	exists := make([]bool, len(req.Keys))
-	for i := range req.Keys {
-		exists[i] = true // Default to all keys existing
-	}
-
-	return &proto.GetResponse{
-		Exists:         exists,
-		ErrorCode:      proto.ErrorCode_NO_ERROR,
-		ClusterSize:    m.clusterSize,
-		NodesAddresses: m.nodesAddresses,
-	}, nil
-}
-
-func (m *mockNodeServiceServer) Put(ctx context.Context, req *proto.PutRequest) (*proto.PutResponse, error) {
-	if m.putFunc != nil {
-		return m.putFunc(ctx, req)
-	}
-
-	// Default implementation
-	return &proto.PutResponse{
-		Success:        true,
-		ErrorCode:      proto.ErrorCode_NO_ERROR,
-		ClusterSize:    m.clusterSize,
-		NodesAddresses: m.nodesAddresses,
-	}, nil
-}
-
-func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *proto.GetNodeInfoRequest) (
-	*proto.GetNodeInfoResponse, error,
-) {
-	if m.getNodeInfoFunc != nil {
-		return m.getNodeInfoFunc(ctx, req)
-	}
-
-	return &proto.GetNodeInfoResponse{}, nil
-}
-
-func (m *mockNodeServiceServer) Scale(ctx context.Context, req *proto.ScaleRequest) (*proto.ScaleResponse, error) {
-	if m.scaleFunc != nil {
-		return m.scaleFunc(ctx, req)
-	}
-
-	return &proto.ScaleResponse{Success: true}, nil
-}
-
-func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *proto.ScaleCompleteRequest) (
-	*proto.ScaleCompleteResponse, error,
-) {
-	if m.scaleCompleteFunc != nil {
-		return m.scaleCompleteFunc(ctx, req)
-	}
-
-	return &proto.ScaleCompleteResponse{Success: true}, nil
-}
-
-func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.CreateSnapshotsRequest) (
-	*proto.CreateSnapshotsResponse, error,
-) {
-	if m.createSnapFunc != nil {
-		return m.createSnapFunc(ctx, req)
-	}
-
-	return &proto.CreateSnapshotsResponse{Success: true}, nil
-}
-
-func (m *mockNodeServiceServer) LoadSnapshots(ctx context.Context, req *proto.LoadSnapshotsRequest) (
-	*proto.LoadSnapshotsResponse, error,
-) {
-	if m.loadSnapFunc != nil {
-		return m.loadSnapFunc(ctx, req)
-	}
-
-	return &proto.LoadSnapshotsResponse{Success: true}, nil
-}
-
-func startMockServer(t *testing.T, server *mockNodeServiceServer, address string) func() {
-	t.Helper()
-
-	// Create a TCP listener on the specified address.
-	lis, err := net.Listen("tcp", address)
-	require.NoError(t, err)
-
-	s := grpc.NewServer()
-	proto.RegisterNodeServiceServer(s, server)
-
-	go func() {
-		if err := s.Serve(lis); err != nil {
-			panic(fmt.Sprintf("Server exited with error: %v", err))
-		}
-	}()
-
-	return func() {
-		s.Stop()
-		lis.Close()
-	}
-}
-
-func createTestClientWithServers(t *testing.T, addresses []string) (*Client, func()) {
-	t.Helper()
-
-	// Create client with custom dialer for bufconn
-	client, err := NewClient(Config{
-		Addresses:       addresses,
-		TotalHashRanges: 128,
-		RetryCount:      1,
-		RetryDelay:      time.Millisecond,
-	}, logger.NOP, WithStats(stats.NOP))
-
-	require.NoError(t, err)
-
-	// Override connections with bufconn connections
-	client.mu.Lock()
-	for i := range client.connections {
-		_ = client.connections[i].Close()
-	}
-
-	for i, addr := range addresses {
-		conn, err := grpc.NewClient(addr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		)
-		require.NoError(t, err)
-
-		client.connections[i] = conn
-		client.clients[i] = proto.NewNodeServiceClient(conn)
-	}
-	client.mu.Unlock()
-
-	return client, func() {
-		_ = client.Close()
-	}
-}
-
-func createTestClient(t *testing.T, clusterSize uint32) (*Client, func()) {
-	t.Helper()
-
-	addresses := make([]string, clusterSize)
-	for i := range addresses {
-		httpPort, err := testhelper.GetFreePort()
-		require.NoError(t, err)
-		address := fmt.Sprintf(":%d", httpPort)
-		addresses[i] = address
-	}
-
-	// Create mock servers
-	servers := make([]*mockNodeServiceServer, clusterSize)
-	for i := range addresses {
-		servers[i] = &mockNodeServiceServer{
-			clusterSize:    clusterSize,
-			nodesAddresses: addresses,
-		}
-	}
-
-	// Start mock servers
-	closers := make([]func(), len(addresses))
-	for i, server := range servers {
-		closer := startMockServer(t, server, addresses[i])
-		closers[i] = closer
-	}
-
-	client, closer := createTestClientWithServers(t, addresses)
-
-	return client, func() {
-		_ = client.Close()
-		closer()
-	}
-}
-
 func TestClient_Get(t *testing.T) {
 	t.Run("successful get", func(t *testing.T) {
 		clusterSize := 3
@@ -372,4 +185,191 @@ func TestClient_Put(t *testing.T) {
 		err = errorClient.Put(context.Background(), keys, time.Hour)
 		require.Error(t, err)
 	})
+}
+
+// mockNodeServiceServer implements the NodeServiceServer interface for testing
+type mockNodeServiceServer struct {
+	proto.UnimplementedNodeServiceServer
+	getFunc           func(context.Context, *proto.GetRequest) (*proto.GetResponse, error)
+	putFunc           func(context.Context, *proto.PutRequest) (*proto.PutResponse, error)
+	getNodeInfoFunc   func(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error)
+	scaleFunc         func(context.Context, *proto.ScaleRequest) (*proto.ScaleResponse, error)
+	scaleCompleteFunc func(context.Context, *proto.ScaleCompleteRequest) (*proto.ScaleCompleteResponse, error)
+	createSnapFunc    func(context.Context, *proto.CreateSnapshotsRequest) (*proto.CreateSnapshotsResponse, error)
+	loadSnapFunc      func(context.Context, *proto.LoadSnapshotsRequest) (*proto.LoadSnapshotsResponse, error)
+	clusterSize       uint32
+	nodesAddresses    []string
+}
+
+func (m *mockNodeServiceServer) Get(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
+	if m.getFunc != nil {
+		return m.getFunc(ctx, req)
+	}
+
+	// Default implementation
+	exists := make([]bool, len(req.Keys))
+	for i := range req.Keys {
+		exists[i] = true // Default to all keys existing
+	}
+
+	return &proto.GetResponse{
+		Exists:         exists,
+		ErrorCode:      proto.ErrorCode_NO_ERROR,
+		ClusterSize:    m.clusterSize,
+		NodesAddresses: m.nodesAddresses,
+	}, nil
+}
+
+func (m *mockNodeServiceServer) Put(ctx context.Context, req *proto.PutRequest) (*proto.PutResponse, error) {
+	if m.putFunc != nil {
+		return m.putFunc(ctx, req)
+	}
+
+	// Default implementation
+	return &proto.PutResponse{
+		Success:        true,
+		ErrorCode:      proto.ErrorCode_NO_ERROR,
+		ClusterSize:    m.clusterSize,
+		NodesAddresses: m.nodesAddresses,
+	}, nil
+}
+
+func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *proto.GetNodeInfoRequest) (
+	*proto.GetNodeInfoResponse, error,
+) {
+	if m.getNodeInfoFunc != nil {
+		return m.getNodeInfoFunc(ctx, req)
+	}
+
+	return &proto.GetNodeInfoResponse{}, nil
+}
+
+func (m *mockNodeServiceServer) Scale(ctx context.Context, req *proto.ScaleRequest) (*proto.ScaleResponse, error) {
+	if m.scaleFunc != nil {
+		return m.scaleFunc(ctx, req)
+	}
+
+	return &proto.ScaleResponse{Success: true}, nil
+}
+
+func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *proto.ScaleCompleteRequest) (
+	*proto.ScaleCompleteResponse, error,
+) {
+	if m.scaleCompleteFunc != nil {
+		return m.scaleCompleteFunc(ctx, req)
+	}
+
+	return &proto.ScaleCompleteResponse{Success: true}, nil
+}
+
+func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.CreateSnapshotsRequest) (
+	*proto.CreateSnapshotsResponse, error,
+) {
+	if m.createSnapFunc != nil {
+		return m.createSnapFunc(ctx, req)
+	}
+
+	return &proto.CreateSnapshotsResponse{Success: true}, nil
+}
+
+func (m *mockNodeServiceServer) LoadSnapshots(ctx context.Context, req *proto.LoadSnapshotsRequest) (
+	*proto.LoadSnapshotsResponse, error,
+) {
+	if m.loadSnapFunc != nil {
+		return m.loadSnapFunc(ctx, req)
+	}
+
+	return &proto.LoadSnapshotsResponse{Success: true}, nil
+}
+
+func startMockServer(t *testing.T, server *mockNodeServiceServer, address string) func() {
+	t.Helper()
+
+	// Create a TCP listener on the specified address.
+	lis, err := net.Listen("tcp", address)
+	require.NoError(t, err)
+
+	s := grpc.NewServer()
+	proto.RegisterNodeServiceServer(s, server)
+
+	go func() {
+		if err := s.Serve(lis); err != nil {
+			t.Errorf("Server exited with error: %v", err)
+		}
+	}()
+
+	return func() {
+		s.Stop()
+		_ = lis.Close()
+	}
+}
+
+func createTestClientWithServers(t *testing.T, addresses []string) (*Client, func()) {
+	t.Helper()
+
+	// Create client with custom dialer for bufconn
+	client, err := NewClient(Config{
+		Addresses:       addresses,
+		TotalHashRanges: 128,
+		RetryCount:      1,
+		RetryDelay:      time.Millisecond,
+	}, logger.NOP, WithStats(stats.NOP))
+
+	require.NoError(t, err)
+
+	// Override connections with bufconn connections
+	client.mu.Lock()
+	for i := range client.connections {
+		_ = client.connections[i].Close()
+	}
+
+	for i, addr := range addresses {
+		conn, err := grpc.NewClient(addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		require.NoError(t, err)
+
+		client.connections[i] = conn
+		client.clients[i] = proto.NewNodeServiceClient(conn)
+	}
+	client.mu.Unlock()
+
+	return client, func() {
+		_ = client.Close()
+	}
+}
+
+func createTestClient(t *testing.T, clusterSize uint32) (*Client, func()) {
+	t.Helper()
+
+	addresses := make([]string, clusterSize)
+	for i := range addresses {
+		httpPort, err := testhelper.GetFreePort()
+		require.NoError(t, err)
+		address := fmt.Sprintf(":%d", httpPort)
+		addresses[i] = address
+	}
+
+	// Create mock servers
+	servers := make([]*mockNodeServiceServer, clusterSize)
+	for i := range addresses {
+		servers[i] = &mockNodeServiceServer{
+			clusterSize:    clusterSize,
+			nodesAddresses: addresses,
+		}
+	}
+
+	// Start mock servers
+	closers := make([]func(), len(addresses))
+	for i, server := range servers {
+		closer := startMockServer(t, server, addresses[i])
+		closers[i] = closer
+	}
+
+	client, closer := createTestClientWithServers(t, addresses)
+
+	return client, func() {
+		_ = client.Close()
+		closer()
+	}
 }
