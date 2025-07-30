@@ -197,33 +197,28 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 			}
 		}
 		return bw.Flush()
-	} else {
-		err = c.cache.Update(func(txn *badger.Txn) error {
-			for hashRange, keys := range itemsByHashRange {
-				for _, key := range keys {
-					entry := badger.NewEntry(c.getKey(key, hashRange), nil)
-					if ttl > 0 {
-						entry = entry.WithTTL(c.getTTL(ttl))
-					}
-					if err := txn.SetEntry(entry); err != nil {
-						return fmt.Errorf("failed to put key %s: %w", key, err)
-					}
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
 	}
 
-	return nil
+	return c.cache.Update(func(txn *badger.Txn) error {
+		for hashRange, keys := range itemsByHashRange {
+			for _, key := range keys {
+				entry := badger.NewEntry(c.getKey(key, hashRange), nil)
+				if ttl > 0 {
+					entry = entry.WithTTL(c.getTTL(ttl))
+				}
+				if err := txn.SetEntry(entry); err != nil {
+					return fmt.Errorf("failed to put key %s: %w", key, err)
+				}
+			}
+		}
+		return nil
+	})
 }
 
 func (c *Cache) getTTL(ttl time.Duration) time.Duration {
 	if ttl > 0 && c.jitterEnabled && c.jitterDuration > 0 {
 		jitter := time.Duration(rand.Int63n(int64(c.jitterDuration)))
-		ttl = ttl + jitter
+		ttl += jitter
 	}
 	return ttl
 }
