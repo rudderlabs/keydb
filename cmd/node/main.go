@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,14 +136,22 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	var wg sync.WaitGroup
 	defer func() {
 		cancel()
-		wg.Wait()
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-ctx.Done()
-		log.Infon("Terminating service")
-		service.Close() // TODO test graceful shutdown
+		doneCh := make(chan struct{})
+		shutdownStarted := time.Now()
+		go func() {
+			wg.Wait()
+			close(doneCh)
+		}()
+		select {
+		case <-doneCh:
+			return
+		case <-time.After(conf.GetDuration("shutdownTimeout", 15, time.Second)):
+			log.Errorn("graceful termination failed", logger.NewDurationField("timeoutAfter", time.Since(shutdownStarted)))
+			fmt.Print("\n\n")
+			_ = pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+			fmt.Print("\n\n")
+			return
+		}
 	}()
 
 	// create a gRPC server with latency interceptors
@@ -202,14 +211,19 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		}
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		log.Infon("Terminating service")
+		service.Close()
+		server.GracefulStop()
+		_ = lis.Close()
+	}()
+
 	select {
 	case <-ctx.Done():
 		log.Infon("Shutting down HTTP server")
-		server.GracefulStop()
-		err := lis.Close()
-		if err != nil {
-			return err
-		}
 		return ctx.Err()
 	case err := <-serverErrCh:
 		return err
