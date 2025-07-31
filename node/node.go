@@ -105,11 +105,11 @@ type Service struct {
 
 // Cache is an interface for a key-value store with TTL support
 type Cache interface {
-	// Get returns the values associated with the keys and an error if the operation failed
-	Get(itemsByHashRange map[uint32][]string, indexes map[string]int) ([]bool, error)
+	// Get returns whether the keys exist and an error if the operation failed
+	Get(keysByHashRange map[uint32][]string, indexes map[string]int) ([]bool, error)
 
-	// Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
-	Put(itemsByHashRange map[uint32][]string, ttl time.Duration) error
+	// Put adds or updates keys inside the cache with the specified TTL and returns an error if the operation failed
+	Put(keysByHashRange map[uint32][]string, ttl time.Duration) error
 
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
@@ -402,8 +402,10 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		response.ErrorCode = pb.ErrorCode_SCALING
 		return response, nil
 	}
+
+	// Group keys by hash range
 	hashingStart := time.Now()
-	itemsByHashRange, indexes, err := hash.GetKeysByHashRangeWithIndexes(
+	keysByHashRange, indexes, err := hash.GetKeysByHashRangeWithIndexes(
 		req.Keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges,
 	)
 	if err != nil {
@@ -417,14 +419,15 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		s.logger.Errorn("Error getting hashes for keys", obskit.Error(err))
 		return response, nil
 	}
-	s.metrics.getKeysHashingDuration.Since(hashingStart)
 
-	getFromCacheStart := time.Now()
-	for hashRange, keys := range itemsByHashRange {
+	// Record metrics
+	s.metrics.getKeysHashingDuration.Since(hashingStart)
+	for hashRange, keys := range keysByHashRange {
 		s.metrics.getKeysCounters[hashRange].Count(len(keys))
 	}
 
-	existsValues, err := s.cache.Get(itemsByHashRange, indexes)
+	getFromCacheStart := time.Now()
+	existsValues, err := s.cache.Get(keysByHashRange, indexes)
 	if err != nil {
 		s.metrics.errInternalCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
@@ -453,9 +456,9 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		return resp, nil
 	}
 
+	// Group keys by hash range
 	hashingStart := time.Now()
-	// Group items by hash range
-	itemsByHashRange, err := hash.GetKeysByHashRange(
+	keysByHashRange, err := hash.GetKeysByHashRange(
 		req.Keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges,
 	)
 	if err != nil {
@@ -469,16 +472,16 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		s.logger.Errorn("Error getting hashes for keys", obskit.Error(err))
 		return resp, nil
 	}
+
+	// Record metrics
 	s.metrics.putKeysHashingDuration.Since(hashingStart)
-
-	ttl := time.Duration(req.TtlSeconds) * time.Second
-
-	putToCacheStart := time.Now()
-	for hashRange, keys := range itemsByHashRange {
+	for hashRange, keys := range keysByHashRange {
 		s.metrics.putKeysCounter[hashRange].Count(len(keys))
 	}
+
 	// Store the keys in the cache with the specified TTL
-	err = s.cache.Put(itemsByHashRange, ttl)
+	putToCacheStart := time.Now()
+	err = s.cache.Put(keysByHashRange, time.Duration(req.TtlSeconds)*time.Second)
 	if err != nil {
 		s.metrics.errInternalCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR

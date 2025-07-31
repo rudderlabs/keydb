@@ -38,7 +38,7 @@ func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, u
 }
 
 func GetKeysByHashRange(keys []string, nodeID, numberOfNodes, totalHashRanges uint32) (
-	map[uint32][]string, // itemsByHashRange
+	map[uint32][]string, // keysByHashRange
 	error,
 ) {
 	if numberOfNodes == 0 {
@@ -67,7 +67,7 @@ func GetKeysByHashRange(keys []string, nodeID, numberOfNodes, totalHashRanges ui
 }
 
 func GetKeysByHashRangeWithIndexes(keys []string, nodeID, numberOfNodes, totalHashRanges uint32) (
-	map[uint32][]string, // itemsByHashRange
+	map[uint32][]string, // keysByHashRange
 	map[string]int, // indexes
 	error,
 ) {

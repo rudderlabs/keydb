@@ -128,11 +128,11 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 }
 
 // Get returns the values associated with the keys and an error if the operation failed
-func (c *Cache) Get(itemsByHashRange map[uint32][]string, indexes map[string]int) ([]bool, error) {
+func (c *Cache) Get(keysByHashRange map[uint32][]string, indexes map[string]int) ([]bool, error) {
 	results := make([]bool, len(indexes))
 
 	err := c.cache.View(func(txn *badger.Txn) error {
-		for hashRange, keys := range itemsByHashRange {
+		for hashRange, keys := range keysByHashRange {
 			for _, key := range keys {
 				_, err := txn.Get(c.getKey(key, hashRange))
 				if err != nil {
@@ -156,11 +156,11 @@ func (c *Cache) Get(itemsByHashRange map[uint32][]string, indexes map[string]int
 }
 
 // Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
-func (c *Cache) Put(itemsByHashRange map[uint32][]string, ttl time.Duration) error {
+func (c *Cache) Put(keysByHashRange map[uint32][]string, ttl time.Duration) error {
 	modifiedTTL := c.getTTL(ttl)
 
 	bw := c.cache.NewWriteBatch()
-	for hashRange, keys := range itemsByHashRange {
+	for hashRange, keys := range keysByHashRange {
 		for _, key := range keys {
 			cacheKey := c.getKey(key, hashRange)
 			entry := badger.NewEntry(cacheKey, nil)
