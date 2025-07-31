@@ -23,15 +23,15 @@ var customBuckets = map[string][]float64{
 		0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20,
 	},
 	"keydb_keys_hashing_duration_seconds": {
-		// 1microsecond, 2.5microsecond, 5microsecond, 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s
-		0.00001, 0.00025, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
+		// 1 micro, 5 micro, 10 micro, 50 micro, 100 micro, 500 micro, 1ms, 5ms, 10ms
+		0.000001, 0.000005, 0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01,
 	},
 	"keydb_grpc_cache_get_duration_seconds": {
 		// 10microsecond, 25microsecond, 50microsecond, 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s
 		0.00001, 0.00025, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
 	},
 	"keydb_grpc_cache_put_duration_seconds": {
-		// 1microsecond, 5microsecond, 10microsecond, 50microsecond, 100microsecond, 200microsecond
-		0.000001, 0.000005, 0.00001, 0.00005, 0.0001, 0.0002,
+		// 10microsecond, 25microsecond, 50microsecond, 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s
+		0.00001, 0.00025, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
 	},
 }
