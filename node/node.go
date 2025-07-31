@@ -65,6 +65,9 @@ type Config struct {
 
 	// Addresses is a list of node addresses that this node will advertise to clients
 	Addresses []string
+
+	// logTableStructureDuration defines the duration for which the table structure is logged
+	LogTableStructureDuration time.Duration
 }
 
 // Service implements the NodeService gRPC service
@@ -117,6 +120,9 @@ type Cache interface {
 	// Close releases any resources associated with the cache and ensures proper cleanup.
 	// Returns an error if the operation fails.
 	Close() error
+
+	// LevelsToString returns a string representation of the cache levels
+	LevelsToString() string
 }
 
 type cloudStorageReader interface {
@@ -193,6 +199,8 @@ func NewService(
 	service.waitGroup.Add(1)
 	go service.garbageCollection(ctx)
 
+	service.waitGroup.Add(1)
+	go service.logCacheLevels(ctx)
 	return service, nil
 }
 
@@ -235,6 +243,29 @@ func (s *Service) garbageCollection(ctx context.Context) {
 
 				s.cache.RunGarbageCollection()
 			}()
+		}
+	}
+}
+
+func (s *Service) logCacheLevels(ctx context.Context) {
+	defer s.waitGroup.Done()
+
+	s.logger.Infon("Cache levels",
+		logger.NewStringField("levels", s.cache.LevelsToString()),
+	)
+	if s.config.LogTableStructureDuration == 0 {
+		return
+	}
+	ticker := time.NewTicker(s.config.LogTableStructureDuration)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.logger.Infon("Cache levels",
+				logger.NewStringField("levels", s.cache.LevelsToString()),
+			)
 		}
 	}
 }

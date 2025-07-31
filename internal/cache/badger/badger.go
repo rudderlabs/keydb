@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,6 +55,8 @@ type Cache struct {
 	snapshotting     bool
 	snapshottingLock sync.Mutex
 	debugMode        bool
+	jitterEnabled    bool
+	jitterDuration   time.Duration
 }
 
 func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
@@ -70,22 +73,24 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 			1*bytesize.MB, 1, "BadgerDB.Dedup.valueLogFileSize", "BadgerDB.valueLogFileSize",
 		)).
 		WithBlockSize(conf.GetIntVar(int(4*bytesize.KB), 1, "BadgerDB.Dedup.blockSize", "BadgerDB.blockSize")).
-		WithMemTableSize(conf.GetInt64Var(20*bytesize.MB, 1, "BadgerDB.Dedup.memTableSize", "BadgerDB.memTableSize")).
+		WithMemTableSize(conf.GetInt64Var(64*bytesize.MB, 1, "BadgerDB.Dedup.memTableSize", "BadgerDB.memTableSize")).
 		WithNumMemtables(conf.GetIntVar(5, 1, "BadgerDB.Dedup.numMemtable", "BadgerDB.numMemtable")).
 		WithNumLevelZeroTables(conf.GetIntVar(
-			5, 1, "BadgerDB.Dedup.numLevelZeroTables", "BadgerDB.numLevelZeroTables",
+			10, 1, "BadgerDB.Dedup.numLevelZeroTables", "BadgerDB.numLevelZeroTables",
 		)).
 		WithNumLevelZeroTablesStall(conf.GetIntVar(
-			10, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall",
+			40, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall",
 		)).
-		WithBaseTableSize(conf.GetInt64Var(1*bytesize.MB, 1, "BadgerDB.Dedup.baseTableSize", "BadgerDB.baseTableSize")).
-		WithBaseLevelSize(conf.GetInt64Var(5*bytesize.MB, 1, "BadgerDB.Dedup.baseLevelSize", "BadgerDB.baseLevelSize")).
+		WithBaseTableSize(conf.GetInt64Var(
+			16*bytesize.MB, 1, "BadgerDB.Dedup.baseTableSize", "BadgerDB.baseTableSize",
+		)).
+		WithBaseLevelSize(conf.GetInt64Var(1*bytesize.GB, 1, "BadgerDB.Dedup.baseLevelSize", "BadgerDB.baseLevelSize")).
 		WithLevelSizeMultiplier(conf.GetIntVar(
-			10, 1, "BadgerDB.Dedup.levelSizeMultiplier", "BadgerDB.levelSizeMultiplier",
+			5, 1, "BadgerDB.Dedup.levelSizeMultiplier", "BadgerDB.levelSizeMultiplier",
 		)).
 		WithMaxLevels(conf.GetIntVar(7, 1, "BadgerDB.Dedup.maxLevels", "BadgerDB.maxLevels")).
 		// Cannot have 1 compactor. Need at least 2
-		WithNumCompactors(conf.GetIntVar(2, 1, "BadgerDB.Dedup.numCompactors", "BadgerDB.numCompactors")).
+		WithNumCompactors(conf.GetIntVar(4, 1, "BadgerDB.Dedup.numCompactors", "BadgerDB.numCompactors")).
 		WithValueThreshold(conf.GetInt64Var(
 			10*bytesize.B, 1, "BadgerDB.Dedup.valueThreshold", "BadgerDB.valueThreshold",
 		)).
@@ -131,6 +136,8 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		compressionLevel: compressionLevel,
 		discardRatio:     conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
 		debugMode:        conf.GetBool("BadgerDB.DebugMode", false),
+		jitterEnabled:    conf.GetBool("cache.ttlJitter.enabled", false),
+		jitterDuration:   conf.GetDuration("cache.ttlJitter", 1, time.Hour),
 	}, nil
 }
 
@@ -174,25 +181,27 @@ func (c *Cache) Put(keys []string, ttl time.Duration) error {
 		return fmt.Errorf("cache put keys: %w", err)
 	}
 
-	err = c.cache.Update(func(txn *badger.Txn) error {
-		for hashRange, keys := range itemsByHashRange {
-			for _, key := range keys {
-				entry := badger.NewEntry(c.getKey(key, hashRange), []byte{})
-				if ttl > 0 {
-					entry = entry.WithTTL(ttl)
-				}
-				if err := txn.SetEntry(entry); err != nil {
-					return fmt.Errorf("failed to put key %s: %w", key, err)
-				}
+	bw := c.cache.NewWriteBatch()
+	for hashRange, keys := range itemsByHashRange {
+		for _, key := range keys {
+			entry := badger.NewEntry(c.getKey(key, hashRange), nil)
+			if ttl > 0 {
+				entry = entry.WithTTL(c.getTTL(ttl))
+			}
+			if err := bw.SetEntry(entry); err != nil {
+				return fmt.Errorf("failed to put key %s: %w", key, err)
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		return err
 	}
+	return bw.Flush()
+}
 
-	return nil
+func (c *Cache) getTTL(ttl time.Duration) time.Duration {
+	if ttl > 0 && c.jitterEnabled && c.jitterDuration > 0 {
+		jitter := time.Duration(rand.Int63n(int64(c.jitterDuration)))
+		ttl += jitter
+	}
+	return ttl
 }
 
 // CreateSnapshots writes the cache contents to the provided writers
@@ -458,4 +467,8 @@ type loggerForBadger struct {
 
 func (l loggerForBadger) Warningf(fmt string, args ...any) {
 	l.Warnf(fmt, args...)
+}
+
+func (c *Cache) LevelsToString() string {
+	return c.cache.LevelsToString()
 }
