@@ -90,16 +90,18 @@ type Service struct {
 	logger           logger.Logger
 
 	metrics struct {
-		getKeysCounters        map[uint32]stats.Counter
-		putKeysCounter         map[uint32]stats.Counter
-		errScalingCounter      stats.Counter
-		errWrongNodeCounter    stats.Counter
-		errInternalCounter     stats.Counter
-		gcDuration             stats.Histogram
-		getKeysHashingDuration stats.Timer
-		getFromCacheDuration   stats.Timer
-		putKeysHashingDuration stats.Timer
-		putFromCacheDuration   stats.Timer
+		getKeysCounters             map[uint32]stats.Counter
+		putKeysCounter              map[uint32]stats.Counter
+		errScalingCounter           stats.Counter
+		errWrongNodeCounter         stats.Counter
+		errInternalCounter          stats.Counter
+		gcDuration                  stats.Histogram
+		getKeysHashingDuration      stats.Timer
+		getFromCacheSuccessDuration stats.Timer
+		getFromCacheFailDuration    stats.Timer
+		putKeysHashingDuration      stats.Timer
+		putInCacheSuccessDuration   stats.Timer
+		putInCacheFailDuration      stats.Timer
 	}
 }
 
@@ -192,12 +194,16 @@ func NewService(
 	service.metrics.gcDuration = stat.NewTaggedStat("keydb_gc_duration_seconds", stats.HistogramType, statsTags)
 	service.metrics.getKeysHashingDuration = stat.NewTaggedStat("keydb_keys_hashing_duration_seconds", stats.TimerType,
 		stats.Tags{"method": "get"})
-	service.metrics.getFromCacheDuration = stat.NewTaggedStat("keydb_grpc_cache_get_duration_seconds",
-		stats.TimerType, statsTags)
-	service.metrics.putKeysHashingDuration = stat.NewTaggedStat("keydb_keys_hashing_duration_seconds", stats.TimerType,
-		stats.Tags{"method": "put"})
-	service.metrics.putFromCacheDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds", stats.TimerType,
-		statsTags)
+	service.metrics.getFromCacheSuccessDuration = stat.NewTaggedStat("keydb_grpc_cache_get_duration_seconds",
+		stats.TimerType, stats.Tags{"success": "true"})
+	service.metrics.getFromCacheFailDuration = stat.NewTaggedStat("keydb_grpc_cache_get_duration_seconds",
+		stats.TimerType, stats.Tags{"success": "false"})
+	service.metrics.putKeysHashingDuration = stat.NewTaggedStat("keydb_keys_hashing_duration_seconds",
+		stats.TimerType, stats.Tags{"method": "put"})
+	service.metrics.putInCacheSuccessDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds",
+		stats.TimerType, stats.Tags{"success": "true"})
+	service.metrics.putInCacheFailDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds",
+		stats.TimerType, stats.Tags{"success": "false"})
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false); err != nil {
@@ -430,10 +436,11 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	existsValues, err := s.cache.Get(keysByHashRange, indexes)
 	if err != nil {
 		s.metrics.errInternalCounter.Increment()
+		s.metrics.getFromCacheFailDuration.Since(getFromCacheStart)
 		response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		return response, nil
 	}
-	s.metrics.getFromCacheDuration.Since(getFromCacheStart)
+	s.metrics.getFromCacheSuccessDuration.Since(getFromCacheStart)
 	response.Exists = existsValues
 
 	return response, nil
@@ -484,10 +491,11 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 	err = s.cache.Put(keysByHashRange, time.Duration(req.TtlSeconds)*time.Second)
 	if err != nil {
 		s.metrics.errInternalCounter.Increment()
+		s.metrics.putInCacheFailDuration.Since(putToCacheStart)
 		resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		return resp, nil
 	}
-	s.metrics.putFromCacheDuration.Since(putToCacheStart)
+	s.metrics.putInCacheSuccessDuration.Since(putToCacheStart)
 
 	resp.Success = true
 	return resp, nil
