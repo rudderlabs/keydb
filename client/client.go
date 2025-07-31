@@ -372,11 +372,11 @@ func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) erro
 }
 
 func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) error {
-	// Group items by node
-	itemsByNode := make(map[uint32][]string)
+	// Group keys by node
+	keysByNode := make(map[uint32][]string)
 	for _, key := range keys {
 		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
-		itemsByNode[nodeID] = append(itemsByNode[nodeID], key)
+		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
 	hasClusterSizeChanged := atomic.Value{}
@@ -384,8 +384,8 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 	cancellableCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	group, gCtx := kitsync.NewEagerGroup(cancellableCtx, len(itemsByNode))
-	for nodeID, nodeItems := range itemsByNode {
+	group, gCtx := kitsync.NewEagerGroup(cancellableCtx, len(keysByNode))
+	for nodeID, nodeKeys := range keysByNode {
 		group.Go(func() error {
 			// Get the client for this node
 			client, ok := c.clients[int(nodeID)]
@@ -397,7 +397,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 			}
 
 			// Create the request
-			req := &pb.PutRequest{Keys: nodeItems, TtlSeconds: uint64(ttl.Seconds())}
+			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: uint64(ttl.Seconds())}
 
 			// Send the request with retries
 			var err error

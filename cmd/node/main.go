@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,8 +73,11 @@ func main() {
 	}
 
 	if err := run(ctx, cancel, conf, stat, log); err != nil {
-		log.Fataln("Failed to run", obskit.Error(err))
-		os.Exit(1)
+		if !errors.Is(err, context.Canceled) {
+			log.Errorn("Failed to run", obskit.Error(err))
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 }
 
@@ -130,14 +136,23 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	var wg sync.WaitGroup
 	defer func() {
 		cancel()
-		wg.Wait()
-	}()
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-ctx.Done()
-		log.Infon("Terminating service")
-		service.Close() // TODO test graceful shutdown
+		doneCh := make(chan struct{})
+		shutdownStarted := time.Now()
+		go func() {
+			wg.Wait()
+			close(doneCh)
+		}()
+		select {
+		case <-doneCh:
+			return
+		case <-time.After(conf.GetDuration("shutdownTimeout", 15, time.Second)):
+			log.Errorn("graceful termination failed",
+				logger.NewDurationField("timeoutAfter", time.Since(shutdownStarted)))
+			fmt.Print("\n\n")
+			_ = pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+			fmt.Print("\n\n")
+			return
+		}
 	}()
 
 	// create a gRPC server with latency interceptors
@@ -188,10 +203,30 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		}
 	}()
 
-	// Start the server
-	if err := server.Serve(lis); err != nil {
-		return fmt.Errorf("failed to serve: %w", err)
-	}
+	serverErrCh := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := server.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErrCh <- fmt.Errorf("server error: %w", err)
+		}
+	}()
 
-	return ctx.Err()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		log.Infon("Terminating service")
+		service.Close()
+		server.GracefulStop()
+		_ = lis.Close()
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Infon("Shutting down HTTP server")
+		return ctx.Err()
+	case err := <-serverErrCh:
+		return err
+	}
 }

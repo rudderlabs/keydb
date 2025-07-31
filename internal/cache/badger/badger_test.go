@@ -43,16 +43,16 @@ func TestSnapshots(t *testing.T) {
 		conf := config.New()
 		conf.Set("BadgerDB.Dedup.Compress", compress)
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		bdb, err := New(&mockHasher{}, conf, logger.NOP)
+		bdb, err := New(conf, logger.NOP)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			require.NoError(t, bdb.Close())
 		})
 
-		err = bdb.Put([]string{"key1", "key2"}, time.Hour)
+		err = bdb.Put(map[uint32][]string{0: {"key1", "key2"}}, time.Hour)
 		require.NoError(t, err)
 
-		exists, err := bdb.Get([]string{"key1", "key2"})
+		exists, err := bdb.Get(map[uint32][]string{0: {"key1", "key2"}}, map[string]int{"key1": 0, "key2": 1})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true}, exists)
 
@@ -73,9 +73,10 @@ func TestSnapshots(t *testing.T) {
 		require.Len(t, files, 1)
 		t.Logf("1st snapshot created: %+v", uploadedFile1)
 
-		err = bdb.Put([]string{"key3", "key4"}, time.Hour)
+		err = bdb.Put(map[uint32][]string{0: {"key3", "key4"}}, time.Hour)
 		require.NoError(t, err)
-		exists, err = bdb.Get([]string{"key1", "key2", "key3", "key4"})
+		exists, err = bdb.Get(map[uint32][]string{0: {"key1", "key2", "key3", "key4"}},
+			map[string]int{"key1": 0, "key2": 1, "key3": 2, "key4": 3})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, true}, exists)
 
@@ -97,7 +98,7 @@ func TestSnapshots(t *testing.T) {
 
 		// Load 1st snapshot into a new BadgerDB
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		newBdb, err := New(&mockHasher{}, conf, logger.NOP)
+		newBdb, err := New(conf, logger.NOP)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			require.NoError(t, newBdb.Close())
@@ -113,7 +114,8 @@ func TestSnapshots(t *testing.T) {
 		err = newBdb.LoadSnapshots(context.Background(), tmpFile)
 		require.NoError(t, err)
 
-		exists, err = newBdb.Get([]string{"key1", "key2", "key3", "key4"})
+		exists, err = newBdb.Get(map[uint32][]string{0: {"key1", "key2", "key3", "key4"}},
+			map[string]int{"key1": 0, "key2": 1, "key3": 2, "key4": 3})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, false, false}, exists)
 
@@ -127,7 +129,8 @@ func TestSnapshots(t *testing.T) {
 		err = newBdb.LoadSnapshots(context.Background(), tmpFile2)
 		require.NoError(t, err)
 
-		exists, err = newBdb.Get([]string{"key1", "key2", "key3", "key4"})
+		exists, err = newBdb.Get(map[uint32][]string{0: {"key1", "key2", "key3", "key4"}},
+			map[string]int{"key1": 0, "key2": 1, "key3": 2, "key4": 3})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, true}, exists)
 	}
@@ -254,29 +257,4 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (
 	require.NoError(t, err)
 
 	return minioClient, cloudStorage
-}
-
-type mockHasher struct{}
-
-func (m *mockHasher) GetKeysByHashRange(keys []string) (
-	map[uint32][]string, // itemsByHashRange
-	error,
-) {
-	mp := make(map[uint32][]string)
-	mp[0] = append(mp[0], keys...)
-	return mp, nil
-}
-
-func (m *mockHasher) GetKeysByHashRangeWithIndexes(keys []string) (
-	map[uint32][]string, // itemsByHashRange
-	map[string]int, // indexes
-	error,
-) {
-	mp := make(map[uint32][]string)
-	indexes := make(map[string]int, len(keys))
-	for i, key := range keys {
-		mp[0] = append(mp[0], key)
-		indexes[key] = i
-	}
-	return mp, indexes, nil
 }
