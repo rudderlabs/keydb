@@ -106,10 +106,10 @@ type Service struct {
 // Cache is an interface for a key-value store with TTL support
 type Cache interface {
 	// Get returns the values associated with the keys and an error if the operation failed
-	Get(keys []string, hashRange uint32) ([]bool, error)
+	Get(itemsByHashRange map[uint32][]string, indexes map[string]int) ([]bool, error)
 
 	// Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
-	Put(keys []string, ttl time.Duration, hashRange uint32) error
+	Put(itemsByHashRange map[uint32][]string, ttl time.Duration) error
 
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
@@ -419,39 +419,19 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 	}
 	s.metrics.getKeysHashingDuration.Since(hashingStart)
 
-	// Create a map to track the original indices of keys
-	responseMu := sync.Mutex{}
-	response.Exists = make([]bool, len(req.Keys))
-
 	getFromCacheStart := time.Now()
-	group, _ := kitsync.NewEagerGroup(ctx, len(itemsByHashRange))
 	for hashRange, keys := range itemsByHashRange {
-		group.Go(func() error {
-			// Check if the keys exist in the cache
-			existsValues, err := s.cache.Get(keys, hashRange)
-			if err != nil {
-				return fmt.Errorf("failed to get keys from cache: %w", err)
-			}
-
-			s.metrics.getKeysCounters[hashRange].Count(len(keys))
-
-			// Update the response with the results
-			responseMu.Lock()
-			for i, key := range keys {
-				response.Exists[indexes[key]] = existsValues[i]
-			}
-			responseMu.Unlock()
-
-			return nil
-		})
+		s.metrics.getKeysCounters[hashRange].Count(len(keys))
 	}
 
-	if err := group.Wait(); err != nil {
+	existsValues, err := s.cache.Get(itemsByHashRange, indexes)
+	if err != nil {
 		s.metrics.errInternalCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		return response, nil
 	}
 	s.metrics.getFromCacheDuration.Since(getFromCacheStart)
+	response.Exists = existsValues
 
 	return response, nil
 }
@@ -494,22 +474,12 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 	ttl := time.Duration(req.TtlSeconds) * time.Second
 
 	putToCacheStart := time.Now()
-	group, _ := kitsync.NewEagerGroup(ctx, len(itemsByHashRange))
 	for hashRange, keys := range itemsByHashRange {
-		group.Go(func() error {
-			// Store the keys in the cache with the specified TTL
-			err := s.cache.Put(keys, ttl, hashRange)
-			if err != nil {
-				return fmt.Errorf("failed to put keys into cache: %w", err)
-			}
-
-			s.metrics.putKeysCounter[hashRange].Count(len(keys))
-
-			return nil
-		})
+		s.metrics.putKeysCounter[hashRange].Count(len(keys))
 	}
-
-	if err := group.Wait(); err != nil {
+	// Store the keys in the cache with the specified TTL
+	err = s.cache.Put(itemsByHashRange, ttl)
+	if err != nil {
 		s.metrics.errInternalCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_INTERNAL_ERROR
 		return resp, nil

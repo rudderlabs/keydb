@@ -190,15 +190,10 @@ func TestClient_Put(t *testing.T) {
 // mockNodeServiceServer implements the NodeServiceServer interface for testing
 type mockNodeServiceServer struct {
 	proto.UnimplementedNodeServiceServer
-	getFunc           func(context.Context, *proto.GetRequest) (*proto.GetResponse, error)
-	putFunc           func(context.Context, *proto.PutRequest) (*proto.PutResponse, error)
-	getNodeInfoFunc   func(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error)
-	scaleFunc         func(context.Context, *proto.ScaleRequest) (*proto.ScaleResponse, error)
-	scaleCompleteFunc func(context.Context, *proto.ScaleCompleteRequest) (*proto.ScaleCompleteResponse, error)
-	createSnapFunc    func(context.Context, *proto.CreateSnapshotsRequest) (*proto.CreateSnapshotsResponse, error)
-	loadSnapFunc      func(context.Context, *proto.LoadSnapshotsRequest) (*proto.LoadSnapshotsResponse, error)
-	clusterSize       uint32
-	nodesAddresses    []string
+	getFunc        func(context.Context, *proto.GetRequest) (*proto.GetResponse, error)
+	putFunc        func(context.Context, *proto.PutRequest) (*proto.PutResponse, error)
+	clusterSize    uint32
+	nodesAddresses []string
 }
 
 func (m *mockNodeServiceServer) Get(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
@@ -237,48 +232,28 @@ func (m *mockNodeServiceServer) Put(ctx context.Context, req *proto.PutRequest) 
 func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *proto.GetNodeInfoRequest) (
 	*proto.GetNodeInfoResponse, error,
 ) {
-	if m.getNodeInfoFunc != nil {
-		return m.getNodeInfoFunc(ctx, req)
-	}
-
 	return &proto.GetNodeInfoResponse{}, nil
 }
 
 func (m *mockNodeServiceServer) Scale(ctx context.Context, req *proto.ScaleRequest) (*proto.ScaleResponse, error) {
-	if m.scaleFunc != nil {
-		return m.scaleFunc(ctx, req)
-	}
-
 	return &proto.ScaleResponse{Success: true}, nil
 }
 
 func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *proto.ScaleCompleteRequest) (
 	*proto.ScaleCompleteResponse, error,
 ) {
-	if m.scaleCompleteFunc != nil {
-		return m.scaleCompleteFunc(ctx, req)
-	}
-
 	return &proto.ScaleCompleteResponse{Success: true}, nil
 }
 
 func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.CreateSnapshotsRequest) (
 	*proto.CreateSnapshotsResponse, error,
 ) {
-	if m.createSnapFunc != nil {
-		return m.createSnapFunc(ctx, req)
-	}
-
 	return &proto.CreateSnapshotsResponse{Success: true}, nil
 }
 
 func (m *mockNodeServiceServer) LoadSnapshots(ctx context.Context, req *proto.LoadSnapshotsRequest) (
 	*proto.LoadSnapshotsResponse, error,
 ) {
-	if m.loadSnapFunc != nil {
-		return m.loadSnapFunc(ctx, req)
-	}
-
 	return &proto.LoadSnapshotsResponse{Success: true}, nil
 }
 

@@ -31,20 +31,7 @@ const (
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
 
-type hasher interface {
-	GetKeysByHashRange(keys []string) (
-		map[uint32][]string, // itemsByHashRange
-		error,
-	)
-	GetKeysByHashRangeWithIndexes(keys []string) (
-		map[uint32][]string, // itemsByHashRange
-		map[string]int, // indexes
-		error,
-	)
-}
-
 type Cache struct {
-	hasher           hasher
 	cache            *badger.DB
 	conf             *config.Config
 	logger           logger.Logger
@@ -59,7 +46,7 @@ type Cache struct {
 	jitterDuration   time.Duration
 }
 
-func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
+func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 	path := conf.GetString("BadgerDB.Dedup.Path", "/tmp/badger")
 	opts := badger.DefaultOptions(path).
 		WithCompression(options.None).
@@ -128,7 +115,6 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 		return nil, err
 	}
 	return &Cache{
-		hasher:           h,
 		cache:            db,
 		conf:             conf,
 		logger:           log,
@@ -142,15 +128,10 @@ func New(h hasher, conf *config.Config, log logger.Logger) (*Cache, error) {
 }
 
 // Get returns the values associated with the keys and an error if the operation failed
-func (c *Cache) Get(keys []string) ([]bool, error) {
-	itemsByHashRange, indexes, err := c.hasher.GetKeysByHashRangeWithIndexes(keys)
-	if err != nil {
-		return nil, fmt.Errorf("cache get keys: %w", err)
-	}
+func (c *Cache) Get(itemsByHashRange map[uint32][]string, indexes map[string]int) ([]bool, error) {
+	results := make([]bool, len(indexes))
 
-	results := make([]bool, len(keys))
-
-	err = c.cache.View(func(txn *badger.Txn) error {
+	err := c.cache.View(func(txn *badger.Txn) error {
 		for hashRange, keys := range itemsByHashRange {
 			for _, key := range keys {
 				_, err := txn.Get(c.getKey(key, hashRange))
@@ -175,21 +156,19 @@ func (c *Cache) Get(keys []string) ([]bool, error) {
 }
 
 // Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
-func (c *Cache) Put(keys []string, ttl time.Duration) error {
-	itemsByHashRange, err := c.hasher.GetKeysByHashRange(keys)
-	if err != nil {
-		return fmt.Errorf("cache put keys: %w", err)
-	}
+func (c *Cache) Put(itemsByHashRange map[uint32][]string, ttl time.Duration) error {
+	modifiedTTL := c.getTTL(ttl)
 
 	bw := c.cache.NewWriteBatch()
 	for hashRange, keys := range itemsByHashRange {
 		for _, key := range keys {
-			entry := badger.NewEntry(c.getKey(key, hashRange), nil)
+			cacheKey := c.getKey(key, hashRange)
+			entry := badger.NewEntry(cacheKey, nil)
 			if ttl > 0 {
-				entry = entry.WithTTL(c.getTTL(ttl))
+				entry = entry.WithTTL(c.getTTL(modifiedTTL))
 			}
 			if err := bw.SetEntry(entry); err != nil {
-				return fmt.Errorf("failed to put key %s: %w", key, err)
+				return fmt.Errorf("failed to put key %s: %w", cacheKey, err)
 			}
 		}
 	}
