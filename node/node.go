@@ -76,18 +76,19 @@ type Service struct {
 
 	config Config
 
-	// mu protects the scaling operations
-	mu      sync.RWMutex
-	cache   Cache
-	scaling bool
-
-	now              func() time.Time
+	// mu protects cache, scaling, since and lastSnapshotTime
+	mu               sync.RWMutex
+	cache            Cache
+	scaling          bool
+	since            map[uint32]uint64
 	lastSnapshotTime time.Time
-	maxFilesToList   int64
-	waitGroup        sync.WaitGroup
-	storage          cloudStorage
-	stats            stats.Stats
-	logger           logger.Logger
+
+	now            func() time.Time
+	maxFilesToList int64
+	waitGroup      sync.WaitGroup
+	storage        cloudStorage
+	stats          stats.Stats
+	logger         logger.Logger
 
 	metrics struct {
 		getKeysCounters             map[uint32]stats.Counter
@@ -115,7 +116,11 @@ type Cache interface {
 
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
-	CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, map[uint32]bool, error)
+	CreateSnapshots(
+		ctx context.Context,
+		writers map[uint32]io.Writer,
+		since map[uint32]uint64,
+	) (uint64, map[uint32]bool, error)
 
 	// LoadSnapshots reads the cache contents from the provided readers
 	LoadSnapshots(ctx context.Context, r ...io.Reader) error
@@ -168,6 +173,7 @@ func NewService(
 		now:            time.Now,
 		config:         config,
 		storage:        storage,
+		since:          make(map[uint32]uint64),
 		maxFilesToList: config.MaxFilesToList,
 		stats:          stat,
 		logger: log.Withn(
@@ -694,7 +700,7 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 		writers[r] = bytes.NewBuffer([]byte{})
 	}
 
-	since, hasData, err := s.cache.CreateSnapshots(ctx, writers) // TODO: this can create memory problems!
+	since, hasData, err := s.cache.CreateSnapshots(ctx, writers, s.since)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshots: %w", err)
 	}
@@ -715,7 +721,7 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 			continue // no data to upload
 		}
 
-		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, since)
+		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, s.since[hashRange])
 		s.logger.Infon("Uploading snapshot file",
 			logger.NewIntField("hashRange", int64(hashRange)),
 			logger.NewStringField("filename", filename),
@@ -725,6 +731,8 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
 		}
+
+		s.since[hashRange] = since
 	}
 
 	s.lastSnapshotTime = time.Now()

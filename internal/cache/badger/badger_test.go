@@ -61,7 +61,7 @@ func TestSnapshots(t *testing.T) {
 		mp := map[uint32]io.Writer{
 			0: buf,
 		}
-		since, _, err := bdb.CreateSnapshots(context.Background(), mp)
+		since, _, err := bdb.CreateSnapshots(context.Background(), mp, map[uint32]uint64{})
 		require.NoError(t, err)
 
 		filename := fmt.Sprintf("snapshot-%d.badger", since)
@@ -85,7 +85,7 @@ func TestSnapshots(t *testing.T) {
 		mp = map[uint32]io.Writer{
 			0: buf,
 		}
-		since, _, err = bdb.CreateSnapshots(context.Background(), mp)
+		since, _, err = bdb.CreateSnapshots(context.Background(), mp, map[uint32]uint64{})
 		require.NoError(t, err)
 
 		filename = fmt.Sprintf("snapshot-%d.badger", since)
@@ -171,16 +171,16 @@ func TestCancelSnapshot(t *testing.T) {
 		// First we try to create a snapshot with a canceled context then we try again to see if we're in a bad state
 		snapshotCtx, cancelSnapshot := context.WithCancel(context.Background())
 		cancelSnapshot()
-		_, _, err = bdb.CreateSnapshots(snapshotCtx, map[uint32]io.Writer{0: new(bytes.Buffer)})
+		since, _, err := bdb.CreateSnapshots(snapshotCtx, map[uint32]io.Writer{0: &bytes.Buffer{}}, map[uint32]uint64{})
 		require.ErrorContains(t, err, context.Canceled.Error())
-		require.EqualValues(t, 0, bdb.snapshotSince) // since shouldn't have been updated
+		require.EqualValues(t, 0, since) // since shouldn't have been updated
 
 		// Create snapshot
 		buf := new(bytes.Buffer)
 		mp := map[uint32]io.Writer{
 			0: buf,
 		}
-		since, _, err := bdb.CreateSnapshots(context.Background(), mp)
+		since, _, err = bdb.CreateSnapshots(context.Background(), mp, map[uint32]uint64{})
 		require.NoError(t, err)
 
 		filename := fmt.Sprintf("snapshot-%d.badger", since)
