@@ -198,6 +198,19 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 	c.snapshotting = true
 	c.snapshottingLock.Unlock()
 
+	var (
+		err        error
+		maxVersion uint64
+	)
+	defer func() {
+		c.snapshottingLock.Lock()
+		c.snapshotting = false
+		if err != nil {
+			c.snapshotSince = maxVersion
+		}
+		c.snapshottingLock.Unlock()
+	}()
+
 	hashRangesMap := make(map[uint32]struct{})
 	// we need to know which hash ranges are being written to, as buffers will have zstd footer in case compression is
 	// enabled, so we can't use the buff.Len() to check if the writer has data
@@ -207,12 +220,6 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 		hasData[hashRange] = false
 	}
 
-	// Create synchronized writers for each hash range
-	type lockedWriter struct {
-		mu     sync.Mutex
-		writer io.Writer
-		closer io.Closer // for zstd writers
-	}
 	writers := make(map[uint32]*lockedWriter)
 	for hr := range w {
 		lw := &lockedWriter{}
@@ -238,7 +245,6 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 		}
 	}()
 
-	var maxVersion uint64
 	stream := c.cache.NewStream()
 	stream.NumGo = c.conf.GetInt("BadgerDB.Dedup.Snapshots.NumGoroutines", 10)
 	stream.Prefix = []byte("hr")
@@ -293,30 +299,18 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 
 		// Write to appropriate writers by hash range
 		for hashRange, kvs := range kvsByHashRange {
-			lw := writers[hashRange]
-
-			lw.mu.Lock()
-			// Create a new KVList for this hash range
-			rangeList := &pb.KVList{Kv: kvs}
-
-			if err := c.writeTo(rangeList, lw.writer); err != nil {
+			if err := c.writeTo(&pb.KVList{Kv: kvs}, writers[hashRange]); err != nil {
 				return fmt.Errorf("failed to write to hash range %d: %w", hashRange, err)
 			}
-			lw.mu.Unlock()
 		}
 
 		return nil
 	}
 
-	err := stream.Orchestrate(ctx)
+	err = stream.Orchestrate(ctx)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to create snapshot: %w", err)
 	}
-
-	c.snapshottingLock.Lock()
-	c.snapshotSince = maxVersion
-	c.snapshotting = false
-	c.snapshottingLock.Unlock()
 
 	return since, hasData, nil
 }
@@ -425,8 +419,11 @@ func (c *Cache) getKey(key string, hashRange uint32) []byte {
 	return []byte("hr" + strconv.Itoa(int(hashRange)) + ":" + key)
 }
 
-func (c *Cache) writeTo(list *pb.KVList, w io.Writer) (err error) {
-	if err = binary.Write(w, binary.LittleEndian, uint64(proto.Size(list))); err != nil {
+func (c *Cache) writeTo(list *pb.KVList, w *lockedWriter) (err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err = binary.Write(w.writer, binary.LittleEndian, uint64(proto.Size(list))); err != nil {
 		return
 	}
 
@@ -436,8 +433,15 @@ func (c *Cache) writeTo(list *pb.KVList, w io.Writer) (err error) {
 		return
 	}
 
-	_, err = w.Write(buf)
+	_, err = w.writer.Write(buf)
 	return
+}
+
+// lockedWriter is used to create synchronized writers for each hash range
+type lockedWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+	closer io.Closer // for zstd writers
 }
 
 type loggerForBadger struct {

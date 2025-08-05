@@ -144,6 +144,64 @@ func TestSnapshots(t *testing.T) {
 	})
 }
 
+func TestCancelSnapshot(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, compress bool) {
+		t.Parallel()
+
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Compress", compress)
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		bdb, err := New(conf, logger.NOP)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, bdb.Close())
+		})
+
+		err = bdb.Put(map[uint32][]string{0: {"key1", "key2"}}, time.Hour)
+		require.NoError(t, err)
+
+		exists, err := bdb.Get(map[uint32][]string{0: {"key1", "key2"}}, map[string]int{"key1": 0, "key2": 1})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true}, exists)
+
+		// First we try to create a snapshot with a canceled context then we try again to see if we're in a bad state
+		snapshotCtx, cancelSnapshot := context.WithCancel(context.Background())
+		cancelSnapshot()
+		_, _, err = bdb.CreateSnapshots(snapshotCtx, map[uint32]io.Writer{0: new(bytes.Buffer)})
+		require.ErrorContains(t, err, context.Canceled.Error())
+		require.EqualValues(t, 0, bdb.snapshotSince) // since shouldn't have been updated
+
+		// Create snapshot
+		buf := new(bytes.Buffer)
+		mp := map[uint32]io.Writer{
+			0: buf,
+		}
+		since, _, err := bdb.CreateSnapshots(context.Background(), mp)
+		require.NoError(t, err)
+
+		filename := fmt.Sprintf("snapshot-%d.badger", since)
+		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
+		uploadedFile1, err := cloudStorage.UploadReader(context.Background(), filename, buf)
+		require.NoError(t, err)
+		files, err := getContents(context.Background(), bucket, "", minioClient)
+		require.NoError(t, err)
+		require.Len(t, files, 1)
+		t.Logf("Snapshot created: %+v", uploadedFile1)
+	}
+
+	t.Run("no compression", func(t *testing.T) {
+		run(t, false)
+	})
+
+	t.Run("compression", func(t *testing.T) {
+		run(t, true)
+	})
+}
+
 func createMinioResource(
 	t testing.TB,
 	pool *dockertest.Pool, accessKeyId, secretAccessKey, region, bucket string,

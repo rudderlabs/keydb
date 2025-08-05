@@ -651,8 +651,6 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 }
 
 // CreateSnapshots implements the CreateSnapshots RPC method
-// TODO FIX "snapshot already in progress" error when context gets canceled (e.g. if client calling operator cancels
-// the request).
 func (s *Service) CreateSnapshots(
 	ctx context.Context, req *pb.CreateSnapshotsRequest,
 ) (*pb.CreateSnapshotsResponse, error) {
