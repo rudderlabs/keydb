@@ -149,12 +149,11 @@ func TestScaleUpAndDown(t *testing.T) {
 		operator := getClient(t, totalHashRanges, node0Address)
 		require.NoError(t, operator.CreateSnapshots(ctx))
 
-		files, err := getContents(ctx, bucket, "", minioClient)
-		require.NoError(t, err)
-		require.Len(t, files, 3)
-		requireSnapshotFilename(t, 0, files[0])
-		requireSnapshotFilename(t, 1, files[1])
-		requireSnapshotFilename(t, 2, files[2])
+		requireExpectedFiles(ctx, t, minioClient,
+			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+		)
 
 		// Using a different path for the new node1 to avoid a conflict with node0
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
@@ -241,12 +240,11 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		operator := getClient(t, totalHashRanges, node0Address)
 		require.NoError(t, operator.CreateSnapshots(ctx))
 
-		files, err := getContents(ctx, bucket, "", minioClient)
-		require.NoError(t, err)
-		require.Len(t, files, 3)
-		requireSnapshotFilename(t, 0, files[0])
-		requireSnapshotFilename(t, 1, files[1])
-		requireSnapshotFilename(t, 2, files[2])
+		requireExpectedFiles(ctx, t, minioClient,
+			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+		)
 
 		// Using a different path for the new node1 to avoid a conflict with node0
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
@@ -353,10 +351,10 @@ func TestIncrementalSnapshots(t *testing.T) {
 
 		require.NoError(t, c.CreateSnapshots(ctx))
 		// we expect one hash range to be empty so the file won't be uploaded
-		requireExpectedFiles(ctx, t, bucket, "hr_", minioClient,
-			regexp.MustCompile("^hr_1_s_0.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0.snapshot$"),
+		requireExpectedFiles(ctx, t, minioClient,
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
 		)
 
 		require.NoError(t, c.Put(ctx, []string{"key5"}, testTTL))
@@ -365,11 +363,11 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false, true}, exists)
 
 		require.NoError(t, c.CreateSnapshots(ctx))
-		requireExpectedFiles(ctx, t, bucket, "hr_", minioClient,
-			regexp.MustCompile("^hr_1_s_0.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0.snapshot$"),
-			regexp.MustCompile("^hr_3_s_([1-9])+.snapshot$"),
+		requireExpectedFiles(ctx, t, minioClient,
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_3_s_([1-9])+_2.snapshot$"),
 		)
 
 		cancel()
@@ -484,12 +482,6 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 	return c
 }
 
-func requireSnapshotFilename(t testing.TB, hashRange int64, file File) {
-	t.Helper()
-	expectedFilename := "hr_" + strconv.FormatInt(hashRange, 10) + "_s_0" + ".snapshot"
-	require.Equal(t, expectedFilename, file.Key)
-}
-
 func createMinioResource(
 	t testing.TB,
 	pool *dockertest.Pool, accessKeyId, secretAccessKey, region, bucket string,
@@ -587,10 +579,10 @@ func getContents(ctx context.Context, bucket, prefix string, client *minio.Clien
 }
 
 func requireExpectedFiles(
-	ctx context.Context, t *testing.T, bucket, prefix string, client *minio.Client, expectedFiles ...*regexp.Regexp,
+	ctx context.Context, t *testing.T, client *minio.Client, expectedFiles ...*regexp.Regexp,
 ) {
 	t.Helper()
-	files, err := getContents(ctx, bucket, prefix, client)
+	files, err := getContents(ctx, bucket, "hr_", client)
 	require.NoError(t, err)
 	require.Len(t, files, len(expectedFiles))
 	for _, file := range files {

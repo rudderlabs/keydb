@@ -41,7 +41,7 @@ const (
 	DefaultMaxFilesToList int64 = 1000
 )
 
-var snapshotFilenameRegex = regexp.MustCompile(`^hr_(\d+)_s_(\d+).snapshot$`)
+var snapshotFilenameRegex = regexp.MustCompile(`^hr_(\d+)_s_(\d+)_(\d+).snapshot$`)
 
 // Config holds the configuration for a node
 type Config struct {
@@ -323,10 +323,6 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 	}
 
-	if !download {
-		return nil
-	}
-
 	// List all files in the bucket
 	filenamesPrefix := getSnapshotFilenamePrefix()
 	list := s.storage.ListFilesWithPrefix(ctx, "", filenamesPrefix, s.maxFilesToList)
@@ -338,19 +334,33 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 	filesByHashRange := make(map[uint32][]string, len(files))
 	for _, file := range files {
 		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
-		if len(matches) != 3 {
+		if len(matches) != 4 {
 			continue
 		}
 		hashRange, err := strconv.Atoi(matches[1])
 		if err != nil {
-			s.logger.Warnn("Invalid snapshot filename", logger.NewStringField("filename", file.Key))
+			s.logger.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
 			continue
+		}
+		since, err := strconv.Atoi(matches[3]) // getting "to", not "from"
+		if err != nil {
+			s.logger.Warnn("Invalid snapshot filename (since)", logger.NewStringField("filename", file.Key))
+			continue
+		}
+		if s.since[uint32(hashRange)] < uint64(since) {
+			s.since[uint32(hashRange)] = uint64(since)
 		}
 		if filesByHashRange[uint32(hashRange)] == nil {
 			filesByHashRange[uint32(hashRange)] = make([]string, 0, 1)
 		}
 		filesByHashRange[uint32(hashRange)] = append(filesByHashRange[uint32(hashRange)], file.Key)
 	}
+
+	if !download {
+		// We still had to do the above in order to populate the since map
+		return nil
+	}
+
 	for i := range filesByHashRange {
 		sort.Strings(filesByHashRange[i])
 	}
@@ -721,8 +731,10 @@ func (s *Service) createSnapshots(ctx context.Context) error {
 			continue // no data to upload
 		}
 
-		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, s.since[hashRange])
+		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, s.since[hashRange], since)
 		s.logger.Infon("Uploading snapshot file",
+			logger.NewIntField("from", int64(s.since[hashRange])),
+			logger.NewIntField("to", int64(since)),
 			logger.NewIntField("hashRange", int64(hashRange)),
 			logger.NewStringField("filename", filename),
 		)
@@ -752,6 +764,8 @@ func getSnapshotFilenamePrefix() string {
 	return "hr_"
 }
 
-func getSnapshotFilenamePostfix(hashRange uint32, since uint64) string {
-	return strconv.Itoa(int(hashRange)) + "_s_" + strconv.FormatUint(since, 10) + ".snapshot"
+func getSnapshotFilenamePostfix(hashRange uint32, from, to uint64) string {
+	return strconv.Itoa(int(hashRange)) +
+		"_s_" + strconv.FormatUint(from, 10) + "_" + strconv.FormatUint(to, 10) +
+		".snapshot"
 }
