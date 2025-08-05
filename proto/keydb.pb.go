@@ -543,6 +543,7 @@ func (x *LoadSnapshotsResponse) GetNodeId() uint32 {
 // CreateSnapshotRequests initiates snapshot creation
 type CreateSnapshotsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	HashRange     []uint32               `protobuf:"varint,1,rep,packed,name=hash_range,json=hashRange,proto3" json:"hash_range,omitempty"` // repeated means 0 or more values, pass none to create all snapshots
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -575,6 +576,13 @@ func (x *CreateSnapshotsRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use CreateSnapshotsRequest.ProtoReflect.Descriptor instead.
 func (*CreateSnapshotsRequest) Descriptor() ([]byte, []int) {
 	return file_proto_keydb_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CreateSnapshotsRequest) GetHashRange() []uint32 {
+	if x != nil {
+		return x.HashRange
+	}
+	return nil
 }
 
 // CreateSnapshotsResponse contains the result of the snapshot creation
@@ -882,8 +890,10 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\x15LoadSnapshotsResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x17\n" +
-	"\anode_id\x18\x03 \x01(\rR\x06nodeId\"\x18\n" +
-	"\x16CreateSnapshotsRequest\"q\n" +
+	"\anode_id\x18\x03 \x01(\rR\x06nodeId\"7\n" +
+	"\x16CreateSnapshotsRequest\x12\x1d\n" +
+	"\n" +
+	"hash_range\x18\x01 \x03(\rR\thashRange\"q\n" +
 	"\x17CreateSnapshotsResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x17\n" +

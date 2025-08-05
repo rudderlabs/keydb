@@ -411,6 +411,93 @@ func TestIncrementalSnapshots(t *testing.T) {
 	})
 }
 
+func TestSelectedSnapshots(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, conf *config.Config) {
+		t.Parallel()
+
+		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Create the node service
+		totalHashRanges := uint32(4)
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, conf)
+		c := getClient(t, totalHashRanges, node0Address)
+
+		// Test Put
+		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
+
+		exists, err := c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		// Create only the snapshots for the hash ranges 0 and 1.
+		// We expect one hash range to be empty so the file won't be uploaded.
+		require.NoError(t, c.CreateSnapshots(ctx, 0, 1))
+		requireExpectedFiles(ctx, t, minioClient,
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+		)
+
+		// Now create the snapshot for the remaining hash ranges
+		require.NoError(t, c.CreateSnapshots(ctx, 2, 3))
+		requireExpectedFiles(ctx, t, minioClient,
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
+		)
+
+		// Now try to create a snapshot for a hash range that is not handled by the node
+		require.ErrorContains(t, c.CreateSnapshots(ctx, 4), "hash range 4 not handled by this node")
+
+		cancel()
+		node0.Close()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir()) // Force a path change, the data will be loaded from Cloud Storage
+
+		// Let's start again from scratch to see if the data is properly loaded from the snapshots
+		ctx, cancel = context.WithCancel(context.Background())
+		defer cancel()
+		node0, node0Address = getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, conf)
+		c = getClient(t, totalHashRanges, node0Address)
+		require.NoError(t, c.LoadSnapshots(ctx))
+
+		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false, false}, exists)
+
+		cancel()
+		node0.Close()
+	}
+
+	t.Run("badger", func(t *testing.T) {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", false)
+		run(t, conf)
+	})
+
+	t.Run("badger compressed", func(t *testing.T) {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		run(t, conf)
+	})
+}
+
 func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (*minio.Client, cloudStorage) {
 	t.Helper()
 

@@ -685,7 +685,7 @@ func (s *Service) CreateSnapshots(
 	}
 
 	// Create snapshots for all hash ranges this node handles
-	if err := s.createSnapshots(ctx); err != nil {
+	if err := s.createSnapshots(ctx, req.HashRange...); err != nil {
 		s.logger.Errorn("Failed to create snapshots", obskit.Error(err))
 		return &pb.CreateSnapshotsResponse{
 			Success:      false,
@@ -701,13 +701,30 @@ func (s *Service) CreateSnapshots(
 }
 
 // createSnapshots creates snapshots for all hash ranges this node handles
-func (s *Service) createSnapshots(ctx context.Context) error {
+func (s *Service) createSnapshots(ctx context.Context, hashRanges ...uint32) error {
+	// Create a map of the hash ranges that we need to create as per request.
+	// If the map ends up empty, then we create snapshots for all hash ranges.
+	selected := make(map[uint32]struct{}, len(hashRanges))
+	for _, r := range hashRanges {
+		selected[r] = struct{}{}
+	}
+
 	// Get hash ranges for this node
 	ranges := s.getCurrentRanges()
-	writers := make(map[uint32]io.Writer, len(ranges))
-
-	for r := range ranges {
-		writers[r] = bytes.NewBuffer([]byte{})
+	var writers map[uint32]io.Writer
+	if len(selected) > 0 {
+		writers = make(map[uint32]io.Writer, len(selected))
+		for r := range selected {
+			if _, ok := ranges[r]; !ok {
+				return fmt.Errorf("hash range %d not handled by this node", r)
+			}
+			writers[r] = bytes.NewBuffer([]byte{})
+		}
+	} else {
+		writers = make(map[uint32]io.Writer, len(ranges))
+		for r := range ranges {
+			writers[r] = bytes.NewBuffer([]byte{})
+		}
 	}
 
 	since, hasData, err := s.cache.CreateSnapshots(ctx, writers, s.since)

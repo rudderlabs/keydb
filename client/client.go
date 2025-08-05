@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -523,14 +524,16 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 
 // CreateSnapshots forces the creation of snapshots on a node
 // This method is meant to be used by an Operator process only!
-func (c *Client) CreateSnapshots(ctx context.Context) error {
+func (c *Client) CreateSnapshots(ctx context.Context, hashRanges ...uint32) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
 	for nodeID, client := range c.clients {
 		group.Go(func() error {
-			req := &pb.CreateSnapshotsRequest{}
+			req := &pb.CreateSnapshotsRequest{
+				HashRange: hashRanges,
+			}
 
 			var err error
 			var resp *pb.CreateSnapshotsResponse
@@ -554,6 +557,9 @@ func (c *Client) CreateSnapshots(ctx context.Context) error {
 			}
 
 			if !resp.Success {
+				if err == nil {
+					err = errors.New(resp.ErrorMessage)
+				}
 				return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
 			}
 

@@ -95,7 +95,9 @@ message LoadSnapshotsResponse {
 }
 
 // CreateSnapshotRequests initiates snapshot creation
-message CreateSnapshotsRequest {}
+message CreateSnapshotsRequest {
+  repeated uint32 hash_range = 1; // repeated means 0 or more values, pass none to create all snapshots
+}
 
 // CreateSnapshotsResponse contains the result of the snapshot creation
 message CreateSnapshotsResponse {
