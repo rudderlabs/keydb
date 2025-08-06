@@ -524,7 +524,7 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 
 // CreateSnapshots forces the creation of snapshots on a node
 // This method is meant to be used by an Operator process only!
-func (c *Client) CreateSnapshots(ctx context.Context, hashRanges ...uint32) error {
+func (c *Client) CreateSnapshots(ctx context.Context, fullSync bool, hashRanges ...uint32) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -533,6 +533,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, hashRanges ...uint32) erro
 		group.Go(func() error {
 			req := &pb.CreateSnapshotsRequest{
 				HashRange: hashRanges,
+				FullSync:  fullSync,
 			}
 
 			var err error

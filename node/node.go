@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -143,6 +144,7 @@ type cloudStorageReader interface {
 
 type cloudStorageWriter interface {
 	UploadReader(ctx context.Context, objName string, rdr io.Reader) (filemanager.UploadedFile, error)
+	Delete(ctx context.Context, keys []string) error
 }
 
 type cloudStorage interface {
@@ -357,7 +359,7 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 	}
 
 	if !download {
-		// We still had to do the above in order to populate the since map
+		// We still had to do the above in order to populate the "since" map
 		return nil
 	}
 
@@ -685,7 +687,7 @@ func (s *Service) CreateSnapshots(
 	}
 
 	// Create snapshots for all hash ranges this node handles
-	if err := s.createSnapshots(ctx, req.HashRange...); err != nil {
+	if err := s.createSnapshots(ctx, req.FullSync, req.HashRange...); err != nil {
 		s.logger.Errorn("Failed to create snapshots", obskit.Error(err))
 		return &pb.CreateSnapshotsResponse{
 			Success:      false,
@@ -701,7 +703,7 @@ func (s *Service) CreateSnapshots(
 }
 
 // createSnapshots creates snapshots for all hash ranges this node handles
-func (s *Service) createSnapshots(ctx context.Context, hashRanges ...uint32) error {
+func (s *Service) createSnapshots(ctx context.Context, fullSync bool, hashRanges ...uint32) error {
 	// Create a map of the hash ranges that we need to create as per request.
 	// If the map ends up empty, then we create snapshots for all hash ranges.
 	selected := make(map[uint32]struct{}, len(hashRanges))
@@ -727,31 +729,53 @@ func (s *Service) createSnapshots(ctx context.Context, hashRanges ...uint32) err
 		}
 	}
 
-	since, hasData, err := s.cache.CreateSnapshots(ctx, writers, s.since)
+	var (
+		since    map[uint32]uint64
+		sinceLog strings.Builder
+	)
+	if fullSync {
+		since = make(map[uint32]uint64, len(ranges))
+		for r := range ranges {
+			since[r] = 0
+			sinceLog.WriteString(fmt.Sprintf("%d:%d,", r, 0))
+		}
+	} else {
+		since = s.since
+		for hr, ss := range since {
+			sinceLog.WriteString(fmt.Sprintf("%d:%d,", hr, ss))
+		}
+	}
+
+	log := s.logger.Withn(
+		logger.NewBoolField("fullSync", fullSync),
+		logger.NewIntField("numHashRanges", int64(len(ranges))),
+		logger.NewIntField("numWriters", int64(len(writers))),
+		logger.NewStringField("since", sinceLog.String()))
+	log.Infon("Creating snapshots")
+
+	newSince, hasData, err := s.cache.CreateSnapshots(ctx, writers, since)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshots: %w", err)
 	}
 
-	s.logger.Infon("Uploading snapshots",
-		logger.NewIntField("since", int64(since)),
-		logger.NewIntField("numHashRanges", int64(len(ranges))),
-		logger.NewIntField("numWriters", int64(len(writers))),
-	)
+	log = log.Withn(logger.NewIntField("newSince", int64(newSince)))
+	log.Infon("Uploading snapshots")
 
+	filenames := make(map[string]struct{})
 	for hashRange, w := range writers {
 		buf, ok := w.(*bytes.Buffer)
 		if !ok {
 			return fmt.Errorf("invalid writer type %T for hash range: %d", w, hashRange)
 		}
 		if !hasData[hashRange] {
-			s.logger.Infon("No data to upload for hash range", logger.NewIntField("hashRange", int64(hashRange)))
+			log.Infon("No data to upload for hash range", logger.NewIntField("hashRange", int64(hashRange)))
 			continue // no data to upload
 		}
 
-		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, s.since[hashRange], since)
-		s.logger.Infon("Uploading snapshot file",
-			logger.NewIntField("from", int64(s.since[hashRange])),
-			logger.NewIntField("to", int64(since)),
+		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, since[hashRange], newSince)
+		log.Infon("Uploading snapshot file",
+			logger.NewIntField("from", int64(since[hashRange])),
+			logger.NewIntField("to", int64(newSince)),
 			logger.NewIntField("hashRange", int64(hashRange)),
 			logger.NewStringField("filename", filename),
 		)
@@ -761,10 +785,62 @@ func (s *Service) createSnapshots(ctx context.Context, hashRanges ...uint32) err
 			return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
 		}
 
-		s.since[hashRange] = since
+		s.since[hashRange] = newSince
+		if fullSync {
+			filenames[filename] = struct{}{}
+		}
 	}
 
 	s.lastSnapshotTime = time.Now()
+
+	if !fullSync {
+		return nil
+	}
+
+	// Clearing up old files that are incremental updates.
+	// Since we've done a full sync they are not needed anymore and shouldn't be loaded.
+	list := s.storage.ListFilesWithPrefix(ctx, "", getSnapshotFilenamePrefix(), s.maxFilesToList)
+	files, err := list.Next()
+	if err != nil {
+		return fmt.Errorf("failed to list snapshot files: %w", err)
+	}
+
+	var toDelete []string
+	for _, file := range files {
+		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
+		if len(matches) != 4 {
+			continue
+		}
+		hashRange, err := strconv.Atoi(matches[1])
+		if err != nil {
+			log.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
+			continue
+		}
+		_, ok := writers[uint32(hashRange)]
+		if !ok {
+			// We haven't uploaded anything about this hash range, so we can skip it.
+			continue
+		}
+		_, ok = filenames[file.Key]
+		if ok {
+			continue // We uploaded this one
+		}
+		toDelete = append(toDelete, file.Key)
+	}
+
+	if len(toDelete) == 0 {
+		return nil
+	}
+
+	log.Infon("Deleting old snapshot files", logger.NewStringField("filenames", strings.Join(toDelete, ",")))
+
+	err = s.storage.Delete(ctx, toDelete)
+	if err != nil {
+		log.Errorn("Failed to delete old snapshot files",
+			logger.NewStringField("filenames", strings.Join(toDelete, ",")),
+			obskit.Error(err))
+		return fmt.Errorf("failed to delete old snapshot files: %w", err)
+	}
 
 	return nil
 }

@@ -544,6 +544,7 @@ func (x *LoadSnapshotsResponse) GetNodeId() uint32 {
 type CreateSnapshotsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HashRange     []uint32               `protobuf:"varint,1,rep,packed,name=hash_range,json=hashRange,proto3" json:"hash_range,omitempty"` // repeated means 0 or more values, pass none to create all snapshots
+	FullSync      bool                   `protobuf:"varint,2,opt,name=full_sync,json=fullSync,proto3" json:"full_sync,omitempty"`           // pass true to force the nodes to replace a snapshot completely
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -583,6 +584,13 @@ func (x *CreateSnapshotsRequest) GetHashRange() []uint32 {
 		return x.HashRange
 	}
 	return nil
+}
+
+func (x *CreateSnapshotsRequest) GetFullSync() bool {
+	if x != nil {
+		return x.FullSync
+	}
+	return false
 }
 
 // CreateSnapshotsResponse contains the result of the snapshot creation
@@ -890,10 +898,11 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\x15LoadSnapshotsResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x17\n" +
-	"\anode_id\x18\x03 \x01(\rR\x06nodeId\"7\n" +
+	"\anode_id\x18\x03 \x01(\rR\x06nodeId\"T\n" +
 	"\x16CreateSnapshotsRequest\x12\x1d\n" +
 	"\n" +
-	"hash_range\x18\x01 \x03(\rR\thashRange\"q\n" +
+	"hash_range\x18\x01 \x03(\rR\thashRange\x12\x1b\n" +
+	"\tfull_sync\x18\x02 \x01(\bR\bfullSync\"q\n" +
 	"\x17CreateSnapshotsResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x17\n" +
