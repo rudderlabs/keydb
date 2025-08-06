@@ -445,6 +445,7 @@ func (x *GetNodeInfoResponse) GetLastSnapshotTimestamp() uint64 {
 // LoadSnapshotsRequest initiates loading snapshots from cloud storage
 type LoadSnapshotsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	HashRange     []uint32               `protobuf:"varint,1,rep,packed,name=hash_range,json=hashRange,proto3" json:"hash_range,omitempty"` // repeated means 0 or more values, pass none to load all snapshots handled by that node
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -477,6 +478,13 @@ func (x *LoadSnapshotsRequest) ProtoReflect() protoreflect.Message {
 // Deprecated: Use LoadSnapshotsRequest.ProtoReflect.Descriptor instead.
 func (*LoadSnapshotsRequest) Descriptor() ([]byte, []int) {
 	return file_proto_keydb_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *LoadSnapshotsRequest) GetHashRange() []uint32 {
+	if x != nil {
+		return x.HashRange
+	}
+	return nil
 }
 
 // LoadSnapshotsResponse contains the result of the snapshot loading operation
@@ -544,7 +552,7 @@ func (x *LoadSnapshotsResponse) GetNodeId() uint32 {
 type CreateSnapshotsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	HashRange     []uint32               `protobuf:"varint,1,rep,packed,name=hash_range,json=hashRange,proto3" json:"hash_range,omitempty"` // repeated means 0 or more values, pass none to create all snapshots
-	FullSync      bool                   `protobuf:"varint,2,opt,name=full_sync,json=fullSync,proto3" json:"full_sync,omitempty"`           // pass true to force the nodes to replace a snapshot completely
+	FullSync      bool                   `protobuf:"varint,2,opt,name=full_sync,json=fullSync,proto3" json:"full_sync,omitempty"`           // pass true to force the nodes to create snapshots from scratch (not incremental)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -893,8 +901,10 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\x0enodesAddresses\x18\x03 \x03(\tR\x0enodesAddresses\x12\x1f\n" +
 	"\vhash_ranges\x18\x04 \x03(\rR\n" +
 	"hashRanges\x126\n" +
-	"\x17last_snapshot_timestamp\x18\x05 \x01(\x04R\x15lastSnapshotTimestamp\"\x16\n" +
-	"\x14LoadSnapshotsRequest\"o\n" +
+	"\x17last_snapshot_timestamp\x18\x05 \x01(\x04R\x15lastSnapshotTimestamp\"5\n" +
+	"\x14LoadSnapshotsRequest\x12\x1d\n" +
+	"\n" +
+	"hash_range\x18\x01 \x03(\rR\thashRange\"o\n" +
 	"\x15LoadSnapshotsResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x17\n" +

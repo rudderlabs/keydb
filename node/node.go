@@ -301,22 +301,22 @@ func (s *Service) getCurrentRanges() map[uint32]struct{} {
 }
 
 // initCaches initializes the caches for all hash ranges this node handles
-func (s *Service) initCaches(ctx context.Context, download bool) error {
-	ranges := s.getCurrentRanges() // gets the hash ranges for this node
+func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRanges ...uint32) error {
+	currentRanges := s.getCurrentRanges() // gets the hash ranges for this node
 
 	// Remove caches and key maps for ranges this node no longer handles
 	for r := range s.metrics.getKeysCounters {
-		if _, shouldHandle := ranges[r]; !shouldHandle {
+		if _, shouldHandle := currentRanges[r]; !shouldHandle {
 			delete(s.metrics.getKeysCounters, r)
 		}
 	}
 	for r := range s.metrics.putKeysCounter {
-		if _, shouldHandle := ranges[r]; !shouldHandle {
+		if _, shouldHandle := currentRanges[r]; !shouldHandle {
 			delete(s.metrics.putKeysCounter, r)
 		}
 	}
 
-	for r := range ranges {
+	for r := range currentRanges {
 		statsTags := stats.Tags{
 			"nodeID":    strconv.Itoa(int(s.config.NodeID)),
 			"hashRange": strconv.Itoa(int(r)),
@@ -325,12 +325,21 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 	}
 
+	if !download {
+		// We still had to do the above in order to populate the "since" map
+		return nil
+	}
+
 	// List all files in the bucket
-	filenamesPrefix := getSnapshotFilenamePrefix()
-	list := s.storage.ListFilesWithPrefix(ctx, "", filenamesPrefix, s.maxFilesToList)
+	list := s.storage.ListFilesWithPrefix(ctx, "", getSnapshotFilenamePrefix(), s.maxFilesToList)
 	files, err := list.Next()
 	if err != nil {
 		return fmt.Errorf("failed to list snapshot files: %w", err)
+	}
+
+	selected := make(map[uint32]struct{}, len(selectedHashRanges))
+	for _, r := range selectedHashRanges {
+		selected[r] = struct{}{}
 	}
 
 	filesByHashRange := make(map[uint32][]string, len(files))
@@ -339,28 +348,30 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 		if len(matches) != 4 {
 			continue
 		}
-		hashRange, err := strconv.Atoi(matches[1])
+		hashRangeInt, err := strconv.Atoi(matches[1])
 		if err != nil {
 			s.logger.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
 			continue
+		}
+		hashRange := uint32(hashRangeInt)
+		if len(selectedHashRanges) > 0 {
+			if _, shouldHandle := selected[hashRange]; !shouldHandle {
+				s.logger.Warnn("Ignoring snapshot file for hash range since it was not selected")
+				continue
+			}
 		}
 		since, err := strconv.Atoi(matches[3]) // getting "to", not "from"
 		if err != nil {
 			s.logger.Warnn("Invalid snapshot filename (since)", logger.NewStringField("filename", file.Key))
 			continue
 		}
-		if s.since[uint32(hashRange)] < uint64(since) {
-			s.since[uint32(hashRange)] = uint64(since)
+		if s.since[hashRange] < uint64(since) {
+			s.since[hashRange] = uint64(since)
 		}
-		if filesByHashRange[uint32(hashRange)] == nil {
-			filesByHashRange[uint32(hashRange)] = make([]string, 0, 1)
+		if filesByHashRange[hashRange] == nil {
+			filesByHashRange[hashRange] = make([]string, 0, 1)
 		}
-		filesByHashRange[uint32(hashRange)] = append(filesByHashRange[uint32(hashRange)], file.Key)
-	}
-
-	if !download {
-		// We still had to do the above in order to populate the "since" map
-		return nil
+		filesByHashRange[hashRange] = append(filesByHashRange[hashRange], file.Key)
 	}
 
 	for i := range filesByHashRange {
@@ -368,18 +379,16 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 	}
 
 	var (
-		group, gCtx = kitsync.NewEagerGroup(ctx, len(ranges))
+		group, gCtx = kitsync.NewEagerGroup(ctx, len(currentRanges))
 		buffers     = make([]io.Reader, 0, len(filesByHashRange))
 		buffersMu   sync.Mutex
 	)
-	for r := range ranges {
+	for r := range currentRanges {
 		snapshotFiles := filesByHashRange[r]
 		if len(snapshotFiles) == 0 {
 			s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", int64(r)))
 			continue
 		}
-
-		// TODO what if we were already managing a hash range? loading it up would be unnecessary
 
 		group.Go(func() error { // Try to load snapshot for this range
 			for _, snapshotFile := range snapshotFiles {
@@ -392,7 +401,6 @@ func (s *Service) initCaches(ctx context.Context, download bool) error {
 						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
 						return nil
 					}
-					// TODO what do we do if we can't load a snapshot due to an error?
 					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
 				}
 				buffersMu.Lock()
@@ -651,7 +659,7 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 	}
 
 	// Load snapshots for all hash ranges this node handles
-	if err := s.initCaches(ctx, true); err != nil {
+	if err := s.initCaches(ctx, true, req.HashRange...); err != nil {
 		s.logger.Errorn("Failed to load snapshots", obskit.Error(err))
 		return &pb.LoadSnapshotsResponse{
 			Success:      false,
@@ -703,28 +711,28 @@ func (s *Service) CreateSnapshots(
 }
 
 // createSnapshots creates snapshots for all hash ranges this node handles
-func (s *Service) createSnapshots(ctx context.Context, fullSync bool, hashRanges ...uint32) error {
+func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHashRanges ...uint32) error {
 	// Create a map of the hash ranges that we need to create as per request.
 	// If the map ends up empty, then we create snapshots for all hash ranges.
-	selected := make(map[uint32]struct{}, len(hashRanges))
-	for _, r := range hashRanges {
+	selected := make(map[uint32]struct{}, len(selectedHashRanges))
+	for _, r := range selectedHashRanges {
 		selected[r] = struct{}{}
 	}
 
 	// Get hash ranges for this node
-	ranges := s.getCurrentRanges()
+	currentRanges := s.getCurrentRanges()
 	var writers map[uint32]io.Writer
 	if len(selected) > 0 {
 		writers = make(map[uint32]io.Writer, len(selected))
 		for r := range selected {
-			if _, ok := ranges[r]; !ok {
+			if _, ok := currentRanges[r]; !ok {
 				return fmt.Errorf("hash range %d not handled by this node", r)
 			}
 			writers[r] = bytes.NewBuffer([]byte{})
 		}
 	} else {
-		writers = make(map[uint32]io.Writer, len(ranges))
-		for r := range ranges {
+		writers = make(map[uint32]io.Writer, len(currentRanges))
+		for r := range currentRanges {
 			writers[r] = bytes.NewBuffer([]byte{})
 		}
 	}
@@ -734,8 +742,8 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, hashRanges
 		sinceLog strings.Builder
 	)
 	if fullSync {
-		since = make(map[uint32]uint64, len(ranges))
-		for r := range ranges {
+		since = make(map[uint32]uint64, len(currentRanges))
+		for r := range currentRanges {
 			since[r] = 0
 			sinceLog.WriteString(fmt.Sprintf("%d:%d,", r, 0))
 		}
@@ -748,7 +756,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, hashRanges
 
 	log := s.logger.Withn(
 		logger.NewBoolField("fullSync", fullSync),
-		logger.NewIntField("numHashRanges", int64(len(ranges))),
+		logger.NewIntField("numHashRanges", int64(len(currentRanges))),
 		logger.NewIntField("numWriters", int64(len(writers))),
 		logger.NewStringField("since", sinceLog.String()))
 	log.Infon("Creating snapshots")
