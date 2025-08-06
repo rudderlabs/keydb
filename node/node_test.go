@@ -165,6 +165,7 @@ func TestScaleUpAndDown(t *testing.T) {
 			Addresses:        []string{node0Address},
 		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
+		require.NoError(t, operator.LoadSnapshots(ctx))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		respNode0, err := c.GetNodeInfo(ctx, 0)
@@ -188,6 +189,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		// remove node0, you have to remove node1
 		require.NoError(t, operator.CreateSnapshots(ctx, false))
 		require.NoError(t, operator.Scale(ctx, node0Address))
+		require.NoError(t, operator.LoadSnapshots(ctx))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		respNode0, err = c.GetNodeInfo(ctx, 0)
@@ -256,6 +258,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			Addresses:        []string{node0Address},
 		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
+		require.NoError(t, operator.LoadSnapshots(ctx))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		require.Equal(t, 1, c.ClusterSize(), "The client should still believe that the cluster size is 1")
@@ -275,6 +278,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			Addresses:        []string{node0Address, node1Address},
 		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address, node2Address))
+		require.NoError(t, operator.LoadSnapshots(ctx))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		// Verify that the client's cluster size is still 2 (not updated yet)
@@ -299,6 +303,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// node0, you have to remove node1
 		require.NoError(t, operator.CreateSnapshots(ctx, false))
 		require.NoError(t, operator.Scale(ctx, node0Address))
+		require.NoError(t, operator.LoadSnapshots(ctx))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		exists, err = c.Get(ctx, allKeys)

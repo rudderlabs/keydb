@@ -601,8 +601,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	s.config.Addresses = req.NodesAddresses
 
 	// Reinitialize caches for the new cluster size
-	// TODO check this ctx, a client cancellation from the Operator client might leave the node in a unwanted state
-	if err := s.initCaches(ctx, true); err != nil { // Revert to previous cluster size on error
+	if err := s.initCaches(ctx, false); err != nil { // Revert to previous cluster size on error
 		log.Errorn("Failed to initialize caches", obskit.Error(err))
 		s.config.ClusterSize = previousClusterSize
 		s.scaling = false
@@ -648,15 +647,6 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 	defer s.mu.Unlock()
 
 	s.logger.Infon("Load snapshots request received")
-
-	if s.scaling {
-		s.logger.Warnn("Skipping snapshot loading while scaling")
-		return &pb.LoadSnapshotsResponse{
-			Success:      false,
-			ErrorMessage: "scaling operation in progress",
-			NodeId:       s.config.NodeID,
-		}, nil
-	}
 
 	// Load snapshots for all hash ranges this node handles
 	if err := s.initCaches(ctx, true, req.HashRange...); err != nil {

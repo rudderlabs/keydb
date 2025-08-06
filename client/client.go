@@ -573,14 +573,16 @@ func (c *Client) CreateSnapshots(ctx context.Context, fullSync bool, hashRanges 
 
 // LoadSnapshots forces all nodes to load snapshots from cloud storage
 // This method is meant to be used by an Operator process only!
-func (c *Client) LoadSnapshots(ctx context.Context) error {
+func (c *Client) LoadSnapshots(ctx context.Context, hashRanges ...uint32) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
 	for nodeID, client := range c.clients {
 		group.Go(func() error {
-			req := &pb.LoadSnapshotsRequest{}
+			req := &pb.LoadSnapshotsRequest{
+				HashRange: hashRanges,
+			}
 
 			var err error
 			var resp *pb.LoadSnapshotsResponse
