@@ -68,7 +68,7 @@ func TestSimple(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		err = c.CreateSnapshots(ctx, false)
+		err = c.CreateSnapshots(ctx, 0, false)
 		require.NoError(t, err)
 
 		session := cloudStorage.ListFilesWithPrefix(context.Background(), "", "", 500)
@@ -92,7 +92,7 @@ func TestSimple(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, c.LoadSnapshots(ctx))
+		require.NoError(t, c.LoadSnapshots(ctx, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
 		require.NoError(t, err)
@@ -147,7 +147,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
 		operator := getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, operator.CreateSnapshots(ctx, false))
+		require.NoError(t, operator.CreateSnapshots(ctx, 0, false))
 
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
@@ -165,7 +165,7 @@ func TestScaleUpAndDown(t *testing.T) {
 			Addresses:        []string{node0Address},
 		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
-		require.NoError(t, operator.LoadSnapshots(ctx))
+		require.NoError(t, operator.LoadSnapshots(ctx, 1))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		respNode0, err := c.GetNodeInfo(ctx, 0)
@@ -187,9 +187,10 @@ func TestScaleUpAndDown(t *testing.T) {
 		// then it will be node2 and the clusterSize will be 3
 		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't
 		// remove node0, you have to remove node1
-		require.NoError(t, operator.CreateSnapshots(ctx, false))
+		require.NoError(t, operator.CreateSnapshots(ctx, 0, false))
+		require.NoError(t, operator.CreateSnapshots(ctx, 1, false))
 		require.NoError(t, operator.Scale(ctx, node0Address))
-		require.NoError(t, operator.LoadSnapshots(ctx))
+		require.NoError(t, operator.LoadSnapshots(ctx, 0))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		respNode0, err = c.GetNodeInfo(ctx, 0)
@@ -240,7 +241,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
 		operator := getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, operator.CreateSnapshots(ctx, false))
+		require.NoError(t, operator.CreateSnapshots(ctx, 0, false))
 
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
@@ -258,7 +259,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			Addresses:        []string{node0Address},
 		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
-		require.NoError(t, operator.LoadSnapshots(ctx))
+		require.NoError(t, operator.LoadSnapshots(ctx, 1))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		require.Equal(t, 1, c.ClusterSize(), "The client should still believe that the cluster size is 1")
@@ -278,7 +279,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			Addresses:        []string{node0Address, node1Address},
 		}, conf)
 		require.NoError(t, operator.Scale(ctx, node0Address, node1Address, node2Address))
-		require.NoError(t, operator.LoadSnapshots(ctx))
+		require.NoError(t, operator.LoadSnapshots(ctx, 2))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		// Verify that the client's cluster size is still 2 (not updated yet)
@@ -301,9 +302,10 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// then it will be node2 and the clusterSize will be 3
 		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove
 		// node0, you have to remove node1
-		require.NoError(t, operator.CreateSnapshots(ctx, false))
+		require.NoError(t, operator.CreateSnapshots(ctx, 1, false))
+		require.NoError(t, operator.CreateSnapshots(ctx, 2, false))
 		require.NoError(t, operator.Scale(ctx, node0Address))
-		require.NoError(t, operator.LoadSnapshots(ctx))
+		require.NoError(t, operator.LoadSnapshots(ctx, 0))
 		require.NoError(t, operator.ScaleComplete(ctx))
 
 		exists, err = c.Get(ctx, allKeys)
@@ -354,7 +356,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		require.NoError(t, c.CreateSnapshots(ctx, false))
+		require.NoError(t, c.CreateSnapshots(ctx, 0, false))
 		// we expect one hash range to be empty so the file won't be uploaded
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
@@ -367,7 +369,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false, true}, exists)
 
-		require.NoError(t, c.CreateSnapshots(ctx, false))
+		require.NoError(t, c.CreateSnapshots(ctx, 0, false))
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
@@ -391,7 +393,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, c.LoadSnapshots(ctx))
+		require.NoError(t, c.LoadSnapshots(ctx, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
 		require.NoError(t, err)
@@ -400,7 +402,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		// Testing full sync capabilities.
 		// All files should be removed but the new ones.
 		// Being "full syncs" they start from the beginning (i.e. 0) up to the latest recorded (i.e. 2).
-		require.NoError(t, c.CreateSnapshots(ctx, true))
+		require.NoError(t, c.CreateSnapshots(ctx, 0, true))
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_2.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_2.snapshot$"),
@@ -458,13 +460,13 @@ func TestSelectedSnapshots(t *testing.T) {
 
 		// Create only the snapshots for the hash ranges 0 and 1.
 		// We expect one hash range to be empty so the file won't be uploaded.
-		require.NoError(t, c.CreateSnapshots(ctx, false, 0, 1))
+		require.NoError(t, c.CreateSnapshots(ctx, 0, false, 0, 1))
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 		)
 
 		// Now create the snapshot for the remaining hash ranges
-		require.NoError(t, c.CreateSnapshots(ctx, false, 2, 3))
+		require.NoError(t, c.CreateSnapshots(ctx, 0, false, 2, 3))
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
@@ -472,7 +474,7 @@ func TestSelectedSnapshots(t *testing.T) {
 		)
 
 		// Now try to create a snapshot for a hash range that is not handled by the node
-		require.ErrorContains(t, c.CreateSnapshots(ctx, false, 4), "hash range 4 not handled by this node")
+		require.ErrorContains(t, c.CreateSnapshots(ctx, 0, false, 4), "hash range 4 not handled by this node")
 
 		cancel()
 		node0.Close()
@@ -488,7 +490,7 @@ func TestSelectedSnapshots(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, c.LoadSnapshots(ctx))
+		require.NoError(t, c.LoadSnapshots(ctx, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
 		require.NoError(t, err)

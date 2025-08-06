@@ -68,7 +68,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 
 	// Create and start HTTP server
 	serverAddr := conf.GetString("serverAddr", ":8080")
-	server := newHTTPServer(c, serverAddr)
+	server := newHTTPServer(c, serverAddr, log)
 
 	// Start server in a goroutine
 	serverErrCh := make(chan error, 1)

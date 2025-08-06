@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/rudderlabs/rudder-go-kit/jsonrs"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/rudder-go-kit/jsonrs"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
 type httpServer struct {
@@ -18,19 +20,27 @@ type httpServer struct {
 }
 
 // newHTTPServer creates a new HTTP server
-func newHTTPServer(client *client.Client, addr string) *httpServer {
+func newHTTPServer(client *client.Client, addr string, log logger.Logger) *httpServer {
 	s := &httpServer{
 		client: client,
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/get", s.handleGet)
-	mux.HandleFunc("/put", s.handlePut)
-	mux.HandleFunc("/info", s.handleInfo)
-	mux.HandleFunc("/createSnapshots", s.createSnapshots)
-	mux.HandleFunc("/loadSnapshots", s.handleLoadSnapshots)
-	mux.HandleFunc("/scale", s.handleScale)
-	mux.HandleFunc("/scaleComplete", s.handleScaleComplete)
+	mux := chi.NewRouter()
+	mux.Use(middleware.RequestID)
+	mux.Use(middleware.RealIP)
+	mux.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{
+		Logger:  &loggerAdapter{logger: log},
+		NoColor: true,
+	}))
+	mux.Use(middleware.Recoverer)
+
+	mux.Post("/get", s.handleGet)
+	mux.Post("/put", s.handlePut)
+	mux.Post("/info", s.handleInfo)
+	mux.Post("/createSnapshots", s.handleCreateSnapshots)
+	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
+	mux.Post("/scale", s.handleScale)
+	mux.Post("/scaleComplete", s.handleScaleComplete)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -49,22 +59,28 @@ func (s *httpServer) Start() error { return s.server.ListenAndServe() }
 // Stop stops the HTTP server
 func (s *httpServer) Stop(ctx context.Context) error { return s.server.Shutdown(ctx) }
 
-// handleGet handles GET /get requests
+// handleGet handles POST /get requests
 func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Parse keys from query parameters
-	keys := r.URL.Query()["keys"]
-	if len(keys) == 0 {
+	// Parse request body
+	var req GetRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if len(req.Keys) == 0 {
 		http.Error(w, "No keys provided", http.StatusBadRequest)
 		return
 	}
 
 	// Get values for keys
-	exists, err := s.client.Get(r.Context(), keys)
+	exists, err := s.client.Get(r.Context(), req.Keys)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error getting keys: %v", err), http.StatusInternalServerError)
 		return
@@ -72,7 +88,7 @@ func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	// Create response
 	response := make(map[string]bool)
-	for i, key := range keys {
+	for i, key := range req.Keys {
 		response[key] = exists[i]
 	}
 
@@ -82,12 +98,6 @@ func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
 		return
 	}
-}
-
-// PutRequest represents a request to put keys
-type PutRequest struct {
-	Keys []string `json:"keys"`
-	TTL  string   `json:"ttl"`
 }
 
 // handlePut handles POST /put requests
@@ -129,30 +139,27 @@ func (s *httpServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
-// handleInfo handles GET /info requests
+// handleInfo handles POST /info requests
 func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Parse node ID from query parameters
-	nodeIDStr := r.URL.Query().Get("nodeID")
-	if nodeIDStr == "" {
-		http.Error(w, "No nodeID provided", http.StatusBadRequest)
-		return
-	}
-
-	nodeID, err := strconv.ParseUint(nodeIDStr, 10, 32)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid nodeID: %v", err), http.StatusBadRequest)
+	// Parse request body
+	var req InfoRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	// Get node info
-	info, err := s.client.GetNodeInfo(r.Context(), uint32(nodeID))
+	info, err := s.client.GetNodeInfo(r.Context(), req.NodeID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error getting info for node %d: %v", nodeID, err), http.StatusInternalServerError)
+		http.Error(w,
+			fmt.Sprintf("Error getting info for node %d: %v", req.NodeID, err),
+			http.StatusInternalServerError,
+		)
 		return
 	}
 
@@ -164,15 +171,22 @@ func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// createSnapshots handles POST /createSnapshots requests
-func (s *httpServer) createSnapshots(w http.ResponseWriter, r *http.Request) {
+// handleCreateSnapshots handles POST /createSnapshots requests
+func (s *httpServer) handleCreateSnapshots(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// Parse request body
+	var req CreateSnapshotsRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
 	// Create snapshot
-	if err := s.client.CreateSnapshots(r.Context(), true); err != nil {
+	if err := s.client.CreateSnapshots(r.Context(), req.NodeID, req.FullSync, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error creating snapshot: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -189,8 +203,15 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Parse request body
+	var req LoadSnapshotsRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
 	// Load snapshots from cloud storage
-	if err := s.client.LoadSnapshots(r.Context()); err != nil {
+	if err := s.client.LoadSnapshots(r.Context(), req.NodeID, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -198,11 +219,6 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	// Write response
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
-}
-
-// ScaleRequest represents a request to scale the cluster
-type ScaleRequest struct {
-	Addresses []string `json:"addresses"`
 }
 
 // handleScale handles POST /scale requests
@@ -252,4 +268,12 @@ func (s *httpServer) handleScaleComplete(w http.ResponseWriter, r *http.Request)
 	// Write response
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+type loggerAdapter struct {
+	logger logger.Logger
+}
+
+func (l loggerAdapter) Print(v ...any) {
+	l.logger.Infow("", v...) // nolint:forbidigo
 }

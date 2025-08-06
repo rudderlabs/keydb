@@ -523,99 +523,101 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 }
 
 // CreateSnapshots forces the creation of snapshots on a node
-// This method is meant to be used by an Operator process only!
-func (c *Client) CreateSnapshots(ctx context.Context, fullSync bool, hashRanges ...uint32) error {
+// WARNING: This method is meant to be used ONLY by an Operator!!!
+func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
-	for nodeID, client := range c.clients {
-		group.Go(func() error {
-			req := &pb.CreateSnapshotsRequest{
-				HashRange: hashRanges,
-				FullSync:  fullSync,
-			}
-
-			var err error
-			var resp *pb.CreateSnapshotsResponse
-			for i := 0; i <= c.config.RetryCount; i++ {
-				resp, err = client.CreateSnapshots(ctx, req)
-				if err == nil {
-					break
-				}
-
-				// If this is the last retry, return the error
-				if i == c.config.RetryCount {
-					return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
-				}
-
-				// Wait before retrying
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(c.config.RetryDelay):
-				}
-			}
-
-			if !resp.Success {
-				if err == nil {
-					err = errors.New(resp.ErrorMessage)
-				}
-				return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
-			}
-
-			return nil
-		})
+	// Get the client for this node
+	client, ok := c.clients[int(nodeID)]
+	if !ok {
+		// this should never happen unless clusterSize is updated and the c.clients map isn't
+		// or if there is a bug in the hashing function
+		return fmt.Errorf("no client for node %d", nodeID)
 	}
 
-	return group.Wait()
+	req := &pb.CreateSnapshotsRequest{
+		HashRange: hashRanges,
+		FullSync:  fullSync,
+	}
+
+	var err error
+	var resp *pb.CreateSnapshotsResponse
+	for i := 0; i <= c.config.RetryCount; i++ {
+		resp, err = client.CreateSnapshots(ctx, req)
+		if err == nil {
+			break
+		}
+
+		// If this is the last retry, return the error
+		if i == c.config.RetryCount {
+			return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
+		}
+
+		// Wait before retrying
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.config.RetryDelay):
+		}
+	}
+
+	if !resp.Success {
+		if err == nil {
+			err = errors.New(resp.ErrorMessage)
+		}
+		return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
+	}
+
+	return nil
 }
 
 // LoadSnapshots forces all nodes to load snapshots from cloud storage
 // This method is meant to be used by an Operator process only!
-func (c *Client) LoadSnapshots(ctx context.Context, hashRanges ...uint32) error {
+func (c *Client) LoadSnapshots(ctx context.Context, nodeID uint32, hashRanges ...uint32) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	group, ctx := kitsync.NewEagerGroup(ctx, len(c.clients))
-	for nodeID, client := range c.clients {
-		group.Go(func() error {
-			req := &pb.LoadSnapshotsRequest{
-				HashRange: hashRanges,
-			}
-
-			var err error
-			var resp *pb.LoadSnapshotsResponse
-			for i := 0; i <= c.config.RetryCount; i++ {
-				resp, err = client.LoadSnapshots(ctx, req)
-				if err == nil && resp != nil && resp.Success {
-					break
-				}
-
-				// If this is the last retry, return the error
-				if i == c.config.RetryCount {
-					errMsg := "unknown error"
-					if err != nil {
-						errMsg = err.Error()
-					} else if resp != nil {
-						errMsg = resp.ErrorMessage
-					}
-					return fmt.Errorf("failed to load snapshots on node %d: %s", nodeID, errMsg)
-				}
-
-				// Wait before retrying
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(c.config.RetryDelay):
-				}
-			}
-
-			return nil
-		})
+	// Get the client for this node
+	client, ok := c.clients[int(nodeID)]
+	if !ok {
+		// this should never happen unless clusterSize is updated and the c.clients map isn't
+		// or if there is a bug in the hashing function
+		return fmt.Errorf("no client for node %d", nodeID)
 	}
 
-	return group.Wait()
+	req := &pb.LoadSnapshotsRequest{
+		HashRange: hashRanges,
+	}
+
+	var err error
+	var resp *pb.LoadSnapshotsResponse
+	for i := 0; i <= c.config.RetryCount; i++ {
+		resp, err = client.LoadSnapshots(ctx, req)
+		if err == nil && resp != nil && resp.Success {
+			break
+		}
+
+		// If this is the last retry, return the error
+		if i == c.config.RetryCount {
+			errMsg := "unknown error"
+			if err != nil {
+				errMsg = err.Error()
+			} else if resp != nil {
+				errMsg = resp.ErrorMessage
+			}
+			return fmt.Errorf("failed to load snapshots on node %d: %s", nodeID, errMsg)
+		}
+
+		// Wait before retrying
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(c.config.RetryDelay):
+		}
+	}
+
+	return nil
 }
 
 // Scale changes the number of nodes in the cluster
