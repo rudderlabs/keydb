@@ -759,9 +759,44 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, hashRanges
 	}
 
 	log = log.Withn(logger.NewIntField("newSince", int64(newSince)))
+
+	filesToBeDeletedByHashRange := make(map[uint32][]string)
+	if fullSync {
+		log.Infon("Getting list of existing snapshot files")
+
+		list := s.storage.ListFilesWithPrefix(ctx, "", getSnapshotFilenamePrefix(), s.maxFilesToList)
+		files, err := list.Next()
+		if err != nil {
+			return fmt.Errorf("failed to list snapshot files: %w", err)
+		}
+
+		for _, file := range files {
+			matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
+			if len(matches) != 4 {
+				continue
+			}
+			hashRangeInt, err := strconv.Atoi(matches[1])
+			if err != nil {
+				log.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
+				continue
+			}
+			hashRange := uint32(hashRangeInt)
+			_, ok := writers[hashRange]
+			if !ok {
+				// We won't upload anything about this hash range, so we can skip it.
+				continue
+			}
+			// If we're going to overwrite the file, we don't need to delete it.
+			newFilename := getSnapshotFilenamePrefix() +
+				getSnapshotFilenamePostfix(hashRange, since[hashRange], newSince)
+			if newFilename != file.Key {
+				filesToBeDeletedByHashRange[hashRange] = append(filesToBeDeletedByHashRange[hashRange], file.Key)
+			}
+		}
+	}
+
 	log.Infon("Uploading snapshots")
 
-	filenames := make(map[string]struct{})
 	for hashRange, w := range writers {
 		buf, ok := w.(*bytes.Buffer)
 		if !ok {
@@ -786,61 +821,24 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, hashRanges
 		}
 
 		s.since[hashRange] = newSince
-		if fullSync {
-			filenames[filename] = struct{}{}
+
+		if fullSync && len(filesToBeDeletedByHashRange[hashRange]) > 0 {
+			// Clearing up old files that are incremental updates.
+			// Since we've done a "full sync" they are not needed anymore and shouldn't be loaded next time.
+			filesToBeDeleted := filesToBeDeletedByHashRange[hashRange]
+			filesToBeDeletedLogField := logger.NewStringField("filenames", strings.Join(filesToBeDeleted, ","))
+
+			log.Infon("Deleting old snapshot files", filesToBeDeletedLogField)
+
+			err = s.storage.Delete(ctx, filesToBeDeleted)
+			if err != nil {
+				log.Errorn("Failed to delete old snapshot files", filesToBeDeletedLogField, obskit.Error(err))
+				return fmt.Errorf("failed to delete old snapshot files: %w", err)
+			}
 		}
 	}
 
 	s.lastSnapshotTime = time.Now()
-
-	if !fullSync {
-		return nil
-	}
-
-	// Clearing up old files that are incremental updates.
-	// Since we've done a full sync they are not needed anymore and shouldn't be loaded.
-	list := s.storage.ListFilesWithPrefix(ctx, "", getSnapshotFilenamePrefix(), s.maxFilesToList)
-	files, err := list.Next()
-	if err != nil {
-		return fmt.Errorf("failed to list snapshot files: %w", err)
-	}
-
-	var toDelete []string
-	for _, file := range files {
-		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
-		if len(matches) != 4 {
-			continue
-		}
-		hashRange, err := strconv.Atoi(matches[1])
-		if err != nil {
-			log.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
-			continue
-		}
-		_, ok := writers[uint32(hashRange)]
-		if !ok {
-			// We haven't uploaded anything about this hash range, so we can skip it.
-			continue
-		}
-		_, ok = filenames[file.Key]
-		if ok {
-			continue // We uploaded this one
-		}
-		toDelete = append(toDelete, file.Key)
-	}
-
-	if len(toDelete) == 0 {
-		return nil
-	}
-
-	log.Infon("Deleting old snapshot files", logger.NewStringField("filenames", strings.Join(toDelete, ",")))
-
-	err = s.storage.Delete(ctx, toDelete)
-	if err != nil {
-		log.Errorn("Failed to delete old snapshot files",
-			logger.NewStringField("filenames", strings.Join(toDelete, ",")),
-			obskit.Error(err))
-		return fmt.Errorf("failed to delete old snapshot files: %w", err)
-	}
 
 	return nil
 }
