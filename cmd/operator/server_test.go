@@ -18,10 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/rudderlabs/keydb/internal/hash"
-
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
+	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/operator"
 	"github.com/rudderlabs/keydb/node"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -268,7 +267,7 @@ func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (
 	return minioClient, cloudStorage
 }
 
-func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...string) *opClient {
+func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...string) *opClient { // nolint:unparam
 	t.Helper()
 
 	c, err := client.NewClient(client.Config{
@@ -339,4 +338,266 @@ func (c *opClient) Do(endpoint string, data any, success ...bool) string {
 	}
 
 	return string(body)
+}
+
+func TestAutoScale(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	_, cloudStorage := getCloudStorage(t, pool, newConf())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create the node service
+	totalHashRanges := uint32(3)
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, node0Conf)
+
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+
+	// Test Put some initial data
+	_ = op.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+	}, true)
+
+	// Test Get to verify data exists
+	body := op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+
+	// Create second node for scale up test
+	node1Conf := newConf()
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           1,
+		ClusterSize:      2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		Addresses:        []string{node0Address},
+	}, node1Conf)
+
+	// Test Scale Up using autoScale
+	_ = op.Do("/autoScale", AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address},
+		NewNodesAddresses: []string{node0Address, node1Address},
+	}, true)
+
+	// Verify scale up worked - check node info
+	body = op.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse := pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 2)
+
+	body = op.Do("/info", InfoRequest{NodeID: 1})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 2)
+
+	// Verify data is still accessible after scale up
+	body = op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+
+	// Write more keys after scale up to test data preservation during scale down
+	_ = op.Do("/put", PutRequest{
+		Keys: []string{"key5", "key6", "key7", "key8"}, TTL: testTTL,
+	}, true)
+
+	// Verify all keys are accessible before scale down
+	body = op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+	})
+	require.JSONEq(t,
+		`{"key1":true,"key2":true,"key3":true,"key4":false,"key5":true,"key6":true,"key7":true,"key8":true}`, body,
+	)
+
+	// Test Scale Down using autoScale
+	_ = op.Do("/autoScale", AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address, node1Address},
+		NewNodesAddresses: []string{node0Address},
+	}, true)
+
+	// Verify scale down worked - check node info
+	body = op.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 1, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 1)
+
+	// Verify all data is still accessible after scale down
+	body = op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+	})
+	require.JSONEq(t,
+		`{"key1":true,"key2":true,"key3":true,"key4":false,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		body,
+	)
+
+	cancel()
+	node0.Close()
+	node1.Close()
+}
+
+func TestHandleAutoScaleErrors(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	_, cloudStorage := getCloudStorage(t, pool, newConf())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create the node service
+	totalHashRanges := uint32(3)
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, node0Conf)
+
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+
+	// Test error cases
+	testCases := []struct {
+		name           string
+		request        AutoScaleRequest
+		expectedStatus int
+	}{
+		{
+			name: "empty old addresses",
+			request: AutoScaleRequest{
+				OldNodesAddresses: []string{},
+				NewNodesAddresses: []string{node0Address},
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name: "empty new addresses",
+			request: AutoScaleRequest{
+				OldNodesAddresses: []string{node0Address},
+				NewNodesAddresses: []string{},
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name: "auto-healing with same cluster size",
+			request: AutoScaleRequest{
+				OldNodesAddresses: []string{node0Address},
+				NewNodesAddresses: []string{node0Address},
+			},
+			expectedStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf, err := jsonrs.Marshal(tc.request)
+			require.NoError(t, err)
+			req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+			require.NoError(t, err)
+
+			resp, err := op.client.Do(req)
+			require.NoError(t, err)
+			defer func() { httputil.CloseResponse(resp) }()
+
+			require.Equal(t, tc.expectedStatus, resp.StatusCode)
+		})
+	}
+
+	cancel()
+	node0.Close()
+}
+
+func TestAutoHealing(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	_, cloudStorage := getCloudStorage(t, pool, newConf())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create the node service
+	totalHashRanges := uint32(3)
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, node0Conf)
+
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+
+	// Test Put some initial data
+	_ = op.Do("/put", PutRequest{
+		Keys: []string{"heal1", "heal2", "heal3"}, TTL: testTTL,
+	}, true)
+
+	// Test Get to verify data exists
+	body := op.Do("/get", GetRequest{
+		Keys: []string{"heal1", "heal2", "heal3", "heal4"},
+	})
+	require.JSONEq(t, `{"heal1":true,"heal2":true,"heal3":true,"heal4":false}`, body)
+
+	// Test Auto-Healing with same cluster size (should trigger auto-healing instead of error)
+	_ = op.Do("/autoScale", AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address},
+		NewNodesAddresses: []string{node0Address},
+	}, true)
+
+	// Verify auto-healing worked - check node info
+	body = op.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse := pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 1, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 1)
+	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
+
+	// Verify data is still accessible after auto-healing
+	body = op.Do("/get", GetRequest{
+		Keys: []string{"heal1", "heal2", "heal3", "heal4"},
+	})
+	require.JSONEq(t, `{"heal1":true,"heal2":true,"heal3":true,"heal4":false}`, body)
+
+	cancel()
+	node0.Close()
 }

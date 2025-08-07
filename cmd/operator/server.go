@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/operator"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
@@ -45,6 +46,7 @@ func newHTTPServer(client *client.Client, operator *operator.Client, addr string
 	mux.Post("/scale", s.handleScale)
 	mux.Post("/scaleComplete", s.handleScaleComplete)
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
+	mux.Post("/autoScale", s.handleAutoScale)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -322,6 +324,184 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req AutoScaleRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if len(req.OldNodesAddresses) == 0 {
+		http.Error(w, "No old node addresses provided", http.StatusBadRequest)
+		return
+	}
+	if len(req.NewNodesAddresses) == 0 {
+		http.Error(w, "No new node addresses provided", http.StatusBadRequest)
+		return
+	}
+
+	oldClusterSize := uint32(len(req.OldNodesAddresses))
+	newClusterSize := uint32(len(req.NewNodesAddresses))
+
+	var err error
+	if newClusterSize > oldClusterSize {
+		err = s.handleScaleUp(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync)
+	} else if newClusterSize < oldClusterSize {
+		err = s.handleScaleDown(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync)
+	} else {
+		// Auto-healing: propagate cluster addresses to all nodes for consistency
+		err = s.handleAutoHealing(r.Context(), req.NewNodesAddresses)
+	}
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error during auto scale operation: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// handleScaleUp implements the scale up logic based on TestScaleUpAndDown
+func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddresses []string, fullSync bool) error {
+	oldClusterSize := uint32(len(oldAddresses))
+	newClusterSize := uint32(len(newAddresses))
+
+	// Step 1: Update cluster data with new addresses
+	if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+		return fmt.Errorf("updating cluster data: %w", err)
+	}
+
+	// Step 2: Determine which hash ranges need to be moved from old nodes to new nodes
+	movements := hash.GetHashRangeMovements(oldClusterSize, newClusterSize, s.operator.TotalHashRanges())
+
+	// Step 3: Create snapshots from old nodes for hash ranges that will be moved to new nodes
+	for sourceNodeID, hashRanges := range movements {
+		if len(hashRanges) == 0 {
+			continue
+		}
+		if err := s.operator.CreateSnapshots(ctx, sourceNodeID, fullSync, hashRanges...); err != nil {
+			return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+				sourceNodeID, hashRanges, err,
+			)
+		}
+	}
+
+	// Step 4: Load snapshots for new nodes
+	newNodeRanges := hash.GetNewNodeHashRanges(oldClusterSize, newClusterSize, s.operator.TotalHashRanges())
+	for nodeID, hashRanges := range newNodeRanges {
+		if len(hashRanges) == 0 {
+			continue
+		}
+		if err := s.operator.LoadSnapshots(ctx, nodeID, hashRanges...); err != nil {
+			return fmt.Errorf("loading snapshots for node %d: %w", nodeID, err)
+		}
+	}
+
+	// Step 5: Scale all nodes
+	return s.completeScaleOperation(ctx, newClusterSize)
+}
+
+// handleScaleDown implements the scale down logic based on TestScaleUpAndDown
+func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddresses []string, fullSync bool) error {
+	oldClusterSize := uint32(len(oldAddresses))
+	newClusterSize := uint32(len(newAddresses))
+
+	// Step 1: Create snapshots for all existing nodes for their current hash ranges
+	// This ensures we have snapshots for all data before redistributing
+	for nodeID := uint32(0); nodeID < oldClusterSize; nodeID++ {
+		if err := s.operator.CreateSnapshots(ctx, nodeID, fullSync); err != nil {
+			return fmt.Errorf("creating snapshots for node %d: %w", nodeID, err)
+		}
+	}
+
+	// Step 2: Load snapshots for remaining nodes with their new hash ranges
+	// Each remaining node needs to load snapshots for hash ranges it will now handle
+	for nodeID := uint32(0); nodeID < newClusterSize; nodeID++ {
+		// Get all hash ranges this node will manage in the new cluster
+		newHashRanges := hash.GetNodeHashRangesList(nodeID, newClusterSize, s.operator.TotalHashRanges())
+
+		// Filter out hash ranges this node was already managing in the old cluster
+		hashRangesToLoad := s.filterHashRangesAlreadyManaged(nodeID, oldClusterSize, newHashRanges)
+
+		// Only load snapshots for hash ranges the node wasn't already managing
+		if len(hashRangesToLoad) == 0 {
+			continue
+		}
+
+		if err := s.operator.LoadSnapshots(ctx, nodeID, hashRangesToLoad...); err != nil {
+			return fmt.Errorf("loading snapshots for node %d: %w", nodeID, err)
+		}
+	}
+
+	// Step 3: Update cluster data with new addresses
+	if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+		return fmt.Errorf("updating cluster data: %w", err)
+	}
+
+	// Step 4: Scale remaining nodes
+	return s.completeScaleOperation(ctx, newClusterSize)
+}
+
+// handleAutoHealing implements auto-healing by propagating cluster addresses to all nodes
+// This ensures all nodes have consistent cluster topology information
+func (s *httpServer) handleAutoHealing(ctx context.Context, addresses []string) error {
+	clusterSize := uint32(len(addresses))
+
+	// Step 1: Update cluster data with current addresses to ensure consistency
+	if err := s.operator.UpdateClusterData(addresses...); err != nil {
+		return fmt.Errorf("updating cluster data for auto-healing: %w", err)
+	}
+
+	// Step 2: Scale all nodes to refresh their cluster information
+	return s.completeScaleOperation(ctx, clusterSize)
+}
+
+func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uint32) error {
+	nodeIDs := make([]uint32, clusterSize)
+	for i := uint32(0); i < clusterSize; i++ {
+		nodeIDs[i] = i
+	}
+	if err := s.operator.Scale(ctx, nodeIDs); err != nil {
+		return fmt.Errorf("scaling nodes: %w", err)
+	}
+
+	if err := s.operator.ScaleComplete(ctx, nodeIDs); err != nil {
+		return fmt.Errorf("completing scale operation: %w", err)
+	}
+
+	return nil
+}
+
+// filterHashRangesAlreadyManaged filters out hash ranges that a node was already managing
+// in the old cluster, returning only the hash ranges that are new for this node.
+func (s *httpServer) filterHashRangesAlreadyManaged(nodeID, oldClusterSize uint32, newHashRanges []uint32) []uint32 {
+	// Get hash ranges this node was managing in the old cluster
+	oldHashRanges := make(map[uint32]struct{})
+	if nodeID < oldClusterSize {
+		// Only nodes that existed in the old cluster have old hash ranges
+		oldHashRanges = hash.GetNodeHashRanges(nodeID, oldClusterSize, s.operator.TotalHashRanges())
+	}
+
+	// Filter out hash ranges that were already managed by this node
+	var hashRangesToLoad []uint32
+	for _, hashRange := range newHashRanges {
+		if _, wasAlreadyManaged := oldHashRanges[hashRange]; !wasAlreadyManaged {
+			hashRangesToLoad = append(hashRangesToLoad, hashRange)
+		}
+	}
+
+	return hashRangesToLoad
 }
 
 type loggerAdapter struct {

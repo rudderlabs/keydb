@@ -43,3 +43,24 @@ type ScaleCompleteRequest struct {
 type UpdateClusterDataRequest struct {
 	Addresses []string `json:"addresses"`
 }
+
+// AutoScaleRequest represents a request to scale the cluster automatically.
+//
+// ScaleDown example:
+//
+//	OldNodesAddresses: [10.0.0.1, 10.0.0.2, 10.0.0.3]
+//	NewNodesAddresses: [10.0.0.1, 10.0.0.2]
+//
+// ScaleUp example:
+//
+//	OldNodesAddresses: [10.0.0.1, 10.0.0.2]
+//	NewNodesAddresses: [10.0.0.1, 10.0.0.2, 10.0.0.3]
+type AutoScaleRequest struct {
+	// OldNodesAddresses should contain the addresses of all the nodes in the cluster before any scale operation.
+	OldNodesAddresses []string `json:"old_nodes_addresses"`
+	// NewNodesAddresses should contain the addresses of all the nodes after the scale operation.
+	NewNodesAddresses []string `json:"new_nodes_addresses"`
+	// FullSync indicates whether to perform a full synchronization during snapshot creation.
+	// When true, all data will be included in snapshots regardless of incremental changes.
+	FullSync bool `json:"full_sync,omitempty"`
+}

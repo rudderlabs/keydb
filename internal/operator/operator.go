@@ -130,6 +130,12 @@ func (c *Client) ClusterSize() int {
 	return int(c.clusterSize)
 }
 
+func (c *Client) TotalHashRanges() uint32 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.config.TotalHashRanges
+}
+
 // GetNodeInfo returns information about a node
 func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInfoResponse, error) {
 	c.mu.RLock()
