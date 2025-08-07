@@ -10,19 +10,22 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/operator"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
 type httpServer struct {
-	client *client.Client
-	server *http.Server
+	client   *client.Client
+	operator *operator.Client
+	server   *http.Server
 }
 
 // newHTTPServer creates a new HTTP server
-func newHTTPServer(client *client.Client, addr string, log logger.Logger) *httpServer {
+func newHTTPServer(client *client.Client, operator *operator.Client, addr string, log logger.Logger) *httpServer {
 	s := &httpServer{
-		client: client,
+		client:   client,
+		operator: operator,
 	}
 
 	mux := chi.NewRouter()
@@ -41,6 +44,7 @@ func newHTTPServer(client *client.Client, addr string, log logger.Logger) *httpS
 	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
 	mux.Post("/scale", s.handleScale)
 	mux.Post("/scaleComplete", s.handleScaleComplete)
+	mux.Post("/updateClusterData", s.handleUpdateClusterData)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -135,6 +139,7 @@ func (s *httpServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
@@ -154,7 +159,7 @@ func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get node info
-	info, err := s.client.GetNodeInfo(r.Context(), req.NodeID)
+	info, err := s.operator.GetNodeInfo(r.Context(), req.NodeID)
 	if err != nil {
 		http.Error(w,
 			fmt.Sprintf("Error getting info for node %d: %v", req.NodeID, err),
@@ -186,12 +191,13 @@ func (s *httpServer) handleCreateSnapshots(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Create snapshot
-	if err := s.client.CreateSnapshots(r.Context(), req.NodeID, req.FullSync, req.HashRanges...); err != nil {
+	if err := s.operator.CreateSnapshots(r.Context(), req.NodeID, req.FullSync, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error creating snapshot: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
@@ -211,12 +217,13 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Load snapshots from cloud storage
-	if err := s.client.LoadSnapshots(r.Context(), req.NodeID, req.HashRanges...); err != nil {
+	if err := s.operator.LoadSnapshots(r.Context(), req.NodeID, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
@@ -236,18 +243,19 @@ func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate request
-	if len(req.Addresses) == 0 {
-		http.Error(w, "No addresses provided", http.StatusBadRequest)
+	if len(req.NodeIDs) == 0 {
+		http.Error(w, "No node IDs provided", http.StatusBadRequest)
 		return
 	}
 
 	// Scale cluster
-	if err := s.client.Scale(r.Context(), req.Addresses...); err != nil {
+	if err := s.operator.Scale(r.Context(), req.NodeIDs); err != nil {
 		http.Error(w, fmt.Sprintf("Error scaling cluster: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
@@ -259,13 +267,59 @@ func (s *httpServer) handleScaleComplete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Parse request body
+	var req ScaleCompleteRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if len(req.NodeIDs) == 0 {
+		http.Error(w, "No node IDs provided", http.StatusBadRequest)
+		return
+	}
+
 	// Complete scale operation
-	if err := s.client.ScaleComplete(r.Context()); err != nil {
+	if err := s.operator.ScaleComplete(r.Context(), req.NodeIDs); err != nil {
 		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// handleUpdateClusterData handles POST /updateClusterData requests
+func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req UpdateClusterDataRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if len(req.Addresses) == 0 {
+		http.Error(w, "No node IDs provided", http.StatusBadRequest)
+		return
+	}
+
+	// Complete scale operation
+	if err := s.operator.UpdateClusterData(req.Addresses...); err != nil {
+		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }

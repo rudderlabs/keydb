@@ -111,10 +111,9 @@ message CreateSnapshotsResponse {
 
 // ScaleRequest changes the number of nodes in the cluster
 message ScaleRequest {
-  uint32 new_cluster_size = 1; // New number of nodes in the cluster
   // When the cluster_size changes the operator can use this field to tell all nodes which addresses are to be broadcast
   // to clients
-  repeated string nodesAddresses = 2;
+  repeated string nodesAddresses = 1;
 }
 
 // ScaleResponse contains the result of the scaling operation

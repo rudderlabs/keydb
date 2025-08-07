@@ -222,11 +222,13 @@ func NewService(
 	// TODO restore automatic daily snapshot creation
 	// service.waitGroup.Add(1)
 	// go service.snapshotLoop(ctx)
+
 	service.waitGroup.Add(1)
 	go service.garbageCollection(ctx)
 
 	service.waitGroup.Add(1)
 	go service.logCacheLevels(ctx)
+
 	return service, nil
 }
 
@@ -562,7 +564,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	log := s.logger.Withn(logger.NewIntField("newClusterSize", int64(req.NewClusterSize)))
+	log := s.logger.Withn(logger.NewIntField("newClusterSize", int64(len(req.NodesAddresses))))
 	log.Infon("Scale request received")
 
 	if s.scaling {
@@ -576,7 +578,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	}
 
 	// Validate new cluster size
-	if req.NewClusterSize == 0 {
+	if len(req.NodesAddresses) == 0 {
 		log.Warnn("New cluster size must be greater than 0")
 		return &pb.ScaleResponse{
 			Success:             false,
@@ -597,7 +599,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	previousClusterSize := s.config.ClusterSize
 
 	// Update cluster size
-	s.config.ClusterSize = req.NewClusterSize
+	s.config.ClusterSize = uint32(len(req.NodesAddresses))
 	s.config.Addresses = req.NodesAddresses
 
 	// Reinitialize caches for the new cluster size

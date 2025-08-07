@@ -22,6 +22,8 @@ import (
 
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
+	"github.com/rudderlabs/keydb/internal/hash"
+	"github.com/rudderlabs/keydb/internal/operator"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/httputil"
@@ -43,23 +45,25 @@ func TestSimple(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, conf *config.Config) {
+	run := func(t *testing.T, newConf func() *config.Config) {
 		t.Parallel()
 
-		_, cloudStorage := getCloudStorage(t, pool, conf)
+		minioClient, cloudStorage := getCloudStorage(t, pool, config.New())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		// Create the node service
 		totalHashRanges := uint32(4)
+		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, conf)
+		}, node0Conf)
 		c := getClient(t, totalHashRanges, node0Address)
+		op := getOperator(t, totalHashRanges, node0Address)
 
 		// Test Put
 		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
@@ -68,31 +72,32 @@ func TestSimple(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		err = c.CreateSnapshots(ctx, 0, false)
+		err = op.CreateSnapshots(ctx, 0, false)
 		require.NoError(t, err)
 
-		session := cloudStorage.ListFilesWithPrefix(context.Background(), "", "", 500)
-		files, err := session.Next()
-		require.NoError(t, err)
-		require.Len(t, files, 3) // we expect one hash range to be empty so the file won't be uploaded
+		// we expect one hash range to be empty so the file won't be uploaded
+		requireExpectedFiles(ctx, t, minioClient,
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
+		)
 
 		cancel()
 		node0.Close()
-		// TODO: add test without the path change to test that it loads fine from disk as well if there is nothing
-		// on Cloud Storage
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir()) // Force a path change, the data will be loaded from Cloud Storage
 
 		// Let's start again from scratch to see if the data is properly loaded from the snapshots
 		ctx, cancel = context.WithCancel(context.Background())
 		defer cancel()
+		node0Conf = newConf()
 		node0, node0Address = getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, conf)
+		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, c.LoadSnapshots(ctx, 0))
+		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.LoadSnapshots(ctx, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
 		require.NoError(t, err)
@@ -103,17 +108,21 @@ func TestSimple(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		conf.Set("BadgerDB.Dedup.Compress", false)
-		run(t, conf)
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", false)
+			return conf
+		})
 	})
 
 	t.Run("badger compressed", func(t *testing.T) {
-		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		conf.Set("BadgerDB.Dedup.Compress", true)
-		run(t, conf)
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", true)
+			return conf
+		})
 	})
 }
 
@@ -122,20 +131,21 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, conf *config.Config) {
-		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
+	run := func(t *testing.T, newConf func() *config.Config) {
+		minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		// Create the node service
 		totalHashRanges := uint32(3)
+		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, conf)
+		}, node0Conf)
 		c := getClient(t, totalHashRanges, node0Address)
 
 		// Test Put
@@ -146,8 +156,8 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		operator := getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, operator.CreateSnapshots(ctx, 0, false))
+		op := getOperator(t, totalHashRanges, node0Address)
+		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
@@ -155,25 +165,25 @@ func TestScaleUpAndDown(t *testing.T) {
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
 		)
 
-		// Using a different path for the new node1 to avoid a conflict with node0
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		node1Conf := newConf()
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
 			ClusterSize:      2,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
-		}, conf)
-		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
-		require.NoError(t, operator.LoadSnapshots(ctx, 1))
-		require.NoError(t, operator.ScaleComplete(ctx))
+		}, node1Conf)
+		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
+		require.NoError(t, op.LoadSnapshots(ctx, 1, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
+		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
+		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1}))
 
-		respNode0, err := c.GetNodeInfo(ctx, 0)
+		respNode0, err := op.GetNodeInfo(ctx, 0)
 		require.NoError(t, err)
 		require.EqualValues(t, 2, respNode0.ClusterSize)
 		require.Len(t, respNode0.HashRanges, 2)
 
-		respNode1, err := c.GetNodeInfo(ctx, 1)
+		respNode1, err := op.GetNodeInfo(ctx, 1)
 		require.NoError(t, err)
 		require.EqualValues(t, 2, respNode1.ClusterSize)
 		require.Len(t, respNode1.HashRanges, 1)
@@ -187,13 +197,14 @@ func TestScaleUpAndDown(t *testing.T) {
 		// then it will be node2 and the clusterSize will be 3
 		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't
 		// remove node0, you have to remove node1
-		require.NoError(t, operator.CreateSnapshots(ctx, 0, false))
-		require.NoError(t, operator.CreateSnapshots(ctx, 1, false))
-		require.NoError(t, operator.Scale(ctx, node0Address))
-		require.NoError(t, operator.LoadSnapshots(ctx, 0))
-		require.NoError(t, operator.ScaleComplete(ctx))
+		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
+		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, hash.GetNodeHashRangesList(0, 1, totalHashRanges)...))
+		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.Scale(ctx, []uint32{0}))
+		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
 
-		respNode0, err = c.GetNodeInfo(ctx, 0)
+		respNode0, err = op.GetNodeInfo(ctx, 0)
 		require.NoError(t, err)
 		require.EqualValues(t, 1, respNode0.ClusterSize)
 		require.Len(t, respNode0.HashRanges, 3)
@@ -204,10 +215,12 @@ func TestScaleUpAndDown(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		conf.Set("BadgerDB.Dedup.Compress", false)
-		run(t, conf)
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", false)
+			return conf
+		})
 	})
 }
 
@@ -216,20 +229,21 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, conf *config.Config) {
-		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
+	run := func(t *testing.T, newConf func() *config.Config) {
+		minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		// Create the node service
 		totalHashRanges := uint32(3)
+		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, conf)
+		}, node0Conf)
 		c := getClient(t, totalHashRanges, node0Address)
 
 		// Test Put
@@ -240,8 +254,8 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		operator := getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, operator.CreateSnapshots(ctx, 0, false))
+		op := getOperator(t, totalHashRanges, node0Address)
+		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
@@ -250,17 +264,18 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		)
 
 		// Using a different path for the new node1 to avoid a conflict with node0
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		node1Conf := newConf()
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
 			ClusterSize:      2,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
-		}, conf)
-		require.NoError(t, operator.Scale(ctx, node0Address, node1Address))
-		require.NoError(t, operator.LoadSnapshots(ctx, 1))
-		require.NoError(t, operator.ScaleComplete(ctx))
+		}, node1Conf)
+		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
+		require.NoError(t, op.LoadSnapshots(ctx, 1, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
+		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
+		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1}))
 
 		require.Equal(t, 1, c.ClusterSize(), "The client should still believe that the cluster size is 1")
 		exists, err = c.Get(context.Background(), keys)
@@ -270,17 +285,18 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 
 		// Add a 3rd node to the cluster
 		// Using a different path for the new node2 to avoid a conflict with node0 and node1
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		node2Conf := newConf()
 		node2, node2Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           2,
 			ClusterSize:      3,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address, node1Address},
-		}, conf)
-		require.NoError(t, operator.Scale(ctx, node0Address, node1Address, node2Address))
-		require.NoError(t, operator.LoadSnapshots(ctx, 2))
-		require.NoError(t, operator.ScaleComplete(ctx))
+		}, node2Conf)
+		require.NoError(t, op.UpdateClusterData(node0Address, node1Address, node2Address))
+		require.NoError(t, op.LoadSnapshots(ctx, 2, hash.GetNodeHashRangesList(2, 3, totalHashRanges)...))
+		require.NoError(t, op.Scale(ctx, []uint32{0, 1, 2}))
+		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1, 2}))
 
 		// Verify that the client's cluster size is still 2 (not updated yet)
 		require.Equal(t, 2, c.ClusterSize())
@@ -302,11 +318,12 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// then it will be node2 and the clusterSize will be 3
 		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove
 		// node0, you have to remove node1
-		require.NoError(t, operator.CreateSnapshots(ctx, 1, false))
-		require.NoError(t, operator.CreateSnapshots(ctx, 2, false))
-		require.NoError(t, operator.Scale(ctx, node0Address))
-		require.NoError(t, operator.LoadSnapshots(ctx, 0))
-		require.NoError(t, operator.ScaleComplete(ctx))
+		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
+		require.NoError(t, op.CreateSnapshots(ctx, 2, false))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, hash.GetNodeHashRangesList(0, 1, totalHashRanges)...))
+		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.Scale(ctx, []uint32{0}))
+		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
 
 		exists, err = c.Get(ctx, allKeys)
 		require.NoError(t, err)
@@ -319,10 +336,12 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		conf.Set("BadgerDB.Dedup.Compress", false)
-		run(t, conf)
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", false)
+			return conf
+		})
 	})
 }
 
@@ -331,23 +350,25 @@ func TestIncrementalSnapshots(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, conf *config.Config) {
+	run := func(t *testing.T, newConf func() *config.Config) {
 		t.Parallel()
 
-		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
+		minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		// Create the node service
 		totalHashRanges := uint32(4)
+		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, conf)
+		}, node0Conf)
 		c := getClient(t, totalHashRanges, node0Address)
+		op := getOperator(t, totalHashRanges, node0Address)
 
 		// Test Put
 		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
@@ -356,7 +377,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		require.NoError(t, c.CreateSnapshots(ctx, 0, false))
+		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 		// we expect one hash range to be empty so the file won't be uploaded
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
@@ -369,7 +390,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false, true}, exists)
 
-		require.NoError(t, c.CreateSnapshots(ctx, 0, false))
+		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
@@ -379,21 +400,20 @@ func TestIncrementalSnapshots(t *testing.T) {
 
 		cancel()
 		node0.Close()
-		// TODO: add test without the path change to test that it loads fine from disk as well if there is nothing
-		// on Cloud Storage
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir()) // Force a path change, the data will be loaded from Cloud Storage
 
 		// Let's start again from scratch to see if the data is properly loaded from the snapshots
 		ctx, cancel = context.WithCancel(context.Background())
 		defer cancel()
+		node0Conf = newConf()
 		node0, node0Address = getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, conf)
+		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, c.LoadSnapshots(ctx, 0))
+		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.LoadSnapshots(ctx, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
 		require.NoError(t, err)
@@ -402,7 +422,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		// Testing full sync capabilities.
 		// All files should be removed but the new ones.
 		// Being "full syncs" they start from the beginning (i.e. 0) up to the latest recorded (i.e. 2).
-		require.NoError(t, c.CreateSnapshots(ctx, 0, true))
+		require.NoError(t, op.CreateSnapshots(ctx, 0, true))
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_2.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_2.snapshot$"),
@@ -414,17 +434,21 @@ func TestIncrementalSnapshots(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		conf.Set("BadgerDB.Dedup.Compress", false)
-		run(t, conf)
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", false)
+			return conf
+		})
 	})
 
 	t.Run("badger compressed", func(t *testing.T) {
-		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		conf.Set("BadgerDB.Dedup.Compress", true)
-		run(t, conf)
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", true)
+			return conf
+		})
 	})
 }
 
@@ -433,23 +457,25 @@ func TestSelectedSnapshots(t *testing.T) {
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
 
-	run := func(t *testing.T, conf *config.Config) {
+	run := func(t *testing.T, newConf func() *config.Config) {
 		t.Parallel()
 
-		minioClient, cloudStorage := getCloudStorage(t, pool, conf)
+		minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
 		// Create the node service
 		totalHashRanges := uint32(4)
+		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, conf)
+		}, node0Conf)
 		c := getClient(t, totalHashRanges, node0Address)
+		op := getOperator(t, totalHashRanges, node0Address)
 
 		// Test Put
 		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
@@ -460,13 +486,13 @@ func TestSelectedSnapshots(t *testing.T) {
 
 		// Create only the snapshots for the hash ranges 0 and 1.
 		// We expect one hash range to be empty so the file won't be uploaded.
-		require.NoError(t, c.CreateSnapshots(ctx, 0, false, 0, 1))
+		require.NoError(t, op.CreateSnapshots(ctx, 0, false, 0, 1))
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 		)
 
 		// Now create the snapshot for the remaining hash ranges
-		require.NoError(t, c.CreateSnapshots(ctx, 0, false, 2, 3))
+		require.NoError(t, op.CreateSnapshots(ctx, 0, false, 2, 3))
 		requireExpectedFiles(ctx, t, minioClient,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
@@ -474,23 +500,24 @@ func TestSelectedSnapshots(t *testing.T) {
 		)
 
 		// Now try to create a snapshot for a hash range that is not handled by the node
-		require.ErrorContains(t, c.CreateSnapshots(ctx, 0, false, 4), "hash range 4 not handled by this node")
+		require.ErrorContains(t, op.CreateSnapshots(ctx, 0, false, 4), "hash range 4 not handled by this node")
 
 		cancel()
 		node0.Close()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir()) // Force a path change, the data will be loaded from Cloud Storage
 
 		// Let's start again from scratch to see if the data is properly loaded from the snapshots
 		ctx, cancel = context.WithCancel(context.Background())
 		defer cancel()
+		node0Conf = newConf()
 		node0, node0Address = getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
 			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, conf)
+		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, c.LoadSnapshots(ctx, 0))
+		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.LoadSnapshots(ctx, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
 		require.NoError(t, err)
@@ -501,17 +528,21 @@ func TestSelectedSnapshots(t *testing.T) {
 	}
 
 	t.Run("badger", func(t *testing.T) {
-		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		conf.Set("BadgerDB.Dedup.Compress", false)
-		run(t, conf)
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", false)
+			return conf
+		})
 	})
 
 	t.Run("badger compressed", func(t *testing.T) {
-		conf := config.New()
-		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-		conf.Set("BadgerDB.Dedup.Compress", true)
-		run(t, conf)
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", true)
+			return conf
+		})
 	})
 }
 
@@ -572,6 +603,8 @@ func getService(
 }
 
 func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *client.Client {
+	t.Helper()
+
 	clientConfig := client.Config{
 		Addresses:       addresses,
 		TotalHashRanges: totalHashRanges,
@@ -584,6 +617,23 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 	t.Cleanup(func() { _ = c.Close() })
 
 	return c
+}
+
+func getOperator(t testing.TB, totalHashRanges uint32, addresses ...string) *operator.Client {
+	t.Helper()
+
+	opConfig := operator.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+		RetryCount:      3,
+		RetryDelay:      100 * time.Millisecond,
+	}
+
+	op, err := operator.NewClient(opConfig, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = op.Close() })
+
+	return op
 }
 
 func createMinioResource(

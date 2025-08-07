@@ -31,5 +31,15 @@ type LoadSnapshotsRequest struct {
 
 // ScaleRequest represents a request to scale the cluster
 type ScaleRequest struct {
+	NodeIDs []uint32 `json:"node_ids"`
+}
+
+// ScaleCompleteRequest represents a request to scale the cluster
+type ScaleCompleteRequest struct {
+	NodeIDs []uint32 `json:"node_ids"`
+}
+
+// UpdateClusterDataRequest represents a request to update the cluster size
+type UpdateClusterDataRequest struct {
 	Addresses []string `json:"addresses"`
 }

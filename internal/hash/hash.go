@@ -107,7 +107,7 @@ func GetKeysByHashRangeWithIndexes(keys []string, nodeID, numberOfNodes, totalHa
 // - totalHashRanges: The total number of hash ranges (default 128)
 //
 // Returns:
-// - A slice of hash ranges that this node should handle
+// - A map with the key representing the hash ranges that this node should handle
 func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) map[uint32]struct{} {
 	if numberOfNodes == 0 {
 		panic("numberOfNodes must be greater than 0")
@@ -122,6 +122,35 @@ func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) map[uint32
 	for i := uint32(0); i < totalHashRanges; i++ {
 		if i%numberOfNodes == nodeID {
 			ranges[i] = struct{}{}
+		}
+	}
+	return ranges
+}
+
+// GetNodeHashRangesList returns the hash ranges that a specific node should handle
+// given the total number of nodes and hash ranges.
+//
+// Parameters:
+// - nodeID: The ID of the node (0-based)
+// - numberOfNodes: The total number of nodes in the cluster
+// - totalHashRanges: The total number of hash ranges (default 128)
+//
+// Returns:
+// - A slice of hash ranges that this node should handle
+func GetNodeHashRangesList(nodeID, numberOfNodes, totalHashRanges uint32) []uint32 {
+	if numberOfNodes == 0 {
+		panic("numberOfNodes must be greater than 0")
+	}
+	if totalHashRanges < numberOfNodes {
+		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	}
+	if nodeID >= numberOfNodes {
+		panic("nodeID must be less than numberOfNodes")
+	}
+	ranges := make([]uint32, 0)
+	for i := uint32(0); i < totalHashRanges; i++ {
+		if i%numberOfNodes == nodeID {
+			ranges = append(ranges, i)
 		}
 	}
 	return ranges
