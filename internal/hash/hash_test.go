@@ -151,6 +151,219 @@ func TestCollision(t *testing.T) {
 	}
 }
 
+// TestGetNodeHashRangesListConsistency verifies that GetNodeHashRangesList is deterministically consistent
+func TestGetNodeHashRangesListConsistency(t *testing.T) {
+	// Test with various node IDs, node counts, and hash ranges
+	testCases := []struct {
+		nodeID          uint32
+		numberOfNodes   uint32
+		totalHashRanges uint32
+	}{
+		{0, 10, 128},
+		{4, 5, 128},
+		{10, 20, 256},
+		{0, 1, 128}, // Single node
+	}
+
+	for _, tc := range testCases {
+		testName := "nodeID=" + strconv.Itoa(int(tc.nodeID)) +
+			"_nodes=" + strconv.Itoa(int(tc.numberOfNodes)) +
+			"_ranges=" + strconv.Itoa(int(tc.totalHashRanges))
+		t.Run(testName, func(t *testing.T) {
+			// Get initial result
+			initialRanges := GetNodeHashRangesList(tc.nodeID, tc.numberOfNodes, tc.totalHashRanges)
+
+			// Run multiple iterations to verify consistency
+			for i := 0; i < testIterations; i++ {
+				ranges := GetNodeHashRangesList(tc.nodeID, tc.numberOfNodes, tc.totalHashRanges)
+
+				// Check that the slices have the same length
+				require.Equal(t, len(initialRanges), len(ranges),
+					"[%d]: GetNodeHashRangesList not consistent. Expected %d ranges, got %d ranges",
+					i, len(initialRanges), len(ranges))
+
+				// Check that all elements are the same and in the same order
+				for j, hashRange := range initialRanges {
+					require.Equal(t, hashRange, ranges[j],
+						"[%d]: GetNodeHashRangesList not consistent. Expected hash range %d at position %d, got %d",
+						i, hashRange, j, ranges[j])
+				}
+			}
+		})
+	}
+}
+
+// TestGetNodeHashRangesListMatchesMap verifies that GetNodeHashRangesList returns the same hash ranges
+// as GetNodeHashRanges but in slice format
+func TestGetNodeHashRangesListMatchesMap(t *testing.T) {
+	testCases := []struct {
+		nodeID          uint32
+		numberOfNodes   uint32
+		totalHashRanges uint32
+	}{
+		{0, 10, 128},
+		{4, 5, 128},
+		{10, 20, 256},
+		{0, 1, 128}, // Single node
+		{2, 3, 128}, // Different distribution
+	}
+
+	for _, tc := range testCases {
+		testName := "nodeID=" + strconv.Itoa(int(tc.nodeID)) +
+			"_nodes=" + strconv.Itoa(int(tc.numberOfNodes)) +
+			"_ranges=" + strconv.Itoa(int(tc.totalHashRanges))
+		t.Run(testName, func(t *testing.T) {
+			// Get results from both functions
+			rangesMap := GetNodeHashRanges(tc.nodeID, tc.numberOfNodes, tc.totalHashRanges)
+			rangesList := GetNodeHashRangesList(tc.nodeID, tc.numberOfNodes, tc.totalHashRanges)
+
+			// Check that they have the same number of elements
+			require.Equal(t, len(rangesMap), len(rangesList),
+				"Map and list should have the same number of hash ranges")
+
+			// Convert list to map for comparison
+			listAsMap := make(map[uint32]struct{})
+			for _, hashRange := range rangesList {
+				listAsMap[hashRange] = struct{}{}
+			}
+
+			// Check that all elements in the map are in the list
+			for hashRange := range rangesMap {
+				_, exists := listAsMap[hashRange]
+				require.True(t, exists, "Hash range %d from map not found in list", hashRange)
+			}
+
+			// Check that all elements in the list are in the map
+			for _, hashRange := range rangesList {
+				_, exists := rangesMap[hashRange]
+				require.True(t, exists, "Hash range %d from list not found in map", hashRange)
+			}
+		})
+	}
+}
+
+// TestGetNodeHashRangesListSorted verifies that GetNodeHashRangesList returns hash ranges in sorted order
+func TestGetNodeHashRangesListSorted(t *testing.T) {
+	testCases := []struct {
+		nodeID          uint32
+		numberOfNodes   uint32
+		totalHashRanges uint32
+	}{
+		{0, 10, 128},
+		{4, 5, 128},
+		{10, 20, 256},
+		{0, 1, 128}, // Single node
+		{2, 3, 128}, // Different distribution
+	}
+
+	for _, tc := range testCases {
+		testName := "nodeID=" + strconv.Itoa(int(tc.nodeID)) +
+			"_nodes=" + strconv.Itoa(int(tc.numberOfNodes)) +
+			"_ranges=" + strconv.Itoa(int(tc.totalHashRanges))
+		t.Run(testName, func(t *testing.T) {
+			ranges := GetNodeHashRangesList(tc.nodeID, tc.numberOfNodes, tc.totalHashRanges)
+
+			// Check that the slice is sorted
+			for i := 1; i < len(ranges); i++ {
+				require.Less(t, ranges[i-1], ranges[i],
+					"Hash ranges should be in ascending order. ranges[%d]=%d should be less than ranges[%d]=%d",
+					i-1, ranges[i-1], i, ranges[i])
+			}
+		})
+	}
+}
+
+// TestHashRangeInNodeHashRangesList verifies that for random keys, the hashRange from GetNodeNumber
+// is always present in the slice returned by GetNodeHashRangesList for the same nodeID
+func TestHashRangeInNodeHashRangesList(t *testing.T) {
+	// Number of random keys to test
+	const numRandomKeys = 10
+	const numOfRandomNodeIDs = 10
+
+	// Initialize random number generator
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+	randomNodeIDs := make([]uint32, 0, numOfRandomNodeIDs)
+	for i := 0; i < numOfRandomNodeIDs; i++ {
+		randomNodeIDs = append(randomNodeIDs, uint32(i))
+	}
+
+	// Test with different random nodeIDs
+	for _, nodeID := range randomNodeIDs {
+		// we add the nodeID to make sure the nodeID is always <= clusterSize
+		numberOfNodes := uint32(rnd.Intn(20) + int(nodeID) + 1)
+		// we add the numberOfNodes to make sure that totalHashRanges is always >= clusterSize
+		totalHashRanges := uint32(rnd.Intn(128) + int(numberOfNodes) + 1)
+
+		testName := "nodeID=" + strconv.Itoa(int(nodeID)) +
+			"_nodes=" + strconv.Itoa(int(numberOfNodes)) +
+			"_ranges=" + strconv.Itoa(int(totalHashRanges))
+		t.Run(testName, func(t *testing.T) {
+			for i := 0; i < testIterations; i++ {
+				// Get hash ranges for this node
+				nodeHashRangesList := GetNodeHashRangesList(nodeID, numberOfNodes, totalHashRanges)
+				hashResultsForNodeID := getKeysForNodeID(numRandomKeys, nodeID, numberOfNodes, totalHashRanges)
+
+				// Convert slice to map for faster lookup
+				nodeHashRangesMap := make(map[uint32]struct{})
+				for _, hashRange := range nodeHashRangesList {
+					nodeHashRangesMap[hashRange] = struct{}{}
+				}
+
+				// Run multiple iterations to verify consistency
+				for _, hres := range hashResultsForNodeID {
+					_, exists := nodeHashRangesMap[hres.hashRange]
+					require.True(t, exists, "Hash range %d missing for nodeID %d", hres.hashRange, nodeID)
+
+					hr, nid := GetNodeNumber(hres.key, numberOfNodes, totalHashRanges)
+					require.Equal(t, nodeID, nid, "NodeID mismatch for key %q", hres.key)
+					require.Equal(t, hres.hashRange, hr, "HashRange mismatch for key %q", hres.key)
+				}
+			}
+		})
+	}
+}
+
+// TestGetNodeHashRangesListPanics verifies that GetNodeHashRangesList panics with invalid parameters
+func TestGetNodeHashRangesListPanics(t *testing.T) {
+	testCases := []struct {
+		name            string
+		nodeID          uint32
+		numberOfNodes   uint32
+		totalHashRanges uint32
+		expectedPanic   string
+	}{
+		{
+			name:            "zero_nodes",
+			nodeID:          0,
+			numberOfNodes:   0,
+			totalHashRanges: 128,
+			expectedPanic:   "numberOfNodes must be greater than 0",
+		},
+		{
+			name:            "totalHashRanges_less_than_numberOfNodes",
+			nodeID:          0,
+			numberOfNodes:   10,
+			totalHashRanges: 5,
+			expectedPanic:   "totalHashRanges must be greater than or equal to numberOfNodes",
+		},
+		{
+			name:            "nodeID_greater_than_numberOfNodes",
+			nodeID:          10,
+			numberOfNodes:   5,
+			totalHashRanges: 128,
+			expectedPanic:   "nodeID must be less than numberOfNodes",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.PanicsWithValue(t, tc.expectedPanic, func() {
+				GetNodeHashRangesList(tc.nodeID, tc.numberOfNodes, tc.totalHashRanges)
+			})
+		})
+	}
+}
+
 type hashResult struct {
 	key       string
 	hashRange uint32
