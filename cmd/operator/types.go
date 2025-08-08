@@ -70,6 +70,8 @@ type HashRangeMovementsRequest struct {
 	OldClusterSize  uint32 `json:"oldClusterSize"`
 	NewClusterSize  uint32 `json:"newClusterSize"`
 	TotalHashRanges uint32 `json:"totalHashRanges"`
+	Upload          bool   `json:"upload,omitempty"`
+	FullSync        bool   `json:"fullSync,omitempty"`
 }
 
 // HashRangeMovement represents a single hash range movement

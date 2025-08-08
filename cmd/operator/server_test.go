@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -8,7 +9,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -614,7 +618,7 @@ func TestHashRangeMovements(t *testing.T) {
 		return conf
 	}
 
-	_, cloudStorage := getCloudStorage(t, pool, newConf())
+	minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -759,6 +763,109 @@ func TestHashRangeMovements(t *testing.T) {
 		})
 	}
 
+	t.Run("upload", func(t *testing.T) {
+		_ = op.Do("/put", PutRequest{
+			Keys: []string{
+				"key1", "key2", "key3", "key4",
+				"key5", "key6", "key7", "key8",
+				"key9", "key10", "key11", "key12",
+				"key13", "key14", "key15", "key16",
+			}, TTL: testTTL,
+		}, true)
+
+		body := op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+			OldClusterSize:  1,
+			NewClusterSize:  2,
+			TotalHashRanges: 8,
+			Upload:          true,
+		})
+
+		var movements []HashRangeMovement
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+
+		// Verify we still get movements even with upload=true
+		require.NotEmpty(t, movements)
+
+		// Verify each movement has valid data
+		for _, movement := range movements {
+			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
+			require.Less(t, movement.From, uint32(1), "from node should be less than old cluster size")
+			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
+			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
+		}
+
+		requireExpectedFiles(context.Background(), t, minioClient,
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_5_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_7_s_0_1.snapshot$"),
+		)
+	})
+
 	cancel()
 	node0.Close()
+}
+
+type File struct {
+	Key                  string
+	Content              string
+	Etag                 string
+	LastModificationTime time.Time
+}
+
+func requireExpectedFiles(
+	ctx context.Context, t *testing.T, client *minio.Client, expectedFiles ...*regexp.Regexp,
+) {
+	t.Helper()
+	files, err := getContents(ctx, bucket, "hr_", client)
+	require.NoError(t, err)
+	require.Len(t, files, len(expectedFiles))
+	for _, file := range files {
+		var found bool
+		for _, expectedFile := range expectedFiles {
+			if expectedFile.MatchString(file.Key) {
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "Unexpected file: %s", file.Key)
+	}
+}
+
+// TODO use go-kit minio resource instead
+func getContents(ctx context.Context, bucket, prefix string, client *minio.Client) ([]File, error) {
+	contents := make([]File, 0)
+
+	opts := minio.ListObjectsOptions{
+		Recursive: true,
+		Prefix:    prefix,
+	}
+	for objInfo := range client.ListObjects(ctx, bucket, opts) {
+		if objInfo.Err != nil {
+			return nil, fmt.Errorf("list objects: %w", objInfo.Err)
+		}
+
+		o, err := client.GetObject(ctx, bucket, objInfo.Key, minio.GetObjectOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("get object: %w", err)
+		}
+
+		b, err := io.ReadAll(bufio.NewReader(o))
+		if err != nil {
+			return nil, fmt.Errorf("read all: %w", err)
+		}
+
+		contents = append(contents, File{
+			Key:                  objInfo.Key,
+			Content:              string(b),
+			Etag:                 objInfo.ETag,
+			LastModificationTime: objInfo.LastModified,
+		})
+	}
+
+	slices.SortStableFunc(contents, func(a, b File) int {
+		return strings.Compare(a.Key, b.Key)
+	})
+
+	return contents, nil
 }

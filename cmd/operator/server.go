@@ -566,6 +566,23 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// If upload=true, send CreateSnapshots requests to old nodes that are losing hash ranges
+	if req.Upload {
+		ctx := r.Context()
+		for sourceNodeID, hashRanges := range sourceNodeMovements {
+			// Only send CreateSnapshots to nodes that exist in the old cluster
+			if sourceNodeID < req.OldClusterSize {
+				if err := s.operator.CreateSnapshots(ctx, sourceNodeID, req.FullSync, hashRanges...); err != nil {
+					http.Error(w,
+						fmt.Sprintf("Error creating snapshots for node %d: %v", sourceNodeID, err),
+						http.StatusInternalServerError,
+					)
+					return
+				}
+			}
+		}
+	}
+
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	if err := jsonrs.NewEncoder(w).Encode(movements); err != nil {
