@@ -158,3 +158,5 @@ func (m *mockedCloudStorage) ListFilesWithPrefix(_ context.Context, _, _ string,
 func (m *mockedCloudStorage) UploadReader(_ context.Context, _ string, _ io.Reader) (filemanager.UploadedFile, error) {
 	return filemanager.UploadedFile{}, nil
 }
+
+func (m *mockedCloudStorage) Delete(_ context.Context, _ []string) error { return nil }

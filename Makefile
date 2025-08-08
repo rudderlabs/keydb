@@ -2,7 +2,7 @@ GO := go
 TESTFILE    := _testok
 DOCKER_USER :=
 
-GOLANG_CI				:= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
+GOLANG_CI				:= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.1
 GOFUMPT					:= mvdan.cc/gofumpt@latest
 GOVULNCHECK				:= golang.org/x/vuln/cmd/govulncheck@latest
 GOIMPORTS 				:= golang.org/x/tools/cmd/goimports@latest
