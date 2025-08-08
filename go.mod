@@ -9,7 +9,6 @@ require (
 	github.com/dgraph-io/ristretto/v2 v2.2.0
 	github.com/go-chi/chi/v5 v5.2.2
 	github.com/google/uuid v1.6.0
-	github.com/minio/minio-go/v7 v7.0.94
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/rudderlabs/rudder-go-kit v0.59.0
@@ -93,6 +92,7 @@ require (
 	github.com/mattn/go-ieproxy v0.0.12 // indirect
 	github.com/minio/crc64nvme v1.0.2 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
+	github.com/minio/minio-go/v7 v7.0.94 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/sys/user v0.4.0 // indirect

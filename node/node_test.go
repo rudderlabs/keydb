@@ -1,43 +1,31 @@
 package node
 
 import (
-	"bufio"
 	"context"
-	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"regexp"
-	"slices"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
 	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/operator"
+	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
-	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
+	miniokit "github.com/rudderlabs/rudder-go-kit/testhelper/docker/resource/minio"
 )
 
 const (
-	testTTL         = 5 * time.Minute
-	accessKeyId     = "MYACCESSKEYID"
-	secretAccessKey = "MYSECRETACCESSKEY"
-	region          = "MYREGION"
-	bucket          = "bucket-name"
+	testTTL = 5 * time.Minute
 )
 
 func TestSimple(t *testing.T) {
@@ -48,7 +36,10 @@ func TestSimple(t *testing.T) {
 	run := func(t *testing.T, newConf func() *config.Config) {
 		t.Parallel()
 
-		minioClient, cloudStorage := getCloudStorage(t, pool, config.New())
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -76,7 +67,7 @@ func TestSimple(t *testing.T) {
 		require.NoError(t, err)
 
 		// we expect one hash range to be empty so the file won't be uploaded
-		requireExpectedFiles(ctx, t, minioClient,
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
@@ -132,7 +123,10 @@ func TestScaleUpAndDown(t *testing.T) {
 	pool.MaxWait = 1 * time.Minute
 
 	run := func(t *testing.T, newConf func() *config.Config) {
-		minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -159,7 +153,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		op := getOperator(t, totalHashRanges, node0Address)
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 
-		requireExpectedFiles(ctx, t, minioClient,
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
@@ -230,7 +224,10 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 	pool.MaxWait = 1 * time.Minute
 
 	run := func(t *testing.T, newConf func() *config.Config) {
-		minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -257,7 +254,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		op := getOperator(t, totalHashRanges, node0Address)
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 
-		requireExpectedFiles(ctx, t, minioClient,
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
@@ -353,7 +350,10 @@ func TestIncrementalSnapshots(t *testing.T) {
 	run := func(t *testing.T, newConf func() *config.Config) {
 		t.Parallel()
 
-		minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -379,7 +379,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 		// we expect one hash range to be empty so the file won't be uploaded
-		requireExpectedFiles(ctx, t, minioClient,
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
@@ -391,7 +391,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false, true}, exists)
 
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
-		requireExpectedFiles(ctx, t, minioClient,
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
@@ -423,7 +423,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		// All files should be removed but the new ones.
 		// Being "full syncs" they start from the beginning (i.e. 0) up to the latest recorded (i.e. 2).
 		require.NoError(t, op.CreateSnapshots(ctx, 0, true))
-		requireExpectedFiles(ctx, t, minioClient,
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 			regexp.MustCompile("^hr_1_s_0_2.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_2.snapshot$"),
 			regexp.MustCompile("^hr_3_s_0_2.snapshot$"),
@@ -460,7 +460,10 @@ func TestSelectedSnapshots(t *testing.T) {
 	run := func(t *testing.T, newConf func() *config.Config) {
 		t.Parallel()
 
-		minioClient, cloudStorage := getCloudStorage(t, pool, newConf())
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -487,13 +490,13 @@ func TestSelectedSnapshots(t *testing.T) {
 		// Create only the snapshots for the hash ranges 0 and 1.
 		// We expect one hash range to be empty so the file won't be uploaded.
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false, 0, 1))
-		requireExpectedFiles(ctx, t, minioClient,
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 		)
 
 		// Now create the snapshot for the remaining hash ranges
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false, 2, 3))
-		requireExpectedFiles(ctx, t, minioClient,
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
@@ -544,25 +547,6 @@ func TestSelectedSnapshots(t *testing.T) {
 			return conf
 		})
 	})
-}
-
-func getCloudStorage(t testing.TB, pool *dockertest.Pool, conf *config.Config) (*minio.Client, cloudStorage) {
-	t.Helper()
-
-	minioEndpoint, minioClient := createMinioResource(t, pool, accessKeyId, secretAccessKey, region, bucket)
-	conf.Set("Storage.Bucket", bucket)
-	conf.Set("Storage.Endpoint", minioEndpoint)
-	conf.Set("Storage.AccessKeyId", accessKeyId)
-	conf.Set("Storage.AccessKey", secretAccessKey)
-	conf.Set("Storage.Region", region)
-	conf.Set("Storage.DisableSsl", true)
-	conf.Set("Storage.S3ForcePathStyle", true)
-	conf.Set("Storage.UseGlue", true)
-
-	cloudStorage, err := cloudstorage.GetCloudStorage(conf, logger.NOP)
-	require.NoError(t, err)
-
-	return minioClient, cloudStorage
 }
 
 func getService(
@@ -634,119 +618,4 @@ func getOperator(t testing.TB, totalHashRanges uint32, addresses ...string) *ope
 	t.Cleanup(func() { _ = op.Close() })
 
 	return op
-}
-
-func createMinioResource(
-	t testing.TB,
-	pool *dockertest.Pool, accessKeyId, secretAccessKey, region, bucket string,
-) (string, *minio.Client) {
-	t.Helper()
-	// running minio container on docker
-	minioResource, err := pool.RunWithOptions(&dockertest.RunOptions{
-		Repository: "minio/minio",
-		Tag:        "latest",
-		Cmd:        []string{"server", "/data"},
-		Env: []string{
-			fmt.Sprintf("MINIO_ACCESS_KEY=%s", accessKeyId),
-			fmt.Sprintf("MINIO_SECRET_KEY=%s", secretAccessKey),
-			fmt.Sprintf("MINIO_SITE_REGION=%s", region),
-		},
-		ExposedPorts: []string{"9000/tcp"},
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = pool.Purge(minioResource) })
-
-	minioEndpoint := fmt.Sprintf("localhost:%s", minioResource.GetPort("9000/tcp"))
-
-	// check if minio server is up & running.
-	err = pool.Retry(func() error {
-		url := fmt.Sprintf("http://%s/minio/health/live", minioEndpoint)
-		resp, err := http.Get(url)
-		if err != nil {
-			return err
-		}
-		defer func() { httputil.CloseResponse(resp) }()
-
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("status code not OK")
-		}
-		return nil
-	})
-	require.NoError(t, err)
-
-	minioClient, err := minio.New(minioEndpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(accessKeyId, secretAccessKey, ""),
-		Secure: false,
-	})
-	require.NoError(t, err)
-
-	// creating bucket inside minio where testing will happen.
-	err = minioClient.MakeBucket(context.Background(), bucket, minio.MakeBucketOptions{Region: region})
-	require.NoError(t, err)
-
-	return minioEndpoint, minioClient
-}
-
-type File struct {
-	Key                  string
-	Content              string
-	Etag                 string
-	LastModificationTime time.Time
-}
-
-// TODO use go-kit minio resource instead
-func getContents(ctx context.Context, bucket, prefix string, client *minio.Client) ([]File, error) {
-	contents := make([]File, 0)
-
-	opts := minio.ListObjectsOptions{
-		Recursive: true,
-		Prefix:    prefix,
-	}
-	for objInfo := range client.ListObjects(ctx, bucket, opts) {
-		if objInfo.Err != nil {
-			return nil, fmt.Errorf("list objects: %w", objInfo.Err)
-		}
-
-		o, err := client.GetObject(ctx, bucket, objInfo.Key, minio.GetObjectOptions{})
-		if err != nil {
-			return nil, fmt.Errorf("get object: %w", err)
-		}
-
-		b, err := io.ReadAll(bufio.NewReader(o))
-		if err != nil {
-			return nil, fmt.Errorf("read all: %w", err)
-		}
-
-		contents = append(contents, File{
-			Key:                  objInfo.Key,
-			Content:              string(b),
-			Etag:                 objInfo.ETag,
-			LastModificationTime: objInfo.LastModified,
-		})
-	}
-
-	slices.SortStableFunc(contents, func(a, b File) int {
-		return strings.Compare(a.Key, b.Key)
-	})
-
-	return contents, nil
-}
-
-func requireExpectedFiles(
-	ctx context.Context, t *testing.T, client *minio.Client, expectedFiles ...*regexp.Regexp,
-) {
-	t.Helper()
-	files, err := getContents(ctx, bucket, "hr_", client)
-	require.NoError(t, err)
-	require.Len(t, files, len(expectedFiles))
-	for _, file := range files {
-		var found bool
-		for _, expectedFile := range expectedFiles {
-			if expectedFile.MatchString(file.Key) {
-				found = true
-				break
-			}
-		}
-		require.True(t, found, "Unexpected file: %s", file.Key)
-	}
 }
