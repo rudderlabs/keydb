@@ -156,8 +156,8 @@ func GetNodeHashRangesList(nodeID, clusterSize, totalHashRanges uint32) []uint32
 	return ranges
 }
 
-// GetHashRangeMovements determines which hash ranges need to be moved from old nodes to new nodes
-// during cluster scaling operations.
+// GetHashRangeMovements determines which hash ranges need to be moved during cluster scaling operations
+// and returns two maps ready to be used.
 //
 // Parameters:
 // - oldClusterSize: The number of nodes in the cluster before scaling
@@ -165,8 +165,16 @@ func GetNodeHashRangesList(nodeID, clusterSize, totalHashRanges uint32) []uint32
 // - totalHashRanges: The total number of hash ranges (default 128)
 //
 // Returns:
-// - A map where key is the source nodeID and value is a slice of hash ranges to move from that node
-func GetHashRangeMovements(oldClusterSize, newClusterSize, totalHashRanges uint32) map[uint32][]uint32 {
+// - sourceNodeMovements: A map where key is source node ID and value is slice of hash ranges to move off that node
+// - destinationNodeMovements: A map where key is destination node ID and value is slice of hash ranges to move there
+func GetHashRangeMovements(
+	oldClusterSize,
+	newClusterSize,
+	totalHashRanges uint32,
+) (
+	map[uint32][]uint32,
+	map[uint32][]uint32,
+) {
 	if oldClusterSize == 0 {
 		panic("oldClusterSize must be greater than 0")
 	}
@@ -180,7 +188,8 @@ func GetHashRangeMovements(oldClusterSize, newClusterSize, totalHashRanges uint3
 		panic("totalHashRanges must be greater than or equal to newClusterSize")
 	}
 
-	movements := make(map[uint32][]uint32)
+	sourceNodeMovements := make(map[uint32][]uint32)
+	destinationNodeMovements := make(map[uint32][]uint32)
 
 	// For each hash range, determine if it's moving from one node to another
 	for hashRange := uint32(0); hashRange < totalHashRanges; hashRange++ {
@@ -189,47 +198,10 @@ func GetHashRangeMovements(oldClusterSize, newClusterSize, totalHashRanges uint3
 
 		// If the hash range is moving to a different node, record the movement
 		if oldNodeID != newNodeID {
-			movements[oldNodeID] = append(movements[oldNodeID], hashRange)
+			sourceNodeMovements[oldNodeID] = append(sourceNodeMovements[oldNodeID], hashRange)
+			destinationNodeMovements[newNodeID] = append(destinationNodeMovements[newNodeID], hashRange)
 		}
 	}
 
-	return movements
-}
-
-// GetNewNodeHashRanges determines which hash ranges each new node should receive
-// during cluster scale up operations.
-//
-// Parameters:
-// - oldClusterSize: The number of nodes in the cluster before scaling
-// - newClusterSize: The number of nodes in the cluster after scaling
-// - totalHashRanges: The total number of hash ranges (default 128)
-//
-// Returns:
-// - A map where key is the new nodeID and value is a slice of hash ranges for that node
-func GetNewNodeHashRanges(oldClusterSize, newClusterSize, totalHashRanges uint32) map[uint32][]uint32 {
-	if oldClusterSize == 0 {
-		panic("oldClusterSize must be greater than 0")
-	}
-	if newClusterSize == 0 {
-		panic("newClusterSize must be greater than 0")
-	}
-	if newClusterSize <= oldClusterSize {
-		panic("newClusterSize must be greater than oldClusterSize for scale up operations")
-	}
-	if totalHashRanges < oldClusterSize {
-		panic("totalHashRanges must be greater than or equal to oldClusterSize")
-	}
-	if totalHashRanges < newClusterSize {
-		panic("totalHashRanges must be greater than or equal to newClusterSize")
-	}
-
-	newNodeRanges := make(map[uint32][]uint32)
-
-	// Only consider nodes that are actually new (nodeID >= oldClusterSize)
-	for nodeID := oldClusterSize; nodeID < newClusterSize; nodeID++ {
-		ranges := GetNodeHashRangesList(nodeID, newClusterSize, totalHashRanges)
-		newNodeRanges[nodeID] = ranges
-	}
-
-	return newNodeRanges
+	return sourceNodeMovements, destinationNodeMovements
 }

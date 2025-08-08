@@ -382,11 +382,13 @@ func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddress
 		return fmt.Errorf("updating cluster data: %w", err)
 	}
 
-	// Step 2: Determine which hash ranges need to be moved from old nodes to new nodes
-	movements := hash.GetHashRangeMovements(oldClusterSize, newClusterSize, s.operator.TotalHashRanges())
+	// Step 2: Determine which hash ranges need to be moved and get ready-to-use maps
+	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+		oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
+	)
 
-	// Step 3: Create snapshots from old nodes for hash ranges that will be moved to new nodes
-	for sourceNodeID, hashRanges := range movements {
+	// Step 3: Create snapshots from source nodes for hash ranges that will be moved
+	for sourceNodeID, hashRanges := range sourceNodeMovements {
 		if len(hashRanges) == 0 {
 			continue
 		}
@@ -397,9 +399,8 @@ func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddress
 		}
 	}
 
-	// Step 4: Load snapshots for new nodes
-	newNodeRanges := hash.GetNewNodeHashRanges(oldClusterSize, newClusterSize, s.operator.TotalHashRanges())
-	for nodeID, hashRanges := range newNodeRanges {
+	// Step 4: Load snapshots to destination nodes
+	for nodeID, hashRanges := range destinationNodeMovements {
 		if len(hashRanges) == 0 {
 			continue
 		}

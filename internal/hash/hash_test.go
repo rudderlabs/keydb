@@ -364,26 +364,8 @@ func TestGetNodeHashRangesListPanics(t *testing.T) {
 	}
 }
 
-type hashResult struct {
-	key       string
-	hashRange uint32
-	nodeID    uint32
-}
-
-func getKeysForNodeID(noOfKeys int, nodeID, clusterSize, totalHashRanges uint32) []hashResult {
-	keys := make([]hashResult, 0, noOfKeys)
-	for len(keys) < noOfKeys {
-		key := kitrand.String(20)
-		hr, nn := GetNodeNumber(key, clusterSize, totalHashRanges)
-		if nn == nodeID {
-			keys = append(keys, hashResult{key, hr, nn})
-		}
-	}
-	return keys
-}
-
 // TestGetHashRangeMovements verifies that GetHashRangeMovements correctly identifies
-// which hash ranges need to be moved during scaling operations
+// which hash ranges need to be moved during scaling operations and returns ready-to-use maps
 func TestGetHashRangeMovements(t *testing.T) {
 	testCases := []struct {
 		name            string
@@ -425,30 +407,95 @@ func TestGetHashRangeMovements(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			movements := GetHashRangeMovements(tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges)
+			sourceNodeMovements, destinationNodeMovements := GetHashRangeMovements(
+				tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges,
+			)
 
-			// Verify that all moved hash ranges are valid
-			for sourceNodeID, hashRanges := range movements {
+			// Verify that all source node IDs are valid
+			for sourceNodeID, hashRanges := range sourceNodeMovements {
 				require.Less(t, sourceNodeID, tc.oldClusterSize, "Source node ID should be valid")
 
+				// Verify all hash ranges for this source node are valid
 				for _, hashRange := range hashRanges {
 					require.Less(t, hashRange, tc.totalHashRanges, "Hash range should be valid")
 
-					// Verify that this hash range actually moves from sourceNodeID to a different node
-					oldNodeID := hashRange % tc.oldClusterSize
+					// Verify that this hash range actually belongs to this source node in old cluster
+					expectedSourceNodeID := hashRange % tc.oldClusterSize
+					require.Equal(t, sourceNodeID, expectedSourceNodeID,
+						"Hash range %d should belong to source node %d in old cluster", hashRange, sourceNodeID,
+					)
+
+					// Verify that this hash range actually moves to a different node
 					newNodeID := hashRange % tc.newClusterSize
-					require.Equal(t, sourceNodeID, oldNodeID, "Hash range should belong to source node in old cluster")
-					require.NotEqual(t, oldNodeID, newNodeID, "Hash range should move to different node in new cluster")
+					require.NotEqual(t, sourceNodeID, newNodeID,
+						"Hash range %d should move from node %d to different node %d",
+						hashRange, sourceNodeID, newNodeID,
+					)
 				}
 			}
 
-			// Verify that no hash ranges are duplicated
-			allMovedRanges := make(map[uint32]bool)
-			for _, hashRanges := range movements {
+			// Verify that all destination node IDs are valid
+			for destinationNodeID, hashRanges := range destinationNodeMovements {
+				require.Less(t, destinationNodeID, tc.newClusterSize, "Destination node ID should be valid")
+
+				// Verify all hash ranges for this destination node are valid
 				for _, hashRange := range hashRanges {
-					require.False(t, allMovedRanges[hashRange], "Hash range %d should not be duplicated", hashRange)
-					allMovedRanges[hashRange] = true
+					require.Less(t, hashRange, tc.totalHashRanges, "Hash range should be valid")
+
+					// Verify that this hash range actually belongs to this destination node in new cluster
+					expectedDestinationNodeID := hashRange % tc.newClusterSize
+					require.Equal(t, destinationNodeID, expectedDestinationNodeID,
+						"Hash range %d should belong to destination node %d in new cluster",
+						hashRange, destinationNodeID,
+					)
+
+					// Verify that this hash range actually moves from a different node
+					oldNodeID := hashRange % tc.oldClusterSize
+					require.NotEqual(t, oldNodeID, destinationNodeID,
+						"Hash range %d should move from different node %d to node %d",
+						hashRange, oldNodeID, destinationNodeID,
+					)
 				}
+			}
+
+			// Verify that no hash ranges are duplicated in source movements
+			allSourceMovedRanges := make(map[uint32]bool)
+			for _, hashRanges := range sourceNodeMovements {
+				for _, hashRange := range hashRanges {
+					require.False(t, allSourceMovedRanges[hashRange],
+						"Hash range %d should not be duplicated in source movements", hashRange,
+					)
+					allSourceMovedRanges[hashRange] = true
+				}
+			}
+
+			// Verify that no hash ranges are duplicated in destination movements
+			allDestinationMovedRanges := make(map[uint32]bool)
+			for _, hashRanges := range destinationNodeMovements {
+				for _, hashRange := range hashRanges {
+					require.False(t, allDestinationMovedRanges[hashRange],
+						"Hash range %d should not be duplicated in destination movements", hashRange,
+					)
+					allDestinationMovedRanges[hashRange] = true
+				}
+			}
+
+			// Verify that source and destination movements contain the same hash ranges
+			require.Equal(t, allSourceMovedRanges, allDestinationMovedRanges,
+				"Source and destination movements should contain the same hash ranges",
+			)
+
+			// Verify that movements include all hash ranges that should move
+			for hashRange := uint32(0); hashRange < tc.totalHashRanges; hashRange++ {
+				oldNodeID := hashRange % tc.oldClusterSize
+				newNodeID := hashRange % tc.newClusterSize
+
+				shouldMove := oldNodeID != newNodeID
+				actuallyMoved := allSourceMovedRanges[hashRange]
+
+				require.Equal(t, shouldMove, actuallyMoved,
+					"Hash range %d movement status should match expectation", hashRange,
+				)
 			}
 		})
 	}
@@ -496,141 +543,26 @@ func TestGetHashRangeMovementsPanics(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			require.PanicsWithValue(t, tc.expectedPanic, func() {
-				GetHashRangeMovements(tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges)
+				_, _ = GetHashRangeMovements(tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges)
 			})
 		})
 	}
 }
 
-// TestGetNewNodeHashRanges verifies that GetNewNodeHashRanges correctly identifies
-// which hash ranges each new node should receive during scale up operations
-func TestGetNewNodeHashRanges(t *testing.T) {
-	testCases := []struct {
-		name            string
-		oldClusterSize  uint32
-		newClusterSize  uint32
-		totalHashRanges uint32
-	}{
-		{
-			name:            "scale_up_1_to_2",
-			oldClusterSize:  1,
-			newClusterSize:  2,
-			totalHashRanges: 4,
-		},
-		{
-			name:            "scale_up_2_to_3",
-			oldClusterSize:  2,
-			newClusterSize:  3,
-			totalHashRanges: 6,
-		},
-		{
-			name:            "scale_up_3_to_5",
-			oldClusterSize:  3,
-			newClusterSize:  5,
-			totalHashRanges: 15,
-		},
-		{
-			name:            "large_scale_up",
-			oldClusterSize:  5,
-			newClusterSize:  10,
-			totalHashRanges: 128,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			newNodeRanges := GetNewNodeHashRanges(tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges)
-
-			// Verify that only new nodes are included
-			for nodeID := range newNodeRanges {
-				require.GreaterOrEqual(t, nodeID, tc.oldClusterSize, "Only new nodes should be included")
-				require.Less(t, nodeID, tc.newClusterSize, "Node ID should be valid")
-			}
-
-			// Verify that all new nodes are included
-			for nodeID := tc.oldClusterSize; nodeID < tc.newClusterSize; nodeID++ {
-				_, exists := newNodeRanges[nodeID]
-				require.True(t, exists, "New node %d should be included", nodeID)
-			}
-
-			// Verify that hash ranges are correct for each new node
-			for nodeID, hashRanges := range newNodeRanges {
-				expectedRanges := GetNodeHashRangesList(nodeID, tc.newClusterSize, tc.totalHashRanges)
-				require.ElementsMatch(t, expectedRanges, hashRanges,
-					"Hash ranges should match GetNodeHashRangesList result",
-				)
-			}
-
-			// Verify that no hash ranges are duplicated across new nodes
-			allNewNodeRanges := make(map[uint32]bool)
-			for _, hashRanges := range newNodeRanges {
-				for _, hashRange := range hashRanges {
-					require.False(t, allNewNodeRanges[hashRange], "Hash range %d should not be duplicated", hashRange)
-					allNewNodeRanges[hashRange] = true
-				}
-			}
-		})
-	}
+type hashResult struct {
+	key       string
+	hashRange uint32
+	nodeID    uint32
 }
 
-// TestGetNewNodeHashRangesPanics verifies that GetNewNodeHashRanges panics with invalid parameters
-func TestGetNewNodeHashRangesPanics(t *testing.T) {
-	testCases := []struct {
-		name            string
-		oldClusterSize  uint32
-		newClusterSize  uint32
-		totalHashRanges uint32
-		expectedPanic   string
-	}{
-		{
-			name:            "zero_old_cluster_size",
-			oldClusterSize:  0,
-			newClusterSize:  2,
-			totalHashRanges: 128,
-			expectedPanic:   "oldClusterSize must be greater than 0",
-		},
-		{
-			name:            "zero_new_cluster_size",
-			oldClusterSize:  2,
-			newClusterSize:  0,
-			totalHashRanges: 128,
-			expectedPanic:   "newClusterSize must be greater than 0",
-		},
-		{
-			name:            "new_cluster_size_equal_to_old",
-			oldClusterSize:  5,
-			newClusterSize:  5,
-			totalHashRanges: 128,
-			expectedPanic:   "newClusterSize must be greater than oldClusterSize for scale up operations",
-		},
-		{
-			name:            "new_cluster_size_less_than_old",
-			oldClusterSize:  5,
-			newClusterSize:  3,
-			totalHashRanges: 128,
-			expectedPanic:   "newClusterSize must be greater than oldClusterSize for scale up operations",
-		},
-		{
-			name:            "totalHashRanges_less_than_oldClusterSize",
-			oldClusterSize:  10,
-			newClusterSize:  15,
-			totalHashRanges: 5,
-			expectedPanic:   "totalHashRanges must be greater than or equal to oldClusterSize",
-		},
-		{
-			name:            "totalHashRanges_less_than_newClusterSize",
-			oldClusterSize:  5,
-			newClusterSize:  10,
-			totalHashRanges: 8,
-			expectedPanic:   "totalHashRanges must be greater than or equal to newClusterSize",
-		},
+func getKeysForNodeID(noOfKeys int, nodeID, clusterSize, totalHashRanges uint32) []hashResult {
+	keys := make([]hashResult, 0, noOfKeys)
+	for len(keys) < noOfKeys {
+		key := kitrand.String(20)
+		hr, nn := GetNodeNumber(key, clusterSize, totalHashRanges)
+		if nn == nodeID {
+			keys = append(keys, hashResult{key, hr, nn})
+		}
 	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			require.PanicsWithValue(t, tc.expectedPanic, func() {
-				GetNewNodeHashRanges(tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges)
-			})
-		})
-	}
+	return keys
 }
