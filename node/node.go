@@ -569,7 +569,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	if s.scaling {
 		log.Infon("Scaling operation already in progress")
-		return &pb.ScaleResponse{ // TODO we could have auto-healing here easily by attempting the scaling anyway
+		return &pb.ScaleResponse{
 			Success:             false,
 			ErrorMessage:        "scaling operation already in progress",
 			PreviousClusterSize: s.config.ClusterSize,
