@@ -12,17 +12,17 @@ var ErrWrongNode = fmt.Errorf("wrong node")
 //
 // Parameters:
 // - key: The key to hash
-// - numberOfNodes: The total number of nodes in the cluster
+// - clusterSize: The total number of nodes in the cluster
 // - totalHashRanges: The total number of hash ranges (default 128)
 //
 // Returns:
 // - The node number (0-based) that should handle this key
-func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, uint32) {
-	if numberOfNodes == 0 {
-		panic("numberOfNodes must be greater than 0")
+func GetNodeNumber(key string, clusterSize, totalHashRanges uint32) (uint32, uint32) {
+	if clusterSize == 0 {
+		panic("clusterSize must be greater than 0")
 	}
-	if totalHashRanges < numberOfNodes {
-		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	if totalHashRanges < clusterSize {
+		panic("totalHashRanges must be greater than or equal to clusterSize")
 	}
 
 	// Calculate the hash of the key
@@ -34,18 +34,18 @@ func GetNodeNumber(key string, numberOfNodes, totalHashRanges uint32) (uint32, u
 	hashRange := hashValue % totalHashRanges
 
 	// Determine which node handles this hash range
-	return hashRange, hashRange % numberOfNodes
+	return hashRange, hashRange % clusterSize
 }
 
-func GetKeysByHashRange(keys []string, nodeID, numberOfNodes, totalHashRanges uint32) (
+func GetKeysByHashRange(keys []string, nodeID, clusterSize, totalHashRanges uint32) (
 	map[uint32][]string, // keysByHashRange
 	error,
 ) {
-	if numberOfNodes == 0 {
-		panic("numberOfNodes must be greater than 0")
+	if clusterSize == 0 {
+		panic("clusterSize must be greater than 0")
 	}
-	if totalHashRanges < numberOfNodes {
-		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	if totalHashRanges < clusterSize {
+		panic("totalHashRanges must be greater than or equal to clusterSize")
 	}
 
 	m := make(map[uint32][]string)
@@ -56,7 +56,7 @@ func GetKeysByHashRange(keys []string, nodeID, numberOfNodes, totalHashRanges ui
 		hashValue := h.Sum32()
 		hashRange := hashValue % totalHashRanges
 
-		if nodeID != hashRange%numberOfNodes {
+		if nodeID != hashRange%clusterSize {
 			return nil, fmt.Errorf("hashRange %d not for node %d: %w", hashRange, nodeID, ErrWrongNode)
 		}
 
@@ -66,16 +66,16 @@ func GetKeysByHashRange(keys []string, nodeID, numberOfNodes, totalHashRanges ui
 	return m, nil
 }
 
-func GetKeysByHashRangeWithIndexes(keys []string, nodeID, numberOfNodes, totalHashRanges uint32) (
+func GetKeysByHashRangeWithIndexes(keys []string, nodeID, clusterSize, totalHashRanges uint32) (
 	map[uint32][]string, // keysByHashRange
 	map[string]int, // indexes
 	error,
 ) {
-	if numberOfNodes == 0 {
-		panic("numberOfNodes must be greater than 0")
+	if clusterSize == 0 {
+		panic("clusterSize must be greater than 0")
 	}
-	if totalHashRanges < numberOfNodes {
-		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	if totalHashRanges < clusterSize {
+		panic("totalHashRanges must be greater than or equal to clusterSize")
 	}
 
 	m := make(map[uint32][]string)
@@ -87,7 +87,7 @@ func GetKeysByHashRangeWithIndexes(keys []string, nodeID, numberOfNodes, totalHa
 		hashValue := h.Sum32()
 		hashRange := hashValue % totalHashRanges
 
-		if nodeID != hashRange%numberOfNodes {
+		if nodeID != hashRange%clusterSize {
 			return nil, nil, fmt.Errorf("hashRange %d not for node %d: %w", hashRange, nodeID, ErrWrongNode)
 		}
 
@@ -103,25 +103,25 @@ func GetKeysByHashRangeWithIndexes(keys []string, nodeID, numberOfNodes, totalHa
 //
 // Parameters:
 // - nodeID: The ID of the node (0-based)
-// - numberOfNodes: The total number of nodes in the cluster
+// - clusterSize: The total number of nodes in the cluster
 // - totalHashRanges: The total number of hash ranges (default 128)
 //
 // Returns:
 // - A map with the key representing the hash ranges that this node should handle
-func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) map[uint32]struct{} {
-	if numberOfNodes == 0 {
-		panic("numberOfNodes must be greater than 0")
+func GetNodeHashRanges(nodeID, clusterSize, totalHashRanges uint32) map[uint32]struct{} {
+	if clusterSize == 0 {
+		panic("clusterSize must be greater than 0")
 	}
-	if totalHashRanges < numberOfNodes {
-		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	if totalHashRanges < clusterSize {
+		panic("totalHashRanges must be greater than or equal to clusterSize")
 	}
-	if nodeID >= numberOfNodes {
-		panic("nodeID must be less than numberOfNodes")
+	if nodeID >= clusterSize {
+		panic("nodeID must be less than clusterSize")
 	}
 	ranges := make(map[uint32]struct{})
-	for i := uint32(0); i < totalHashRanges; i++ {
-		if i%numberOfNodes == nodeID {
-			ranges[i] = struct{}{}
+	for hashRange := uint32(0); hashRange < totalHashRanges; hashRange++ {
+		if hashRange%clusterSize == nodeID {
+			ranges[hashRange] = struct{}{}
 		}
 	}
 	return ranges
@@ -132,24 +132,24 @@ func GetNodeHashRanges(nodeID, numberOfNodes, totalHashRanges uint32) map[uint32
 //
 // Parameters:
 // - nodeID: The ID of the node (0-based)
-// - numberOfNodes: The total number of nodes in the cluster
+// - clusterSize: The total number of nodes in the cluster
 // - totalHashRanges: The total number of hash ranges (default 128)
 //
 // Returns:
 // - A slice of hash ranges that this node should handle
-func GetNodeHashRangesList(nodeID, numberOfNodes, totalHashRanges uint32) []uint32 {
-	if numberOfNodes == 0 {
-		panic("numberOfNodes must be greater than 0")
+func GetNodeHashRangesList(nodeID, clusterSize, totalHashRanges uint32) []uint32 {
+	if clusterSize == 0 {
+		panic("clusterSize must be greater than 0")
 	}
-	if totalHashRanges < numberOfNodes {
-		panic("totalHashRanges must be greater than or equal to numberOfNodes")
+	if totalHashRanges < clusterSize {
+		panic("totalHashRanges must be greater than or equal to clusterSize")
 	}
-	if nodeID >= numberOfNodes {
-		panic("nodeID must be less than numberOfNodes")
+	if nodeID >= clusterSize {
+		panic("nodeID must be less than clusterSize")
 	}
 	ranges := make([]uint32, 0)
 	for i := uint32(0); i < totalHashRanges; i++ {
-		if i%numberOfNodes == nodeID {
+		if i%clusterSize == nodeID {
 			ranges = append(ranges, i)
 		}
 	}
