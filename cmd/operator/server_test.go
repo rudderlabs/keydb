@@ -601,3 +601,164 @@ func TestAutoHealing(t *testing.T) {
 	cancel()
 	node0.Close()
 }
+
+func TestHashRangeMovements(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	_, cloudStorage := getCloudStorage(t, pool, newConf())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create a simple node service for the HTTP server
+	totalHashRanges := uint32(8)
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, node0Conf)
+
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+
+	// Test successful hash range movements preview
+	t.Run("successful scale up preview", func(t *testing.T) {
+		body := op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+			OldClusterSize:  2,
+			NewClusterSize:  3,
+			TotalHashRanges: 8,
+		})
+
+		var movements []HashRangeMovement
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+
+		// Verify we have some movements
+		require.NotEmpty(t, movements)
+
+		// Verify each movement has valid data
+		for _, movement := range movements {
+			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
+			require.Less(t, movement.From, uint32(2), "from node should be less than old cluster size")
+			require.Less(t, movement.To, uint32(3), "to node should be less than new cluster size")
+			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
+		}
+	})
+
+	t.Run("successful scale down preview", func(t *testing.T) {
+		body := op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+			OldClusterSize:  3,
+			NewClusterSize:  2,
+			TotalHashRanges: 8,
+		})
+
+		var movements []HashRangeMovement
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+
+		// Verify we have some movements
+		require.NotEmpty(t, movements)
+
+		// Verify each movement has valid data
+		for _, movement := range movements {
+			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
+			require.Less(t, movement.From, uint32(3), "from node should be less than old cluster size")
+			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
+			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
+		}
+	})
+
+	t.Run("no movements when cluster size unchanged", func(t *testing.T) {
+		body := op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+			OldClusterSize:  2,
+			NewClusterSize:  2,
+			TotalHashRanges: 8,
+		})
+
+		var movements []HashRangeMovement
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+
+		// Should be empty when cluster size doesn't change
+		require.Empty(t, movements)
+	})
+
+	// Test error cases
+	testCases := []struct {
+		name           string
+		request        HashRangeMovementsRequest
+		expectedStatus int
+	}{
+		{
+			name: "zero old cluster size",
+			request: HashRangeMovementsRequest{
+				OldClusterSize:  0,
+				NewClusterSize:  2,
+				TotalHashRanges: 8,
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name: "zero new cluster size",
+			request: HashRangeMovementsRequest{
+				OldClusterSize:  2,
+				NewClusterSize:  0,
+				TotalHashRanges: 8,
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name: "zero total hash ranges",
+			request: HashRangeMovementsRequest{
+				OldClusterSize:  2,
+				NewClusterSize:  3,
+				TotalHashRanges: 0,
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name: "total hash ranges less than old cluster size",
+			request: HashRangeMovementsRequest{
+				OldClusterSize:  5,
+				NewClusterSize:  3,
+				TotalHashRanges: 4,
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name: "total hash ranges less than new cluster size",
+			request: HashRangeMovementsRequest{
+				OldClusterSize:  2,
+				NewClusterSize:  5,
+				TotalHashRanges: 4,
+			},
+			expectedStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf, err := jsonrs.Marshal(tc.request)
+			require.NoError(t, err)
+			req, err := http.NewRequest(http.MethodPost, op.url+"/hashRangeMovements", bytes.NewBuffer(buf))
+			require.NoError(t, err)
+
+			resp, err := op.client.Do(req)
+			require.NoError(t, err)
+			defer func() { httputil.CloseResponse(resp) }()
+
+			require.Equal(t, tc.expectedStatus, resp.StatusCode)
+		})
+	}
+
+	cancel()
+	node0.Close()
+}

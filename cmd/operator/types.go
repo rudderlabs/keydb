@@ -64,3 +64,17 @@ type AutoScaleRequest struct {
 	// When true, all data will be included in snapshots regardless of incremental changes.
 	FullSync bool `json:"full_sync,omitempty"`
 }
+
+// HashRangeMovementsRequest represents a request to preview hash range movements
+type HashRangeMovementsRequest struct {
+	OldClusterSize  uint32 `json:"oldClusterSize"`
+	NewClusterSize  uint32 `json:"newClusterSize"`
+	TotalHashRanges uint32 `json:"totalHashRanges"`
+}
+
+// HashRangeMovement represents a single hash range movement
+type HashRangeMovement struct {
+	HashRange uint32 `json:"hashRange"`
+	From      uint32 `json:"from"`
+	To        uint32 `json:"to"`
+}

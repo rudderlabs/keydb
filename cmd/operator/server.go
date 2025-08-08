@@ -47,6 +47,7 @@ func newHTTPServer(client *client.Client, operator *operator.Client, addr string
 	mux.Post("/scaleComplete", s.handleScaleComplete)
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
 	mux.Post("/autoScale", s.handleAutoScale)
+	mux.Post("/hashRangeMovements", s.handleHashRangeMovements)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -503,6 +504,74 @@ func (s *httpServer) filterHashRangesAlreadyManaged(nodeID, oldClusterSize uint3
 	}
 
 	return hashRangesToLoad
+}
+
+// handleHashRangeMovements handles POST /hashRangeMovements requests
+func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req HashRangeMovementsRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if req.OldClusterSize == 0 {
+		http.Error(w, "oldClusterSize must be greater than 0", http.StatusBadRequest)
+		return
+	}
+	if req.NewClusterSize == 0 {
+		http.Error(w, "newClusterSize must be greater than 0", http.StatusBadRequest)
+		return
+	}
+	if req.TotalHashRanges == 0 {
+		http.Error(w, "totalHashRanges must be greater than 0", http.StatusBadRequest)
+		return
+	}
+	if req.TotalHashRanges < req.OldClusterSize {
+		http.Error(w, "totalHashRanges must be greater than or equal to oldClusterSize", http.StatusBadRequest)
+		return
+	}
+	if req.TotalHashRanges < req.NewClusterSize {
+		http.Error(w, "totalHashRanges must be greater than or equal to newClusterSize", http.StatusBadRequest)
+		return
+	}
+
+	// Get hash range movements
+	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+		req.OldClusterSize, req.NewClusterSize, req.TotalHashRanges,
+	)
+
+	destinationMap := make(map[uint32]uint32)
+	for nodeID, hashRanges := range destinationNodeMovements {
+		for _, hashRange := range hashRanges {
+			destinationMap[hashRange] = nodeID
+		}
+	}
+
+	// Convert to response format
+	var movements []HashRangeMovement
+	for sourceNodeID, hashRanges := range sourceNodeMovements {
+		for _, hashRange := range hashRanges {
+			movements = append(movements, HashRangeMovement{
+				HashRange: hashRange,
+				From:      sourceNodeID,
+				To:        destinationMap[hashRange],
+			})
+		}
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	if err := jsonrs.NewEncoder(w).Encode(movements); err != nil {
+		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
+		return
+	}
 }
 
 type loggerAdapter struct {
