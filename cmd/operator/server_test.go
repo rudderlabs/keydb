@@ -657,6 +657,52 @@ func TestHashRangeMovements(t *testing.T) {
 			regexp.MustCompile("^hr_5_s_0_1.snapshot$"),
 			regexp.MustCompile("^hr_7_s_0_1.snapshot$"),
 		)
+
+		_ = op.Do("/put", PutRequest{
+			Keys: []string{
+				"key17", "key18", "key19", "key20",
+				"key21", "key22", "key23", "key24",
+				"key25", "key26", "key27", "key28",
+				"key29", "key30", "key31", "key32",
+			}, TTL: testTTL,
+		}, true)
+
+		body = op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+			OldClusterSize:  1,
+			NewClusterSize:  2,
+			TotalHashRanges: 8,
+			Upload:          true,
+			SplitUploads:    true,
+		})
+
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+
+		// Verify we still get movements even with upload=true and splitUploads=true
+		require.NotEmpty(t, movements)
+
+		// Verify each movement has valid data
+		for _, movement := range movements {
+			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
+			require.Less(t, movement.From, uint32(1), "from node should be less than old cluster size")
+			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
+			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
+		}
+
+		// When splitUploads is true, each hash range gets its own CreateSnapshots call,
+		// resulting in separate snapshot files with different naming patterns.
+		// We expect both the files from the previous test and the new split upload files.
+		keydbth.RequireExpectedFiles(context.Background(), t, minioContainer,
+			// Files from the previous "upload" test
+			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_5_s_0_1.snapshot$"),
+			regexp.MustCompile("^hr_7_s_0_1.snapshot$"),
+			// Files from the current "upload with split uploads" test
+			regexp.MustCompile("^hr_1_s_1_2.snapshot$"),
+			regexp.MustCompile("^hr_3_s_1_2.snapshot$"),
+			regexp.MustCompile("^hr_5_s_1_2.snapshot$"),
+			regexp.MustCompile("^hr_7_s_1_2.snapshot$"),
+		)
 	})
 
 	cancel()
