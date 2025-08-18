@@ -281,10 +281,8 @@ func TestAutoScale(t *testing.T) {
 	}, true)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-		regexp.MustCompile("^hr_0_s_0_2.snapshot$"),
 		regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
 		regexp.MustCompile("^hr_1_s_1_2.snapshot$"),
-		regexp.MustCompile("^hr_2_s_0_2.snapshot$"),
 	)
 
 	// Verify scale down worked - check node info

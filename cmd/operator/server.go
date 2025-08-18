@@ -391,31 +391,46 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
-	// Step 1: Create snapshots for all existing nodes for their current hash ranges
-	// This ensures we have snapshots for all data before redistributing
-	for nodeID := uint32(0); nodeID < oldClusterSize; nodeID++ {
-		if err := s.operator.CreateSnapshots(ctx, nodeID, fullSync); err != nil {
-			return fmt.Errorf("creating snapshots for node %d: %w", nodeID, err)
-		}
-	}
+	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+		oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
+	)
 
-	// Step 2: Load snapshots for remaining nodes with their new hash ranges
-	// Each remaining node needs to load snapshots for hash ranges it will now handle
-	for nodeID := uint32(0); nodeID < newClusterSize; nodeID++ {
-		// Get all hash ranges this node will manage in the new cluster
-		newHashRanges := hash.GetNodeHashRangesList(nodeID, newClusterSize, s.operator.TotalHashRanges())
-
-		// Filter out hash ranges this node was already managing in the old cluster
-		hashRangesToLoad := s.filterHashRangesAlreadyManaged(nodeID, oldClusterSize, newHashRanges)
-
-		// Only load snapshots for hash ranges the node wasn't already managing
-		if len(hashRangesToLoad) == 0 {
+	// Step 1: Create snapshots from source nodes for hash ranges that will be moved
+	group, gCtx := errgroup.WithContext(ctx)
+	for sourceNodeID, hashRanges := range sourceNodeMovements {
+		if len(hashRanges) == 0 {
 			continue
 		}
+		group.Go(func() error {
+			if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+				return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+					sourceNodeID, hashRanges, err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for snapshot creation: %w", err)
+	}
 
-		if err := s.operator.LoadSnapshots(ctx, nodeID, hashRangesToLoad...); err != nil {
-			return fmt.Errorf("loading snapshots for node %d: %w", nodeID, err)
+	// Step 2: Load snapshots to destination nodes
+	group, gCtx = errgroup.WithContext(ctx)
+	for nodeID, hashRanges := range destinationNodeMovements {
+		if len(hashRanges) == 0 {
+			continue
 		}
+		group.Go(func() error {
+			if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+				return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
+					nodeID, hashRanges, err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for snapshot loading: %w", err)
 	}
 
 	// Step 3: Update cluster data with new addresses
@@ -455,27 +470,6 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 	}
 
 	return nil
-}
-
-// filterHashRangesAlreadyManaged filters out hash ranges that a node was already managing
-// in the old cluster, returning only the hash ranges that are new for this node.
-func (s *httpServer) filterHashRangesAlreadyManaged(nodeID, oldClusterSize uint32, newHashRanges []uint32) []uint32 {
-	// Get hash ranges this node was managing in the old cluster
-	oldHashRanges := make(map[uint32]struct{})
-	if nodeID < oldClusterSize {
-		// Only nodes that existed in the old cluster have old hash ranges
-		oldHashRanges = hash.GetNodeHashRanges(nodeID, oldClusterSize, s.operator.TotalHashRanges())
-	}
-
-	// Filter out hash ranges that were already managed by this node
-	var hashRangesToLoad []uint32
-	for _, hashRange := range newHashRanges {
-		if _, wasAlreadyManaged := oldHashRanges[hashRange]; !wasAlreadyManaged {
-			hashRangesToLoad = append(hashRangesToLoad, hashRange)
-		}
-	}
-
-	return hashRangesToLoad
 }
 
 // handleHashRangeMovements handles POST /hashRangeMovements requests
