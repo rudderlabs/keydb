@@ -328,11 +328,6 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 	}
 
-	if !download {
-		// We still had to do the above in order to populate the "since" map
-		return nil
-	}
-
 	// List all files in the bucket
 	list := s.storage.ListFilesWithPrefix(ctx, "", getSnapshotFilenamePrefix(), s.maxFilesToList)
 	files, err := list.Next()
@@ -375,6 +370,11 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 			filesByHashRange[hashRange] = make([]string, 0, 1)
 		}
 		filesByHashRange[hashRange] = append(filesByHashRange[hashRange], file.Key)
+	}
+
+	if !download {
+		// We still had to do the above in order to populate the "since" map
+		return nil
 	}
 
 	for i := range filesByHashRange {
