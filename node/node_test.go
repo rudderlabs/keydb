@@ -167,6 +167,9 @@ func TestScaleUpAndDown(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
 		}, node1Conf)
+		require.Equal(t, map[uint32]uint64{0: 1, 1: 1, 2: 1}, node1.since,
+			"Node should populate the since map upon start-up",
+		)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
