@@ -55,10 +55,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 			log.Warnn("Failed to close client", obskit.Error(err))
 		}
 	}()
-	opRetryDelay := conf.GetDuration("operatorRetryDelay", 0, time.Second)
-	if opRetryDelay == 0 {
-		opRetryDelay = client.DefaultRetryDelay
-	}
+	opRetryDelay := conf.GetDuration("operatorRetryDelay", int64(client.DefaultRetryDelay), time.Second)
 	op, err := operator.NewClient(operator.Config{
 		Addresses:       strings.Split(nodeAddresses, ","),
 		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
