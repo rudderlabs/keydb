@@ -38,7 +38,6 @@ type Cache struct {
 	compress         bool
 	compressionLevel int
 	discardRatio     float64
-	snapshotSince    uint64
 	snapshotting     bool
 	snapshottingLock sync.Mutex
 	debugMode        bool
@@ -134,7 +133,7 @@ func (c *Cache) Get(keysByHashRange map[uint32][]string, indexes map[string]int)
 	err := c.cache.View(func(txn *badger.Txn) error {
 		for hashRange, keys := range keysByHashRange {
 			for _, key := range keys {
-				_, err := txn.Get(c.getKey(key, hashRange))
+				_, err := txn.Get(getKey(key, hashRange))
 				if err != nil {
 					if errors.Is(err, badger.ErrKeyNotFound) {
 						results[indexes[key]] = false
@@ -162,7 +161,7 @@ func (c *Cache) Put(keysByHashRange map[uint32][]string, ttl time.Duration) erro
 	bw := c.cache.NewWriteBatch()
 	for hashRange, keys := range keysByHashRange {
 		for _, key := range keys {
-			cacheKey := c.getKey(key, hashRange)
+			cacheKey := getKey(key, hashRange)
 			entry := badger.NewEntry(cacheKey, nil)
 			if ttl > 0 {
 				entry = entry.WithTTL(c.getTTL(modifiedTTL))
@@ -184,73 +183,97 @@ func (c *Cache) getTTL(ttl time.Duration) time.Duration {
 }
 
 // CreateSnapshots writes the cache contents to the provided writers
-// TODO CreateSnapshots should take an optional "since" parameter that the node service that infer
-// from the filenames on S3.
-// Otherwise the current "since" will be lost after a node restart.
-func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (uint64, map[uint32]bool, error) {
+func (c *Cache) CreateSnapshots(
+	ctx context.Context,
+	writers map[uint32]io.Writer,
+	since map[uint32]uint64,
+) (
+	uint64, map[uint32]bool, error,
+) {
 	c.snapshottingLock.Lock()
 	if c.snapshotting {
 		c.snapshottingLock.Unlock()
 		return 0, nil, ErrSnapshotInProgress
 	}
 
-	since := c.snapshotSince
 	c.snapshotting = true
 	c.snapshottingLock.Unlock()
 
+	defer func() {
+		c.snapshottingLock.Lock()
+		c.snapshotting = false
+		c.snapshottingLock.Unlock()
+	}()
+
 	hashRangesMap := make(map[uint32]struct{})
-	// we need to know which hash ranges are being written to, as buffers will have zstd footer in case compression is
+	// We need to know which hash ranges are being written to, as buffers will have zstd footer in case compression is
 	// enabled, so we can't use the buff.Len() to check if the writer has data
 	hasData := make(map[uint32]bool)
-	for hashRange := range w {
+	for hashRange := range writers {
 		hashRangesMap[hashRange] = struct{}{}
 		hasData[hashRange] = false
 	}
 
-	// Create synchronized writers for each hash range
-	type lockedWriter struct {
-		mu     sync.Mutex
-		writer io.Writer
-		closer io.Closer // for zstd writers
-	}
-	writers := make(map[uint32]*lockedWriter)
-	for hr := range w {
+	lockedWriters := make(map[uint32]*lockedWriter)
+	for hr := range writers {
 		lw := &lockedWriter{}
 		if c.compress {
-			zw := zstd.NewWriterLevel(w[hr], c.compressionLevel)
+			zw := zstd.NewWriterLevel(writers[hr], c.compressionLevel)
 			lw.writer = zw
 			lw.closer = zw
 		} else {
-			lw.writer = w[hr]
-			if wc, ok := w[hr].(io.Closer); ok {
+			lw.writer = writers[hr]
+			if wc, ok := writers[hr].(io.Closer); ok {
 				lw.closer = wc
 			}
 		}
-		writers[hr] = lw
+		lockedWriters[hr] = lw
 	}
 
 	// Ensure writers are closed at the end
 	defer func() {
-		for _, lw := range writers {
+		for _, lw := range lockedWriters {
 			if lw.closer != nil {
 				_ = lw.closer.Close()
 			}
 		}
 	}()
 
-	var maxVersion uint64
+	var maxSince uint64
+	numGo := c.conf.GetInt("BadgerDB.Dedup.Snapshots.NumGoroutines", 10)
+	for hashRange, writer := range lockedWriters {
+		stream, getState := c.createStream(numGo, hashRange, since[hashRange], writer)
+		err := stream.Orchestrate(ctx)
+		if err != nil {
+			return 0, nil, fmt.Errorf("failed to create snapshot: %w", err)
+		}
+		since, ok := getState()
+		if since > maxSince {
+			maxSince = since
+		}
+		if ok {
+			hasData[hashRange] = true
+		}
+	}
+
+	return maxSince, hasData, nil
+}
+
+func (c *Cache) createStream(numGo int, hashRange uint32, since uint64, writer *lockedWriter) (
+	*badger.Stream,
+	func() (uint64, bool),
+) {
+	var (
+		hasData    bool
+		maxVersion uint64
+	)
 	stream := c.cache.NewStream()
-	stream.NumGo = c.conf.GetInt("BadgerDB.Dedup.Snapshots.NumGoroutines", 10)
-	stream.Prefix = []byte("hr")
+	stream.NumGo = numGo
+	stream.Prefix = []byte(getKeyPrefix(hashRange))
 	stream.SinceTs = since
 	stream.ChooseKey = func(item *badger.Item) (ok bool) {
 		hasExpired := item.ExpiresAt() > 0 && item.ExpiresAt() <= uint64(time.Now().Unix())
-		if !hasExpired {
-			parts := bytes.Split(item.Key(), []byte(":"))
-			hashRange, _ := strconv.ParseUint(string(parts[0][2:]), 10, 32)
-			_, ok = hashRangesMap[uint32(hashRange)]
-		}
-		return ok
+		return !hasExpired
 	}
 	stream.Send = func(buf *z.Buffer) error {
 		list, err := badger.BufferToKVList(buf)
@@ -258,9 +281,7 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 			return err
 		}
 
-		// Group KV pairs by hash range
-		kvsByHashRange := make(map[uint32][]*pb.KV)
-
+		var kvs []*pb.KV
 		for _, kv := range list.Kv {
 			if maxVersion < kv.Version {
 				maxVersion = kv.Version
@@ -275,50 +296,37 @@ func (c *Cache) CreateSnapshots(ctx context.Context, w map[uint32]io.Writer) (ui
 				}
 
 				hashRangeStr := string(parts[0][2:]) // Remove "hr" prefix
-				hashRange, err := strconv.ParseUint(hashRangeStr, 10, 32)
+				hr, err := strconv.ParseUint(hashRangeStr, 10, 32)
 				if err != nil {
-					c.logger.Warnn("Skipping key with invalid hash range", logger.NewStringField("key", string(kv.Key)))
+					c.logger.Warnn("Skipping key with invalid hash range",
+						logger.NewIntField("expected", int64(hashRange)),
+						logger.NewStringField("actual", hashRangeStr),
+						logger.NewStringField("key", string(kv.Key)))
 					continue // Skip keys with invalid hash range
 				}
 
-				hashRange32 := uint32(hashRange)
-
-				// Only include if we have a writer for this hash range
-				if _, exists := w[hashRange32]; exists {
-					kvsByHashRange[hashRange32] = append(kvsByHashRange[hashRange32], kv)
-					hasData[hashRange32] = true
+				if uint32(hr) != hashRange {
+					// if this happens stream.Prefix is not used correctly
+					c.logger.Warnn("Skipping key different hash range",
+						logger.NewIntField("expected", int64(hashRange)),
+						logger.NewIntField("actual", int64(hr)),
+						logger.NewStringField("key", string(kv.Key)))
+					continue
 				}
+
+				kvs = append(kvs, kv)
+				hasData = true
 			}
 		}
 
-		// Write to appropriate writers by hash range
-		for hashRange, kvs := range kvsByHashRange {
-			lw := writers[hashRange]
-
-			lw.mu.Lock()
-			// Create a new KVList for this hash range
-			rangeList := &pb.KVList{Kv: kvs}
-
-			if err := c.writeTo(rangeList, lw.writer); err != nil {
-				return fmt.Errorf("failed to write to hash range %d: %w", hashRange, err)
-			}
-			lw.mu.Unlock()
+		if err := c.writeTo(&pb.KVList{Kv: kvs}, writer); err != nil {
+			return fmt.Errorf("failed to write to hash range %d: %w", hashRange, err)
 		}
 
 		return nil
 	}
 
-	err := stream.Orchestrate(ctx)
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to create snapshot: %w", err)
-	}
-
-	c.snapshottingLock.Lock()
-	c.snapshotSince = maxVersion
-	c.snapshotting = false
-	c.snapshottingLock.Unlock()
-
-	return since, hasData, nil
+	return stream, func() (uint64, bool) { return maxVersion, hasData }
 }
 
 // LoadSnapshots reads the cache contents from the provided readers
@@ -421,12 +429,11 @@ func (c *Cache) String() string {
 	return sb.String()
 }
 
-func (c *Cache) getKey(key string, hashRange uint32) []byte {
-	return []byte("hr" + strconv.Itoa(int(hashRange)) + ":" + key)
-}
+func (c *Cache) writeTo(list *pb.KVList, w *lockedWriter) (err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 
-func (c *Cache) writeTo(list *pb.KVList, w io.Writer) (err error) {
-	if err = binary.Write(w, binary.LittleEndian, uint64(proto.Size(list))); err != nil {
+	if err = binary.Write(w.writer, binary.LittleEndian, uint64(proto.Size(list))); err != nil {
 		return
 	}
 
@@ -436,8 +443,23 @@ func (c *Cache) writeTo(list *pb.KVList, w io.Writer) (err error) {
 		return
 	}
 
-	_, err = w.Write(buf)
+	_, err = w.writer.Write(buf)
 	return
+}
+
+func getKeyPrefix(hashRange uint32) string {
+	return "hr" + strconv.Itoa(int(hashRange)) + ":"
+}
+
+func getKey(key string, hashRange uint32) []byte {
+	return []byte(getKeyPrefix(hashRange) + key)
+}
+
+// lockedWriter is used to create synchronized writers for each hash range
+type lockedWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+	closer io.Closer // for zstd writers
 }
 
 type loggerForBadger struct {

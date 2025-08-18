@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/operator"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
@@ -43,7 +44,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 		Addresses:       strings.Split(nodeAddresses, ","),
 		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
 		RetryCount:      conf.GetInt("retryCount", client.DefaultRetryCount),
-		RetryDelay:      conf.GetDuration("retryDelay", 0, time.Nanosecond), // client.DefaultRetryDelay will be used
+		RetryDelay:      conf.GetDuration("retryDelay", 0, time.Second), // client.DefaultRetryDelay will be used
 	}
 	c, err := client.NewClient(clientConfig, log.Child("client"))
 	if err != nil {
@@ -52,6 +53,21 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 	defer func() {
 		if err := c.Close(); err != nil {
 			log.Warnn("Failed to close client", obskit.Error(err))
+		}
+	}()
+	opRetryDelay := conf.GetDuration("operatorRetryDelay", int64(client.DefaultRetryDelay), time.Second)
+	op, err := operator.NewClient(operator.Config{
+		Addresses:       strings.Split(nodeAddresses, ","),
+		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
+		RetryCount:      conf.GetInt("operatorRetryCount", client.DefaultRetryCount),
+		RetryDelay:      opRetryDelay,
+	}, log.Child("operator"))
+	if err != nil {
+		return fmt.Errorf("failed to create operator: %w", err)
+	}
+	defer func() {
+		if err := op.Close(); err != nil {
+			log.Warnn("Failed to close operator", obskit.Error(err))
 		}
 	}()
 
@@ -68,7 +84,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 
 	// Create and start HTTP server
 	serverAddr := conf.GetString("serverAddr", ":8080")
-	server := newHTTPServer(c, serverAddr)
+	server := newHTTPServer(c, op, serverAddr, log)
 
 	// Start server in a goroutine
 	serverErrCh := make(chan error, 1)

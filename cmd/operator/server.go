@@ -4,33 +4,51 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/rudderlabs/rudder-go-kit/jsonrs"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/hash"
+	"github.com/rudderlabs/keydb/internal/operator"
+	"github.com/rudderlabs/rudder-go-kit/jsonrs"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
 type httpServer struct {
-	client *client.Client
-	server *http.Server
+	client   *client.Client
+	operator *operator.Client
+	server   *http.Server
 }
 
 // newHTTPServer creates a new HTTP server
-func newHTTPServer(client *client.Client, addr string) *httpServer {
+func newHTTPServer(client *client.Client, operator *operator.Client, addr string, log logger.Logger) *httpServer {
 	s := &httpServer{
-		client: client,
+		client:   client,
+		operator: operator,
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/get", s.handleGet)
-	mux.HandleFunc("/put", s.handlePut)
-	mux.HandleFunc("/info", s.handleInfo)
-	mux.HandleFunc("/createSnapshots", s.createSnapshots)
-	mux.HandleFunc("/loadSnapshots", s.handleLoadSnapshots)
-	mux.HandleFunc("/scale", s.handleScale)
-	mux.HandleFunc("/scaleComplete", s.handleScaleComplete)
+	mux := chi.NewRouter()
+	mux.Use(middleware.RequestID)
+	mux.Use(middleware.RealIP)
+	mux.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{
+		Logger:  &loggerAdapter{logger: log},
+		NoColor: true,
+	}))
+	mux.Use(middleware.Recoverer)
+
+	mux.Post("/get", s.handleGet)
+	mux.Post("/put", s.handlePut)
+	mux.Post("/info", s.handleInfo)
+	mux.Post("/createSnapshots", s.handleCreateSnapshots)
+	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
+	mux.Post("/scale", s.handleScale)
+	mux.Post("/scaleComplete", s.handleScaleComplete)
+	mux.Post("/updateClusterData", s.handleUpdateClusterData)
+	mux.Post("/autoScale", s.handleAutoScale)
+	mux.Post("/hashRangeMovements", s.handleHashRangeMovements)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -49,22 +67,23 @@ func (s *httpServer) Start() error { return s.server.ListenAndServe() }
 // Stop stops the HTTP server
 func (s *httpServer) Stop(ctx context.Context) error { return s.server.Shutdown(ctx) }
 
-// handleGet handles GET /get requests
+// handleGet handles POST /get requests
 func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	// Parse request body
+	var req GetRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	// Parse keys from query parameters
-	keys := r.URL.Query()["keys"]
-	if len(keys) == 0 {
+	// Validate request
+	if len(req.Keys) == 0 {
 		http.Error(w, "No keys provided", http.StatusBadRequest)
 		return
 	}
 
 	// Get values for keys
-	exists, err := s.client.Get(r.Context(), keys)
+	exists, err := s.client.Get(r.Context(), req.Keys)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error getting keys: %v", err), http.StatusInternalServerError)
 		return
@@ -72,7 +91,7 @@ func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 	// Create response
 	response := make(map[string]bool)
-	for i, key := range keys {
+	for i, key := range req.Keys {
 		response[key] = exists[i]
 	}
 
@@ -84,19 +103,8 @@ func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// PutRequest represents a request to put keys
-type PutRequest struct {
-	Keys []string `json:"keys"`
-	TTL  string   `json:"ttl"`
-}
-
 // handlePut handles POST /put requests
 func (s *httpServer) handlePut(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req PutRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -125,34 +133,27 @@ func (s *httpServer) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
-// handleInfo handles GET /info requests
+// handleInfo handles POST /info requests
 func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Parse node ID from query parameters
-	nodeIDStr := r.URL.Query().Get("nodeID")
-	if nodeIDStr == "" {
-		http.Error(w, "No nodeID provided", http.StatusBadRequest)
-		return
-	}
-
-	nodeID, err := strconv.ParseUint(nodeIDStr, 10, 32)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Invalid nodeID: %v", err), http.StatusBadRequest)
+	// Parse request body
+	var req InfoRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	// Get node info
-	info, err := s.client.GetNodeInfo(r.Context(), uint32(nodeID))
+	info, err := s.operator.GetNodeInfo(r.Context(), req.NodeID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Error getting info for node %d: %v", nodeID, err), http.StatusInternalServerError)
+		http.Error(w,
+			fmt.Sprintf("Error getting info for node %d: %v", req.NodeID, err),
+			http.StatusInternalServerError,
+		)
 		return
 	}
 
@@ -164,54 +165,50 @@ func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// createSnapshots handles POST /createSnapshots requests
-func (s *httpServer) createSnapshots(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+// handleCreateSnapshots handles POST /createSnapshots requests
+func (s *httpServer) handleCreateSnapshots(w http.ResponseWriter, r *http.Request) {
+	// Parse request body
+	var req CreateSnapshotsRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	// Create snapshot
-	if err := s.client.CreateSnapshots(r.Context()); err != nil {
+	if err := s.operator.CreateSnapshots(r.Context(), req.NodeID, req.FullSync, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error creating snapshot: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
 // handleLoadSnapshots handles POST /loadSnapshots requests
 func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	// Parse request body
+	var req LoadSnapshotsRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	// Load snapshots from cloud storage
-	if err := s.client.LoadSnapshots(r.Context()); err != nil {
+	if err := s.operator.LoadSnapshots(r.Context(), req.NodeID, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
-// ScaleRequest represents a request to scale the cluster
-type ScaleRequest struct {
-	Addresses []string `json:"addresses"`
-}
-
 // handleScale handles POST /scale requests
 func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req ScaleRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -220,36 +217,366 @@ func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate request
-	if len(req.Addresses) == 0 {
-		http.Error(w, "No addresses provided", http.StatusBadRequest)
+	if len(req.NodeIDs) == 0 {
+		http.Error(w, "No node IDs provided", http.StatusBadRequest)
 		return
 	}
 
 	// Scale cluster
-	if err := s.client.Scale(r.Context(), req.Addresses...); err != nil {
+	if err := s.operator.Scale(r.Context(), req.NodeIDs); err != nil {
 		http.Error(w, fmt.Sprintf("Error scaling cluster: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
 // handleScaleComplete handles POST /scaleComplete requests
 func (s *httpServer) handleScaleComplete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	// Parse request body
+	var req ScaleCompleteRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if len(req.NodeIDs) == 0 {
+		http.Error(w, "No node IDs provided", http.StatusBadRequest)
 		return
 	}
 
 	// Complete scale operation
-	if err := s.client.ScaleComplete(r.Context()); err != nil {
+	if err := s.operator.ScaleComplete(r.Context(), req.NodeIDs); err != nil {
 		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// handleUpdateClusterData handles POST /updateClusterData requests
+func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Request) {
+	// Parse request body
+	var req UpdateClusterDataRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if len(req.Addresses) == 0 {
+		http.Error(w, "No node IDs provided", http.StatusBadRequest)
+		return
+	}
+
+	// Complete scale operation
+	if err := s.operator.UpdateClusterData(req.Addresses...); err != nil {
+		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
+	// Parse request body
+	var req AutoScaleRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if len(req.OldNodesAddresses) == 0 {
+		http.Error(w, "No old node addresses provided", http.StatusBadRequest)
+		return
+	}
+	if len(req.NewNodesAddresses) == 0 {
+		http.Error(w, "No new node addresses provided", http.StatusBadRequest)
+		return
+	}
+
+	oldClusterSize := uint32(len(req.OldNodesAddresses))
+	newClusterSize := uint32(len(req.NewNodesAddresses))
+
+	var err error
+	if newClusterSize > oldClusterSize {
+		err = s.handleScaleUp(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync)
+	} else if newClusterSize < oldClusterSize {
+		err = s.handleScaleDown(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync)
+	} else {
+		// Auto-healing: propagate cluster addresses to all nodes for consistency
+		err = s.handleAutoHealing(r.Context(), req.NewNodesAddresses)
+	}
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error during auto scale operation: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// handleScaleUp implements the scale up logic based on TestScaleUpAndDown
+func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddresses []string, fullSync bool) error {
+	oldClusterSize := uint32(len(oldAddresses))
+	newClusterSize := uint32(len(newAddresses))
+
+	// Step 1: Update cluster data with new addresses
+	if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+		return fmt.Errorf("updating cluster data: %w", err)
+	}
+
+	// Step 2: Determine which hash ranges need to be moved and get ready-to-use maps
+	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+		oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
+	)
+
+	// Step 3: Create snapshots from source nodes for hash ranges that will be moved
+	group, gCtx := errgroup.WithContext(ctx)
+	for sourceNodeID, hashRanges := range sourceNodeMovements {
+		if len(hashRanges) == 0 {
+			continue
+		}
+		group.Go(func() error {
+			if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+				return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+					sourceNodeID, hashRanges, err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for snapshot creation: %w", err)
+	}
+
+	// Step 4: Load snapshots to destination nodes
+	group, gCtx = errgroup.WithContext(ctx)
+	for nodeID, hashRanges := range destinationNodeMovements {
+		if len(hashRanges) == 0 {
+			continue
+		}
+		group.Go(func() error {
+			if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+				return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
+					nodeID, hashRanges, err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for snapshot loading: %w", err)
+	}
+
+	// Step 5: Scale all nodes
+	return s.completeScaleOperation(ctx, newClusterSize)
+}
+
+// handleScaleDown implements the scale down logic based on TestScaleUpAndDown
+func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddresses []string, fullSync bool) error {
+	oldClusterSize := uint32(len(oldAddresses))
+	newClusterSize := uint32(len(newAddresses))
+
+	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+		oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
+	)
+
+	// Step 1: Create snapshots from source nodes for hash ranges that will be moved
+	group, gCtx := errgroup.WithContext(ctx)
+	for sourceNodeID, hashRanges := range sourceNodeMovements {
+		if len(hashRanges) == 0 {
+			continue
+		}
+		group.Go(func() error {
+			if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+				return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+					sourceNodeID, hashRanges, err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for snapshot creation: %w", err)
+	}
+
+	// Step 2: Load snapshots to destination nodes
+	group, gCtx = errgroup.WithContext(ctx)
+	for nodeID, hashRanges := range destinationNodeMovements {
+		if len(hashRanges) == 0 {
+			continue
+		}
+		group.Go(func() error {
+			if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+				return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
+					nodeID, hashRanges, err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for snapshot loading: %w", err)
+	}
+
+	// Step 3: Update cluster data with new addresses
+	if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+		return fmt.Errorf("updating cluster data: %w", err)
+	}
+
+	// Step 4: Scale remaining nodes
+	return s.completeScaleOperation(ctx, newClusterSize)
+}
+
+// handleAutoHealing implements auto-healing by propagating cluster addresses to all nodes
+// This ensures all nodes have consistent cluster topology information
+func (s *httpServer) handleAutoHealing(ctx context.Context, addresses []string) error {
+	clusterSize := uint32(len(addresses))
+
+	// Step 1: Update cluster data with current addresses to ensure consistency
+	if err := s.operator.UpdateClusterData(addresses...); err != nil {
+		return fmt.Errorf("updating cluster data for auto-healing: %w", err)
+	}
+
+	// Step 2: Scale all nodes to refresh their cluster information
+	return s.completeScaleOperation(ctx, clusterSize)
+}
+
+func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uint32) error {
+	nodeIDs := make([]uint32, clusterSize)
+	for i := uint32(0); i < clusterSize; i++ {
+		nodeIDs[i] = i
+	}
+	if err := s.operator.Scale(ctx, nodeIDs); err != nil {
+		return fmt.Errorf("scaling nodes: %w", err)
+	}
+
+	if err := s.operator.ScaleComplete(ctx, nodeIDs); err != nil {
+		return fmt.Errorf("completing scale operation: %w", err)
+	}
+
+	return nil
+}
+
+// handleHashRangeMovements handles POST /hashRangeMovements requests
+func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	var req HashRangeMovementsRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if req.OldClusterSize == 0 {
+		http.Error(w, "oldClusterSize must be greater than 0", http.StatusBadRequest)
+		return
+	}
+	if req.NewClusterSize == 0 {
+		http.Error(w, "newClusterSize must be greater than 0", http.StatusBadRequest)
+		return
+	}
+	if req.TotalHashRanges == 0 {
+		http.Error(w, "totalHashRanges must be greater than 0", http.StatusBadRequest)
+		return
+	}
+	if req.TotalHashRanges < req.OldClusterSize {
+		http.Error(w, "totalHashRanges must be greater than or equal to oldClusterSize", http.StatusBadRequest)
+		return
+	}
+	if req.TotalHashRanges < req.NewClusterSize {
+		http.Error(w, "totalHashRanges must be greater than or equal to newClusterSize", http.StatusBadRequest)
+		return
+	}
+
+	// Get hash range movements
+	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+		req.OldClusterSize, req.NewClusterSize, req.TotalHashRanges,
+	)
+
+	destinationMap := make(map[uint32]uint32)
+	for nodeID, hashRanges := range destinationNodeMovements {
+		for _, hashRange := range hashRanges {
+			destinationMap[hashRange] = nodeID
+		}
+	}
+
+	// Convert to response format
+	var movements []HashRangeMovement
+	for sourceNodeID, hashRanges := range sourceNodeMovements {
+		for _, hashRange := range hashRanges {
+			movements = append(movements, HashRangeMovement{
+				HashRange: hashRange,
+				From:      sourceNodeID,
+				To:        destinationMap[hashRange],
+			})
+		}
+	}
+
+	// If upload=true, send CreateSnapshots requests to old nodes that are losing hash ranges
+	if req.Upload {
+		ctx := r.Context()
+		for sourceNodeID, hashRanges := range sourceNodeMovements {
+			// Only send CreateSnapshots to nodes that exist in the old cluster
+			if sourceNodeID < req.OldClusterSize {
+				if req.SplitUploads {
+					// Call CreateSnapshots once per hash range
+					for _, hashRange := range hashRanges {
+						if err := s.operator.CreateSnapshots(ctx, sourceNodeID, req.FullSync, hashRange); err != nil {
+							http.Error(w,
+								fmt.Sprintf("Error creating snapshots for node %d, hash range %d: %v",
+									sourceNodeID, hashRange, err,
+								),
+								http.StatusInternalServerError,
+							)
+							return
+						}
+					}
+				} else {
+					// Call CreateSnapshots once per node with all hash ranges
+					if err := s.operator.CreateSnapshots(ctx, sourceNodeID, req.FullSync, hashRanges...); err != nil {
+						http.Error(w,
+							fmt.Sprintf("Error creating snapshots for node %d: %v", sourceNodeID, err),
+							http.StatusInternalServerError,
+						)
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	if err := jsonrs.NewEncoder(w).Encode(movements); err != nil {
+		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
+
+type loggerAdapter struct {
+	logger logger.Logger
+}
+
+func (l loggerAdapter) Print(v ...any) {
+	l.logger.Infow("", v...) // nolint:forbidigo
 }

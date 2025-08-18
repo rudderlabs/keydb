@@ -85,7 +85,9 @@ message GetNodeInfoResponse {
 }
 
 // LoadSnapshotsRequest initiates loading snapshots from cloud storage
-message LoadSnapshotsRequest {}
+message LoadSnapshotsRequest {
+  repeated uint32 hash_range = 1; // repeated means 0 or more values, pass none to load all snapshots handled by that node
+}
 
 // LoadSnapshotsResponse contains the result of the snapshot loading operation
 message LoadSnapshotsResponse {
@@ -95,7 +97,10 @@ message LoadSnapshotsResponse {
 }
 
 // CreateSnapshotRequests initiates snapshot creation
-message CreateSnapshotsRequest {}
+message CreateSnapshotsRequest {
+  repeated uint32 hash_range = 1; // repeated means 0 or more values, pass none to create all snapshots
+  bool full_sync = 2; // pass true to force the nodes to create snapshots from scratch (not incremental)
+}
 
 // CreateSnapshotsResponse contains the result of the snapshot creation
 message CreateSnapshotsResponse {
@@ -106,10 +111,9 @@ message CreateSnapshotsResponse {
 
 // ScaleRequest changes the number of nodes in the cluster
 message ScaleRequest {
-  uint32 new_cluster_size = 1; // New number of nodes in the cluster
   // When the cluster_size changes the operator can use this field to tell all nodes which addresses are to be broadcast
   // to clients
-  repeated string nodesAddresses = 2;
+  repeated string nodesAddresses = 1;
 }
 
 // ScaleResponse contains the result of the scaling operation
