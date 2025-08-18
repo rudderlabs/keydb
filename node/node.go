@@ -42,6 +42,7 @@ const (
 	DefaultMaxFilesToList int64 = 1000
 )
 
+// file format is hr_<hash_range>_s_<from_timestamp>_<to_timestamp>.snapshot
 var snapshotFilenameRegex = regexp.MustCompile(`^hr_(\d+)_s_(\d+)_(\d+).snapshot$`)
 
 // Config holds the configuration for a node
