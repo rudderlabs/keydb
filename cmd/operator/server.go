@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/hash"
@@ -68,11 +69,6 @@ func (s *httpServer) Stop(ctx context.Context) error { return s.server.Shutdown(
 
 // handleGet handles POST /get requests
 func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req GetRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -109,11 +105,6 @@ func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
 
 // handlePut handles POST /put requests
 func (s *httpServer) handlePut(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req PutRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -149,11 +140,6 @@ func (s *httpServer) handlePut(w http.ResponseWriter, r *http.Request) {
 
 // handleInfo handles POST /info requests
 func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req InfoRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -181,11 +167,6 @@ func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 
 // handleCreateSnapshots handles POST /createSnapshots requests
 func (s *httpServer) handleCreateSnapshots(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req CreateSnapshotsRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -207,11 +188,6 @@ func (s *httpServer) handleCreateSnapshots(w http.ResponseWriter, r *http.Reques
 
 // handleLoadSnapshots handles POST /loadSnapshots requests
 func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req LoadSnapshotsRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -233,11 +209,6 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 
 // handleScale handles POST /scale requests
 func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req ScaleRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -265,11 +236,6 @@ func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
 
 // handleScaleComplete handles POST /scaleComplete requests
 func (s *httpServer) handleScaleComplete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req ScaleCompleteRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -297,11 +263,6 @@ func (s *httpServer) handleScaleComplete(w http.ResponseWriter, r *http.Request)
 
 // handleUpdateClusterData handles POST /updateClusterData requests
 func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req UpdateClusterDataRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -328,11 +289,6 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req AutoScaleRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -389,25 +345,41 @@ func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddress
 	)
 
 	// Step 3: Create snapshots from source nodes for hash ranges that will be moved
+	group, gCtx := errgroup.WithContext(ctx)
 	for sourceNodeID, hashRanges := range sourceNodeMovements {
 		if len(hashRanges) == 0 {
 			continue
 		}
-		if err := s.operator.CreateSnapshots(ctx, sourceNodeID, fullSync, hashRanges...); err != nil {
-			return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
-				sourceNodeID, hashRanges, err,
-			)
-		}
+		group.Go(func() error {
+			if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+				return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+					sourceNodeID, hashRanges, err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for snapshot creation: %w", err)
 	}
 
 	// Step 4: Load snapshots to destination nodes
+	group, gCtx = errgroup.WithContext(ctx)
 	for nodeID, hashRanges := range destinationNodeMovements {
 		if len(hashRanges) == 0 {
 			continue
 		}
-		if err := s.operator.LoadSnapshots(ctx, nodeID, hashRanges...); err != nil {
-			return fmt.Errorf("loading snapshots for node %d: %w", nodeID, err)
-		}
+		group.Go(func() error {
+			if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+				return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
+					nodeID, hashRanges, err,
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("waiting for snapshot loading: %w", err)
 	}
 
 	// Step 5: Scale all nodes
