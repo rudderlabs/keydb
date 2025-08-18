@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1-alpha](https://github.com/rudderlabs/keydb/compare/v0.2.0-alpha...v0.2.1-alpha) (2025-08-18)
+
+
+### Miscellaneous
+
+* snapshots and scaling operations ([#18](https://github.com/rudderlabs/keydb/issues/18)) ([e37dab9](https://github.com/rudderlabs/keydb/commit/e37dab9200e7bc482b57db382c368e47f60840ef))
+
 ## [0.2.0-alpha](https://github.com/rudderlabs/keydb/compare/v0.1.0-alpha...v0.2.0-alpha) (2025-07-31)
 
 
