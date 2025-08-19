@@ -15,6 +15,7 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
 // Config holds the configuration for a client
@@ -32,6 +33,34 @@ type Config struct {
 	RetryDelay time.Duration
 }
 
+type ScalingOperationType string
+
+const (
+	ScaleUp     ScalingOperationType = "scale_up"
+	ScaleDown   ScalingOperationType = "scale_down"
+	AutoHealing ScalingOperationType = "auto_healing"
+)
+
+type ScalingOperationStatus string
+
+const (
+	InProgress ScalingOperationStatus = "in_progress"
+	Completed  ScalingOperationStatus = "completed"
+	Failed     ScalingOperationStatus = "failed"
+	RolledBack ScalingOperationStatus = "rolled_back"
+)
+
+// ScalingOperation represents the last scaling operation that can be rolled back
+type ScalingOperation struct {
+	Type           ScalingOperationType   `json:"type"`
+	OldClusterSize uint32                 `json:"old_cluster_size"`
+	NewClusterSize uint32                 `json:"new_cluster_size"`
+	OldAddresses   []string               `json:"old_addresses"`
+	NewAddresses   []string               `json:"new_addresses"`
+	Status         ScalingOperationStatus `json:"status"` // "in_progress", "completed", "failed", "rolled_back"
+	FailedStep     string                 `json:"failed_step,omitempty"`
+}
+
 // Client is a client for the KeyDB service
 type Client struct {
 	config Config
@@ -45,7 +74,10 @@ type Client struct {
 	// clients is a map of node index to client
 	clients map[int]pb.NodeServiceClient
 
-	// mu protects connections, clients and clusterSize
+	// lastOperation tracks the last scaling operation for potential rollback
+	lastOperation *ScalingOperation
+
+	// mu protects connections, clients, clusterSize and lastOperation
 	mu sync.RWMutex
 
 	logger logger.Logger
@@ -430,6 +462,104 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 
 	c.config.Addresses = nodesAddresses
 	c.clusterSize = uint32(len(nodesAddresses))
+
+	return nil
+}
+
+// RecordOperation records the last scaling operation for potential rollback
+func (c *Client) RecordOperation(opType ScalingOperationType, oldClusterSize, newClusterSize uint32, oldAddresses, newAddresses []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.lastOperation = &ScalingOperation{
+		Type:           opType,
+		OldClusterSize: oldClusterSize,
+		NewClusterSize: newClusterSize,
+		OldAddresses:   append([]string{}, oldAddresses...),
+		NewAddresses:   append([]string{}, newAddresses...),
+		Status:         InProgress,
+	}
+}
+
+// UpdateOperationStatus updates the status of the last scaling operation
+func (c *Client) UpdateOperationStatus(status ScalingOperationStatus, failedStep string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.lastOperation != nil {
+		c.lastOperation.Status = status
+		c.lastOperation.FailedStep = failedStep
+	}
+}
+
+// GetLastOperation retrieves the last scaling operation
+func (c *Client) GetLastOperation() *ScalingOperation {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastOperation
+}
+
+// ExecuteWithRollback executes a scaling function with automatic rollback on failure
+func (c *Client) ExecuteWithRollback(opType ScalingOperationType, oldClusterSize, newClusterSize uint32, oldAddresses, newAddresses []string, fn func() error) error {
+	// Record the operation
+	c.RecordOperation(opType, oldClusterSize, newClusterSize, oldAddresses, newAddresses)
+
+	// Execute the scaling function
+	err := fn()
+	if err != nil {
+		c.UpdateOperationStatus(Failed, err.Error())
+		c.logger.Warnn("Scaling operation failed, initiating rollback",
+			logger.NewStringField("operation_type", string(opType)),
+			obskit.Error(err))
+
+		// Attempt rollback
+		rollbackErr := c.rollbackToOldConfiguration(context.Background(), c.GetLastOperation())
+		if rollbackErr != nil {
+			c.logger.Errorn("Rollback failed",
+				logger.NewStringField("operation_type", string(opType)),
+				obskit.Error(rollbackErr))
+			return fmt.Errorf("scaling failed: %v, rollback failed: %w", err, rollbackErr)
+		}
+
+		c.UpdateOperationStatus(RolledBack, "")
+		c.logger.Infon("Scaling operation rolled back successfully",
+			logger.NewStringField("operation_type", string(opType)))
+		return fmt.Errorf("scaling failed and rolled back: %w", err)
+	}
+
+	c.UpdateOperationStatus(Completed, "")
+	c.logger.Infon("Scaling operation completed successfully",
+		logger.NewStringField("operation_type", string(opType)))
+	return nil
+}
+
+// rollbackToOldConfiguration restores the cluster to its previous configuration
+func (c *Client) rollbackToOldConfiguration(ctx context.Context, operation *ScalingOperation) error {
+	if operation == nil {
+		return fmt.Errorf("no operation provided for rollback")
+	}
+
+	c.logger.Infon("Rolling back operation",
+		logger.NewStringField("operation_type", string(operation.Type)))
+
+	// Restore cluster to old configuration
+	if err := c.UpdateClusterData(operation.OldAddresses...); err != nil {
+		return fmt.Errorf("failed to restore cluster data: %w", err)
+	}
+
+	// Scale back to old cluster size
+	oldNodeIDs := make([]uint32, operation.OldClusterSize)
+	for i := uint32(0); i < operation.OldClusterSize; i++ {
+		oldNodeIDs[i] = i
+	}
+
+	if err := c.Scale(ctx, oldNodeIDs); err != nil {
+		return fmt.Errorf("failed to scale back nodes: %w", err)
+	}
+
+	if err := c.ScaleComplete(ctx, oldNodeIDs); err != nil {
+		return fmt.Errorf("failed to complete scale back: %w", err)
+	}
 
 	return nil
 }
