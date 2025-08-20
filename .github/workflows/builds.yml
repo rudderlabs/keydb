@@ -194,6 +194,7 @@ jobs:
         uses: rudderlabs/build-scan-push-action@v1.5.3
         with:
           context: .
+          file: ./Dockerfile-operator
           platforms: ${{ matrix.build-config.platform }}
           push: true
           tags: ${{ matrix.build-config.tags }}
