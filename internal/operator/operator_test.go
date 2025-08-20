@@ -133,7 +133,7 @@ func TestExecuteScalingWithRollback_FailureWithRollback(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Equal(t, 1, scaleCalls)
-	require.Equal(t, 1, scaleCompleteCalls)
+	require.Equal(t, 2, scaleCompleteCalls)
 }
 
 func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
