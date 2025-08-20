@@ -534,28 +534,14 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		for sourceNodeID, hashRanges := range sourceNodeMovements {
 			// Only send CreateSnapshots to nodes that exist in the old cluster
 			if sourceNodeID < req.OldClusterSize {
-				if req.SplitUploads {
-					// Call CreateSnapshots once per hash range
-					for _, hashRange := range hashRanges {
-						group.Go(func() error {
-							err := s.operator.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRange)
-							if err != nil {
-								return fmt.Errorf("creating snapshots for node %d, hash range %d: %w",
-									sourceNodeID, hashRange, err)
-							}
-							return nil
-						})
+				// Call CreateSnapshots once per node with all hash ranges
+				group.Go(func() error {
+					err := s.operator.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRanges...)
+					if err != nil {
+						return fmt.Errorf("creating snapshots for node %d: %w", sourceNodeID, err)
 					}
-				} else {
-					// Call CreateSnapshots once per node with all hash ranges
-					group.Go(func() error {
-						err := s.operator.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRanges...)
-						if err != nil {
-							return fmt.Errorf("creating snapshots for node %d: %w", sourceNodeID, err)
-						}
-						return nil
-					})
-				}
+					return nil
+				})
 			}
 		}
 		if err := group.Wait(); err != nil {
