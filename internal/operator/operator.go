@@ -466,7 +466,11 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 }
 
 // RecordOperation records the last scaling operation for potential rollback
-func (c *Client) RecordOperation(opType ScalingOperationType, oldClusterSize, newClusterSize uint32, oldAddresses, newAddresses []string) {
+func (c *Client) RecordOperation(
+	opType ScalingOperationType,
+	oldClusterSize, newClusterSize uint32,
+	oldAddresses, newAddresses []string,
+) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -498,7 +502,9 @@ func (c *Client) GetLastOperation() *ScalingOperation {
 }
 
 // ExecuteScalingWithRollback executes a scaling function with automatic rollback on failure
-func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType, oldClusterSize, newClusterSize uint32, oldAddresses, newAddresses []string, fn func() error) error {
+func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType, oldClusterSize, newClusterSize uint32,
+	oldAddresses, newAddresses []string, fn func() error,
+) error {
 	// Record the operation
 	c.RecordOperation(opType, oldClusterSize, newClusterSize, oldAddresses, newAddresses)
 

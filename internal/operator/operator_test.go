@@ -20,7 +20,6 @@ import (
 // mockNodeServiceServer is a mock implementation of the NodeServiceServer
 type mockNodeServiceServer struct {
 	pb.UnimplementedNodeServiceServer
-	nodeInfo          *pb.GetNodeInfoResponse
 	scaleFunc         func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error)
 	scaleCompleteFunc func(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)
 }
@@ -32,7 +31,9 @@ func (m *mockNodeServiceServer) Scale(ctx context.Context, req *pb.ScaleRequest)
 	return &pb.ScaleResponse{Success: true}, nil
 }
 
-func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
+func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (
+	*pb.ScaleCompleteResponse, error,
+) {
 	if m.scaleCompleteFunc != nil {
 		return m.scaleCompleteFunc(ctx, req)
 	}
@@ -40,7 +41,11 @@ func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *pb.Scale
 }
 
 // startMockNodeService starts a mock gRPC server
-func startMockNodeService(t *testing.T, scaleFunc func(context.Context, *pb.ScaleRequest) (*pb.ScaleResponse, error), scaleCompleteFunc func(context.Context, *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)) (string, func()) {
+func startMockNodeService(t *testing.T,
+	scaleFunc func(context.Context, *pb.ScaleRequest) (*pb.ScaleResponse, error),
+	scaleCompleteFunc func(context.Context, *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)) (
+	string, func(),
+) {
 	t.Helper()
 
 	lis, err := net.Listen("tcp", "localhost:0")
@@ -70,9 +75,10 @@ func TestExecuteScalingWithRollback_Success(t *testing.T) {
 	}
 
 	// Test successful operation
-	err := operatorClient.ExecuteScalingWithRollback(ScaleUp, 2, 3, []string{"node1", "node2"}, []string{"node1", "node2", "node3"}, func() error {
-		return nil // Simulate successful operation
-	})
+	err := operatorClient.ExecuteScalingWithRollback(ScaleUp, 2, 3,
+		[]string{"node1", "node2"}, []string{"node1", "node2", "node3"}, func() error {
+			return nil // Simulate successful operation
+		})
 
 	// Assertions
 	require.NoError(t, err)
@@ -159,9 +165,10 @@ func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
 
 	// Test failed operation that also fails to rollback
 	testErr := errors.New("test error")
-	err = testClient.ExecuteScalingWithRollback(ScaleUp, 2, 3, []string{addr, addr}, []string{"node1", "node2", "node3"}, func() error {
-		return testErr // Simulate operation failure
-	})
+	err = testClient.ExecuteScalingWithRollback(ScaleUp, 2, 3,
+		[]string{addr, addr}, []string{"node1", "node2", "node3"}, func() error {
+			return testErr // Simulate operation failure
+		})
 
 	// Assertions
 	require.Error(t, err)
@@ -179,7 +186,8 @@ func TestRecordAndGetOperation(t *testing.T) {
 	}
 
 	// Record an operation
-	operatorClient.RecordOperation(ScaleDown, 4, 2, []string{"node1", "node2", "node3", "node4"}, []string{"node1", "node2"})
+	operatorClient.RecordOperation(ScaleDown, 4, 2,
+		[]string{"node1", "node2", "node3", "node4"}, []string{"node1", "node2"})
 
 	// Retrieve and verify
 	lastOp := operatorClient.GetLastOperation()
@@ -198,7 +206,8 @@ func TestUpdateOperationStatus(t *testing.T) {
 	}
 
 	// Record an operation
-	operatorClient.RecordOperation(AutoHealing, 3, 3, []string{"node1", "node2", "node3"}, []string{"node1", "node2", "node3"})
+	operatorClient.RecordOperation(AutoHealing, 3, 3,
+		[]string{"node1", "node2", "node3"}, []string{"node1", "node2", "node3"})
 
 	// Update status
 	operatorClient.UpdateOperationStatus(Failed)
@@ -253,7 +262,8 @@ func TestOperationRecordingTable(t *testing.T) {
 				logger: logger.NOP,
 			}
 
-			operatorClient.RecordOperation(tt.opType, tt.oldClusterSize, tt.newClusterSize, tt.oldAddresses, tt.newAddresses)
+			operatorClient.RecordOperation(tt.opType, tt.oldClusterSize, tt.newClusterSize,
+				tt.oldAddresses, tt.newAddresses)
 			lastOp := operatorClient.GetLastOperation()
 
 			require.Equal(t, tt.expectedType, lastOp.Type)
@@ -277,7 +287,8 @@ func TestConcurrentOperations(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			opType := ScalingOperationType(fmt.Sprintf("test_op_%d", i))
-			operatorClient.RecordOperation(opType, 2, 3, []string{"node1", "node2"}, []string{"node1", "node2", "node3"})
+			operatorClient.RecordOperation(opType, 2, 3,
+				[]string{"node1", "node2"}, []string{"node1", "node2", "node3"})
 			time.Sleep(time.Millisecond * 10) // Simulate some work
 			operatorClient.UpdateOperationStatus(Completed)
 		}(i)
