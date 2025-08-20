@@ -538,7 +538,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 					// Call CreateSnapshots once per hash range
 					for _, hashRange := range hashRanges {
 						group.Go(func() error {
-							err := s.operator.CreateSnapshots(ctx, sourceNodeID, req.FullSync, hashRange)
+							err := s.operator.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRange)
 							if err != nil {
 								return fmt.Errorf("creating snapshots for node %d, hash range %d: %w",
 									sourceNodeID, hashRange, err)
