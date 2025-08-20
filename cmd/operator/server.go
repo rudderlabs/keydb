@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	pb "github.com/rudderlabs/keydb/proto"
 	"net/http"
 	"time"
+
+	pb "github.com/rudderlabs/keydb/proto"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -463,7 +464,7 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 
 // handleAutoHealing implements auto-healing by propagating cluster addresses to all nodes
 // This ensures all nodes have consistent cluster topology information
-func (s *httpServer) handleAutoHealing(ctx context.Context, oldAddresses []string, newAddresses []string) error {
+func (s *httpServer) handleAutoHealing(ctx context.Context, oldAddresses, newAddresses []string) error {
 	clusterSize := uint32(len(newAddresses))
 
 	return s.operator.ExecuteScalingWithRollback(operator.AutoHealing, clusterSize, clusterSize, oldAddresses, newAddresses, func() error {

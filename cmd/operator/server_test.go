@@ -708,7 +708,6 @@ func TestHashRangeMovements(t *testing.T) {
 }
 
 func TestHandleLastOperation(t *testing.T) {
-
 	// Start test server
 	op := startOperatorHTTPServer(t, 128, "localhost:0")
 
