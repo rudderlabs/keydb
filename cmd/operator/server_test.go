@@ -850,3 +850,401 @@ func (c *opClient) Do(endpoint string, data any, success ...bool) string {
 
 	return string(body)
 }
+
+func TestScaleUpFailureAndRollback(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create the initial node service
+	totalHashRanges := uint32(3)
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		ClusterSize:      1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, node0Conf)
+
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+
+	// Test Put some data
+	_ = op.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+	}, true)
+
+	// Verify data can be retrieved
+	body := op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
+
+	// Try to scale up with the non-running node - this should trigger rollback
+	autoScaleReq := AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address},
+		NewNodesAddresses: []string{node0Address, "random-no1-address:12345"}, // Simulating a non-running node
+		FullSync:          false,
+	}
+
+	// This should fail and trigger rollback
+	buf, err := jsonrs.Marshal(autoScaleReq)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := op.client.Do(req)
+	require.NoError(t, err)
+
+	defer func() { httputil.CloseResponse(resp) }()
+
+	// Expect failure as node1 is not actually running
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	// Check that the last operation was recorded and rolled back
+	lastOpResp, err := http.Get(op.url + "/lastOperation")
+	require.NoError(t, err)
+	defer lastOpResp.Body.Close()
+
+	require.Equal(t, http.StatusOK, lastOpResp.StatusCode)
+	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
+
+	var lastOpResponse struct {
+		Operation *operator.ScalingOperation `json:"operation"`
+	}
+	err = jsonrs.NewDecoder(lastOpResp.Body).Decode(&lastOpResponse)
+	require.NoError(t, err)
+
+	// Verify operation details
+	require.NotNil(t, lastOpResponse.Operation)
+	require.Equal(t, operator.ScaleUp, lastOpResponse.Operation.Type)
+	require.Equal(t, uint32(1), lastOpResponse.Operation.OldClusterSize)
+	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize)
+	require.Equal(t, []string{node0Address}, lastOpResponse.Operation.OldAddresses)
+	// For the failed step, we expect some error message
+	require.Equal(t, operator.RolledBack, lastOpResponse.Operation.Status)
+
+	// Verify that node0 still has the original cluster size
+	body = op.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse := pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 1, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 1)
+	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
+
+	// Verify data is still accessible after rollback
+	body = op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
+
+	cancel()
+	node0.Close()
+}
+
+func TestScaleDownFailureAndRollback(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create a 2-node cluster
+	totalHashRanges := uint32(3)
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		ClusterSize:      2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, node0Conf)
+
+	node1Conf := newConf()
+	_, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           1,
+		ClusterSize:      2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		Addresses:        []string{node0Address},
+	}, node1Conf)
+
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, totalHashRanges, node0Address, node1Address)
+
+	// Test Put some data
+	_ = op.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+	}, true)
+
+	// Verify data can be retrieved
+	body := op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
+
+	// Try to scale down by removing node1 - this should trigger rollback
+	randomAdd := "random-wefaofwef-address:12345"
+	autoScaleReq := AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address, node1Address},
+		NewNodesAddresses: []string{randomAdd}, // Simulating a non-running node
+		FullSync:          false,
+	}
+
+	// This should fail and trigger rollback
+	buf, err := jsonrs.Marshal(autoScaleReq)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := op.client.Do(req)
+	require.NoError(t, err)
+
+	defer func() { httputil.CloseResponse(resp) }()
+
+	// Expect failure as node1 is closed and can't participate in the operation
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	// Check that the last operation was recorded and rolled back
+	lastOpResp, err := http.Get(op.url + "/lastOperation")
+	require.NoError(t, err)
+	defer lastOpResp.Body.Close()
+
+	require.Equal(t, http.StatusOK, lastOpResp.StatusCode)
+	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
+
+	var lastOpResponse struct {
+		Operation *operator.ScalingOperation `json:"operation"`
+	}
+	err = jsonrs.NewDecoder(lastOpResp.Body).Decode(&lastOpResponse)
+	require.NoError(t, err)
+
+	// Verify operation details
+	require.NotNil(t, lastOpResponse.Operation)
+	require.Equal(t, operator.ScaleDown, lastOpResponse.Operation.Type)
+	require.Equal(t, uint32(2), lastOpResponse.Operation.OldClusterSize)
+	require.Equal(t, uint32(1), lastOpResponse.Operation.NewClusterSize)
+	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.OldAddresses)
+	require.Equal(t, []string{randomAdd}, lastOpResponse.Operation.NewAddresses)
+	require.Equal(t, operator.RolledBack, lastOpResponse.Operation.Status)
+
+	// Verify that both nodes still exist (rolled back to original state)
+	// Node 0 should still think there are 2 nodes in the cluster
+	body = op.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse := pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 2)
+	require.Contains(t, infoResponse.NodesAddresses, node0Address)
+	require.Contains(t, infoResponse.NodesAddresses, node1Address)
+
+	// Verify data is still accessible after rollback
+	body = op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
+
+	cancel()
+	node0.Close()
+}
+
+func TestAutoHealingFailureAndRollback(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create a 2-node cluster
+	totalHashRanges := uint32(3)
+	node0Conf := newConf()
+	_, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		ClusterSize:      2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, node0Conf)
+
+	node1Conf := newConf()
+	_, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           1,
+		ClusterSize:      2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		Addresses:        []string{node0Address},
+	}, node1Conf)
+
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, totalHashRanges, node0Address, node1Address)
+
+	// Test Put some data
+	_ = op.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+	}, true)
+
+	// Verify data can be retrieved
+	body := op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
+
+	// Try auto-healing with only node0 available - this should fail and trigger rollback
+	randomAdd := "random-wefaofwef-address:12345"
+	autoHealReq := AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address, node1Address},
+		NewNodesAddresses: []string{node0Address, randomAdd}, // Only node0 is available now
+	}
+
+	// This should fail and trigger rollback
+	buf, err := jsonrs.Marshal(autoHealReq)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := op.client.Do(req)
+	require.NoError(t, err)
+
+	defer func() { httputil.CloseResponse(resp) }()
+
+	// Expect failure as node1 is closed and can't participate in the operation
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	// Check that the last operation was recorded and rolled back
+	lastOpResp, err := http.Get(op.url + "/lastOperation")
+	require.NoError(t, err)
+	defer lastOpResp.Body.Close()
+
+	require.Equal(t, http.StatusOK, lastOpResp.StatusCode)
+	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
+
+	var lastOpResponse struct {
+		Operation *operator.ScalingOperation `json:"operation"`
+	}
+	err = jsonrs.NewDecoder(lastOpResp.Body).Decode(&lastOpResponse)
+	require.NoError(t, err)
+
+	// Verify operation details
+	require.NotNil(t, lastOpResponse.Operation)
+	require.Equal(t, operator.AutoHealing, lastOpResponse.Operation.Type)
+	require.Equal(t, uint32(2), lastOpResponse.Operation.OldClusterSize)
+	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize) // Same size for auto-healing
+	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.OldAddresses)
+	require.Equal(t, []string{node0Address, randomAdd}, lastOpResponse.Operation.NewAddresses)
+	require.Equal(t, operator.RolledBack, lastOpResponse.Operation.Status)
+
+	// Verify that node0 still has the original cluster configuration
+	body = op.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse := pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 2)
+	require.Contains(t, infoResponse.NodesAddresses, node0Address)
+	require.Contains(t, infoResponse.NodesAddresses, node1Address)
+
+	// Verify data is still accessible after rollback
+	body = op.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
+
+	cancel()
+}
+
+func TestRollbackFailure(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	node0Address := "random-node0-address:12345"
+	node1Address := "random-node1-address:12345"
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, 3, node0Address)
+
+	// Try to scale up with no nodes running - this should fail and rollback should also fail
+	autoScaleReq := AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address},
+		NewNodesAddresses: []string{node0Address, node1Address},
+		FullSync:          false,
+	}
+
+	// This should fail and rollback should also fail
+	buf, err := jsonrs.Marshal(autoScaleReq)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := op.client.Do(req)
+	require.NoError(t, err)
+
+	defer func() { httputil.CloseResponse(resp) }()
+
+	// Expect failure as node0 is closed
+	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+
+	// Check that the last operation was recorded with failed status
+	lastOpResp, err := http.Get(op.url + "/lastOperation")
+	require.NoError(t, err)
+	defer lastOpResp.Body.Close()
+
+	require.Equal(t, http.StatusOK, lastOpResp.StatusCode)
+	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
+
+	var lastOpResponse struct {
+		Operation *operator.ScalingOperation `json:"operation"`
+	}
+	err = jsonrs.NewDecoder(lastOpResp.Body).Decode(&lastOpResponse)
+	require.NoError(t, err)
+
+	// Verify operation details
+	require.NotNil(t, lastOpResponse.Operation)
+	require.Equal(t, operator.ScaleUp, lastOpResponse.Operation.Type)
+	require.Equal(t, uint32(1), lastOpResponse.Operation.OldClusterSize)
+	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize)
+	require.Equal(t, []string{node0Address}, lastOpResponse.Operation.OldAddresses)
+	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.NewAddresses)
+	require.Equal(t, operator.Failed, lastOpResponse.Operation.Status) // Should be failed, not rolled back
+}

@@ -58,7 +58,6 @@ type ScalingOperation struct {
 	OldAddresses   []string               `json:"old_addresses"`
 	NewAddresses   []string               `json:"new_addresses"`
 	Status         ScalingOperationStatus `json:"status"` // "in_progress", "completed", "failed", "rolled_back"
-	FailedStep     string                 `json:"failed_step,omitempty"`
 }
 
 // Client is a client for the KeyDB service
@@ -482,13 +481,12 @@ func (c *Client) RecordOperation(opType ScalingOperationType, oldClusterSize, ne
 }
 
 // UpdateOperationStatus updates the status of the last scaling operation
-func (c *Client) UpdateOperationStatus(status ScalingOperationStatus, failedStep string) {
+func (c *Client) UpdateOperationStatus(status ScalingOperationStatus) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.lastOperation != nil {
 		c.lastOperation.Status = status
-		c.lastOperation.FailedStep = failedStep
 	}
 }
 
@@ -507,7 +505,7 @@ func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType, oldClus
 	// Execute the scaling function
 	err := fn()
 	if err != nil {
-		c.UpdateOperationStatus(Failed, err.Error())
+		c.UpdateOperationStatus(Failed)
 		c.logger.Warnn("Scaling operation failed, initiating rollback",
 			logger.NewStringField("operation_type", string(opType)),
 			obskit.Error(err))
@@ -521,13 +519,13 @@ func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType, oldClus
 			return fmt.Errorf("scaling failed: %v, rollback failed: %w", err, rollbackErr)
 		}
 
-		c.UpdateOperationStatus(RolledBack, "")
+		c.UpdateOperationStatus(RolledBack)
 		c.logger.Infon("Scaling operation rolled back successfully",
 			logger.NewStringField("operation_type", string(opType)))
 		return fmt.Errorf("scaling failed and rolled back: %w", err)
 	}
 
-	c.UpdateOperationStatus(Completed, "")
+	c.UpdateOperationStatus(Completed)
 	c.logger.Infon("Scaling operation completed successfully",
 		logger.NewStringField("operation_type", string(opType)))
 	return nil
@@ -553,10 +551,17 @@ func (c *Client) rollbackToOldConfiguration(ctx context.Context, operation *Scal
 		oldNodeIDs[i] = i
 	}
 
+	// stop any ongoing scaling
+	if err := c.ScaleComplete(ctx, oldNodeIDs); err != nil {
+		return fmt.Errorf("failed to complete scale back: %w", err)
+	}
+
+	// restore correct behavior
 	if err := c.Scale(ctx, oldNodeIDs); err != nil {
 		return fmt.Errorf("failed to scale back nodes: %w", err)
 	}
 
+	// notify all nodes that the scaling operation is complete
 	if err := c.ScaleComplete(ctx, oldNodeIDs); err != nil {
 		return fmt.Errorf("failed to complete scale back: %w", err)
 	}

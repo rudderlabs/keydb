@@ -331,7 +331,7 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 		err = s.handleScaleDown(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync)
 	} else {
 		// Auto-healing: propagate cluster addresses to all nodes for consistency
-		err = s.handleAutoHealing(r.Context(), req.NewNodesAddresses)
+		err = s.handleAutoHealing(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses)
 	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error during auto scale operation: %v", err), http.StatusInternalServerError)
@@ -463,12 +463,12 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 
 // handleAutoHealing implements auto-healing by propagating cluster addresses to all nodes
 // This ensures all nodes have consistent cluster topology information
-func (s *httpServer) handleAutoHealing(ctx context.Context, addresses []string) error {
-	clusterSize := uint32(len(addresses))
+func (s *httpServer) handleAutoHealing(ctx context.Context, oldAddresses []string, newAddresses []string) error {
+	clusterSize := uint32(len(newAddresses))
 
-	return s.operator.ExecuteScalingWithRollback(operator.AutoHealing, clusterSize, clusterSize, addresses, addresses, func() error {
+	return s.operator.ExecuteScalingWithRollback(operator.AutoHealing, clusterSize, clusterSize, oldAddresses, newAddresses, func() error {
 		// Step 1: Update cluster data with current addresses to ensure consistency
-		if err := s.operator.UpdateClusterData(addresses...); err != nil {
+		if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
 			return fmt.Errorf("updating cluster data for auto-healing: %w", err)
 		}
 

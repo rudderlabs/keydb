@@ -200,12 +200,11 @@ func TestUpdateOperationStatus(t *testing.T) {
 	operatorClient.RecordOperation(AutoHealing, 3, 3, []string{"node1", "node2", "node3"}, []string{"node1", "node2", "node3"})
 
 	// Update status
-	operatorClient.UpdateOperationStatus(Failed, "snapshot_creation_failed")
+	operatorClient.UpdateOperationStatus(Failed)
 
 	// Verify
 	lastOp := operatorClient.GetLastOperation()
 	require.Equal(t, Failed, lastOp.Status)
-	require.Equal(t, "snapshot_creation_failed", lastOp.FailedStep)
 }
 
 func TestOperationRecordingTable(t *testing.T) {
@@ -279,7 +278,7 @@ func TestConcurrentOperations(t *testing.T) {
 			opType := ScalingOperationType(fmt.Sprintf("test_op_%d", i))
 			operatorClient.RecordOperation(opType, 2, 3, []string{"node1", "node2"}, []string{"node1", "node2", "node3"})
 			time.Sleep(time.Millisecond * 10) // Simulate some work
-			operatorClient.UpdateOperationStatus(Completed, "")
+			operatorClient.UpdateOperationStatus(Completed)
 		}(i)
 	}
 
