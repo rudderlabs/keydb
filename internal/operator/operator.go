@@ -499,8 +499,8 @@ func (c *Client) GetLastOperation() *ScalingOperation {
 	return c.lastOperation
 }
 
-// ExecuteWithRollback executes a scaling function with automatic rollback on failure
-func (c *Client) ExecuteWithRollback(opType ScalingOperationType, oldClusterSize, newClusterSize uint32, oldAddresses, newAddresses []string, fn func() error) error {
+// ExecuteScalingWithRollback executes a scaling function with automatic rollback on failure
+func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType, oldClusterSize, newClusterSize uint32, oldAddresses, newAddresses []string, fn func() error) error {
 	// Record the operation
 	c.RecordOperation(opType, oldClusterSize, newClusterSize, oldAddresses, newAddresses)
 

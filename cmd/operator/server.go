@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	pb "github.com/rudderlabs/keydb/proto"
 	"net/http"
 	"time"
 
@@ -17,9 +18,22 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
+type operatorClient interface {
+	Scale(ctx context.Context, nodeIDs []uint32) error
+	ScaleComplete(ctx context.Context, nodeIDs []uint32) error
+	UpdateClusterData(addresses ...string) error
+	CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error
+	LoadSnapshots(ctx context.Context, nodeID uint32, hashRanges ...uint32) error
+	ExecuteScalingWithRollback(opType operator.ScalingOperationType, oldClusterSize, newClusterSize uint32,
+		oldAddresses, newAddresses []string, fn func() error) error
+	GetLastOperation() *operator.ScalingOperation
+	TotalHashRanges() uint32
+	GetNodeInfo(ctx context.Context, id uint32) (*pb.GetNodeInfoResponse, error)
+}
+
 type httpServer struct {
 	client   *client.Client
-	operator *operator.Client
+	operator operatorClient
 	server   *http.Server
 }
 
@@ -335,7 +349,7 @@ func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddress
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
-	return s.operator.ExecuteWithRollback(operator.ScaleUp, oldClusterSize, newClusterSize, oldAddresses, newAddresses, func() error {
+	return s.operator.ExecuteScalingWithRollback(operator.ScaleUp, oldClusterSize, newClusterSize, oldAddresses, newAddresses, func() error {
 		// Step 1: Update cluster data with new addresses
 		if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
 			return fmt.Errorf("updating cluster data: %w", err)
@@ -394,7 +408,7 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
-	return s.operator.ExecuteWithRollback(operator.ScaleDown, oldClusterSize, newClusterSize, oldAddresses, newAddresses, func() error {
+	return s.operator.ExecuteScalingWithRollback(operator.ScaleDown, oldClusterSize, newClusterSize, oldAddresses, newAddresses, func() error {
 		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
 			oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
 		)
@@ -452,7 +466,7 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 func (s *httpServer) handleAutoHealing(ctx context.Context, addresses []string) error {
 	clusterSize := uint32(len(addresses))
 
-	return s.operator.ExecuteWithRollback(operator.AutoHealing, clusterSize, clusterSize, addresses, addresses, func() error {
+	return s.operator.ExecuteScalingWithRollback(operator.AutoHealing, clusterSize, clusterSize, addresses, addresses, func() error {
 		// Step 1: Update cluster data with current addresses to ensure consistency
 		if err := s.operator.UpdateClusterData(addresses...); err != nil {
 			return fmt.Errorf("updating cluster data for auto-healing: %w", err)
