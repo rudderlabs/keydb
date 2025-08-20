@@ -100,13 +100,9 @@ deploy:
 		echo "Error: NAMESPACE variable is empty"; \
 		exit 1; \
 	fi
-	@if [ -z "$(DOCKER_USER)" ]; then \
-		echo "Error: DOCKER_USER variable is empty"; \
-		exit 1; \
-	fi
 	helm upgrade --install keydb-operator ./helm/keydb-operator \
 		--namespace $(NAMESPACE) \
-		--set image.repository=$(DOCKER_USER)/keydb-operator
+		--set image.repository=rudderstack/rudder-keydb-operator
 
 .PHONY: lint
 lint: fmt vulncheck ## Run linters on all go files
