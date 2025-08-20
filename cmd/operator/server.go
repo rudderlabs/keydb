@@ -474,11 +474,6 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 
 // handleHashRangeMovements handles POST /hashRangeMovements requests
 func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	// Parse request body
 	var req HashRangeMovementsRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -535,33 +530,23 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 	// If upload=true, send CreateSnapshots requests to old nodes that are losing hash ranges
 	if req.Upload {
 		ctx := r.Context()
+		group, gCtx := errgroup.WithContext(ctx)
 		for sourceNodeID, hashRanges := range sourceNodeMovements {
 			// Only send CreateSnapshots to nodes that exist in the old cluster
 			if sourceNodeID < req.OldClusterSize {
-				if req.SplitUploads {
-					// Call CreateSnapshots once per hash range
-					for _, hashRange := range hashRanges {
-						if err := s.operator.CreateSnapshots(ctx, sourceNodeID, req.FullSync, hashRange); err != nil {
-							http.Error(w,
-								fmt.Sprintf("Error creating snapshots for node %d, hash range %d: %v",
-									sourceNodeID, hashRange, err,
-								),
-								http.StatusInternalServerError,
-							)
-							return
-						}
+				// Call CreateSnapshots once per node with all hash ranges
+				group.Go(func() error {
+					err := s.operator.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRanges...)
+					if err != nil {
+						return fmt.Errorf("creating snapshots for node %d: %w", sourceNodeID, err)
 					}
-				} else {
-					// Call CreateSnapshots once per node with all hash ranges
-					if err := s.operator.CreateSnapshots(ctx, sourceNodeID, req.FullSync, hashRanges...); err != nil {
-						http.Error(w,
-							fmt.Sprintf("Error creating snapshots for node %d: %v", sourceNodeID, err),
-							http.StatusInternalServerError,
-						)
-						return
-					}
-				}
+					return nil
+				})
 			}
+		}
+		if err := group.Wait(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
 	}
 

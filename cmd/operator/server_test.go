@@ -670,7 +670,6 @@ func TestHashRangeMovements(t *testing.T) {
 			NewClusterSize:  2,
 			TotalHashRanges: 8,
 			Upload:          true,
-			SplitUploads:    true,
 		})
 
 		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
