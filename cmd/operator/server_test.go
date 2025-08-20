@@ -707,6 +707,38 @@ func TestHashRangeMovements(t *testing.T) {
 	node0.Close()
 }
 
+func TestHandleLastOperation(t *testing.T) {
+
+	// Start test server
+	op := startOperatorHTTPServer(t, 128, "localhost:0")
+
+	// Record an operation
+	op.operator.RecordOperation(operator.ScaleUp, 2, 3, []string{"node1", "node2"}, []string{"node1", "node2", "node3"})
+
+	// Make request to /lastOperation endpoint
+	resp, err := http.Get(op.url + "/lastOperation")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
+
+	// Parse response
+	var response struct {
+		Operation *operator.ScalingOperation `json:"operation"`
+	}
+	err = jsonrs.NewDecoder(resp.Body).Decode(&response)
+	require.NoError(t, err)
+
+	// Verify operation details
+	require.NotNil(t, response.Operation)
+	require.Equal(t, operator.ScaleUp, response.Operation.Type)
+	require.Equal(t, uint32(2), response.Operation.OldClusterSize)
+	require.Equal(t, uint32(3), response.Operation.NewClusterSize)
+	require.Equal(t, []string{"node1", "node2"}, response.Operation.OldAddresses)
+	require.Equal(t, []string{"node1", "node2", "node3"}, response.Operation.NewAddresses)
+}
+
 func getService(
 	ctx context.Context, t testing.TB, cs filemanager.S3Manager, nodeConfig node.Config, conf *config.Config,
 ) (*node.Service, string) {
@@ -778,16 +810,18 @@ func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...
 	})
 
 	return &opClient{
-		t:      t,
-		client: http.DefaultClient,
-		url:    fmt.Sprintf("http://localhost:%d", freePort),
+		t:        t,
+		client:   http.DefaultClient,
+		url:      fmt.Sprintf("http://localhost:%d", freePort),
+		operator: op,
 	}
 }
 
 type opClient struct {
-	t      testing.TB
-	client *http.Client
-	url    string
+	t        testing.TB
+	client   *http.Client
+	url      string
+	operator *operator.Client
 }
 
 func (c *opClient) Do(endpoint string, data any, success ...bool) string {
