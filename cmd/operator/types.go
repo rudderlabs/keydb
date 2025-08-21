@@ -71,6 +71,7 @@ type HashRangeMovementsRequest struct {
 	NewClusterSize  uint32 `json:"newClusterSize"`
 	TotalHashRanges uint32 `json:"totalHashRanges"`
 	Upload          bool   `json:"upload,omitempty"`
+	Download        bool   `json:"download,omitempty"`
 	FullSync        bool   `json:"fullSync,omitempty"`
 }
 

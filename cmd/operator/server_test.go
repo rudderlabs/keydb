@@ -618,7 +618,7 @@ func TestHashRangeMovements(t *testing.T) {
 		})
 	}
 
-	t.Run("upload", func(t *testing.T) {
+	t.Run("upload and download", func(t *testing.T) {
 		_ = op.Do("/put", PutRequest{
 			Keys: []string{
 				"key1", "key2", "key3", "key4",
@@ -700,6 +700,61 @@ func TestHashRangeMovements(t *testing.T) {
 			regexp.MustCompile("^hr_5_s_1_2.snapshot$"),
 			regexp.MustCompile("^hr_7_s_1_2.snapshot$"),
 		)
+
+		newNodeCtx, newNodeCancel := context.WithCancel(context.Background())
+		defer newNodeCancel()
+
+		newNodeConf := newConf()
+		_, newNodeAddress := getService(newNodeCtx, t, cloudStorage, node.Config{
+			NodeID:           1,
+			ClusterSize:      2,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, newNodeConf)
+
+		op := startOperatorHTTPServer(t, totalHashRanges, node0Address, newNodeAddress)
+
+		body = op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+			OldClusterSize:  1,
+			NewClusterSize:  2,
+			TotalHashRanges: 8,
+			Download:        true,
+		})
+
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+
+		// Verify we still get movements even with download=true
+		require.NotEmpty(t, movements)
+
+		// Try to fetch only keys that are served by the new node to see if they exist
+		keys := []string{
+			"key1", "key2", "key3", "key4",
+			"key5", "key6", "key7", "key8",
+			"key9", "key10", "key11", "key12",
+			"key13", "key14", "key15", "key16",
+			"key17", "key18", "key19", "key20",
+			"key21", "key22", "key23", "key24",
+			"key25", "key26", "key27", "key28",
+			"key29", "key30", "key31", "key32",
+		}
+		var node1Keys []string
+		for _, key := range keys {
+			_, nodeID := hash.GetNodeNumber(key, 2, totalHashRanges)
+			if nodeID == 1 {
+				node1Keys = append(node1Keys, key)
+			}
+		}
+		require.Greater(t, len(node1Keys), 0, "node 1 should have some keys")
+
+		body = op.Do("/get", GetRequest{
+			Keys: node1Keys,
+		})
+		require.JSONEq(t, `{
+			"key1":true,"key3":true,"key5":true,"key7":true,"key9":true,
+			"key10":true,"key12":true,"key14":true,"key16":true,"key18":true,
+			"key21":true,"key23":true,"key25":true,"key27":true,"key29":true,
+			"key30":true,"key32":true
+		}`, body)
 	})
 
 	cancel()
