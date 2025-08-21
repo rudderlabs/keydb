@@ -519,7 +519,8 @@ func (c *Client) GetLastOperation() *ScalingOperation {
 //
 // Returns:
 //   - error: If the operation or rollback fails, or nil if successful
-func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType, oldAddresses, newAddresses []string, fn func() error) error {
+func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType,
+	oldAddresses, newAddresses []string, fn func() error) error {
 	// Record the operation
 	c.RecordOperation(opType, uint32(len(oldAddresses)), uint32(len(newAddresses)), oldAddresses, newAddresses)
 

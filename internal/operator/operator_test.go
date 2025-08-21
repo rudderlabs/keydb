@@ -75,9 +75,10 @@ func TestExecuteScalingWithRollback_Success(t *testing.T) {
 	}
 
 	// Test successful operation
-	err := operatorClient.ExecuteScalingWithRollback(ScaleUp, []string{"node1", "node2"}, []string{"node1", "node2", "node3"}, func() error {
-		return nil // Simulate successful operation
-	})
+	err := operatorClient.ExecuteScalingWithRollback(ScaleUp,
+		[]string{"node1", "node2"}, []string{"node1", "node2", "node3"}, func() error {
+			return nil // Simulate successful operation
+		})
 
 	// Assertions
 	require.NoError(t, err)
@@ -164,9 +165,10 @@ func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
 
 	// Test failed operation that also fails to rollback
 	testErr := errors.New("test error")
-	err = testClient.ExecuteScalingWithRollback(ScaleUp, []string{addr, addr}, []string{"node1", "node2", "node3"}, func() error {
-		return testErr // Simulate operation failure
-	})
+	err = testClient.ExecuteScalingWithRollback(ScaleUp,
+		[]string{addr, addr}, []string{"node1", "node2", "node3"}, func() error {
+			return testErr // Simulate operation failure
+		})
 
 	// Assertions
 	require.Error(t, err)

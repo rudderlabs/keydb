@@ -25,7 +25,8 @@ type operatorClient interface {
 	UpdateClusterData(addresses ...string) error
 	CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error
 	LoadSnapshots(ctx context.Context, nodeID uint32, hashRanges ...uint32) error
-	ExecuteScalingWithRollback(opType operator.ScalingOperationType, oldAddresses, newAddresses []string, fn func() error) error
+	ExecuteScalingWithRollback(opType operator.ScalingOperationType, oldAddresses, newAddresses []string,
+		fn func() error) error
 	GetLastOperation() *operator.ScalingOperation
 	TotalHashRanges() uint32
 	GetNodeInfo(ctx context.Context, id uint32) (*pb.GetNodeInfoResponse, error)
