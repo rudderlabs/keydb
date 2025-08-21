@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0-alpha](https://github.com/rudderlabs/keydb/compare/v0.2.1-alpha...v0.3.0-alpha) (2025-08-21)
+
+
+### Features
+
+* implement rollback functionality for scaling operations ([#23](https://github.com/rudderlabs/keydb/issues/23)) ([dd119e7](https://github.com/rudderlabs/keydb/commit/dd119e7205cc355ec17a41349969ae284a93d1ff))
+
+
+### Miscellaneous
+
+* adding download to hash range movements ([#26](https://github.com/rudderlabs/keydb/issues/26)) ([ea86ab8](https://github.com/rudderlabs/keydb/commit/ea86ab82d0fac6ec1220ded6089287b70488a8bc))
+* parallelize in hash range movements ([#24](https://github.com/rudderlabs/keydb/issues/24)) ([e537e74](https://github.com/rudderlabs/keydb/commit/e537e749bce35afe264a57883dcb7eb29a6e6d29))
+* update Dockerfile references and image repository for keydb operator ([#25](https://github.com/rudderlabs/keydb/issues/25)) ([e8ae90b](https://github.com/rudderlabs/keydb/commit/e8ae90b1771042898fdb7b73959600fa0b6c28e7))
+
 ## [0.2.1-alpha](https://github.com/rudderlabs/keydb/compare/v0.2.0-alpha...v0.2.1-alpha) (2025-08-18)
 
 
