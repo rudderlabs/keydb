@@ -13,13 +13,27 @@ import (
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/operator"
+	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
+type operatorClient interface {
+	Scale(ctx context.Context, nodeIDs []uint32) error
+	ScaleComplete(ctx context.Context, nodeIDs []uint32) error
+	UpdateClusterData(addresses ...string) error
+	CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error
+	LoadSnapshots(ctx context.Context, nodeID uint32, hashRanges ...uint32) error
+	ExecuteScalingWithRollback(opType operator.ScalingOperationType, oldAddresses, newAddresses []string,
+		fn func() error) error
+	GetLastOperation() *operator.ScalingOperation
+	TotalHashRanges() uint32
+	GetNodeInfo(ctx context.Context, id uint32) (*pb.GetNodeInfoResponse, error)
+}
+
 type httpServer struct {
 	client   *client.Client
-	operator *operator.Client
+	operator operatorClient
 	server   *http.Server
 }
 
@@ -49,6 +63,7 @@ func newHTTPServer(client *client.Client, operator *operator.Client, addr string
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
 	mux.Post("/autoScale", s.handleAutoScale)
 	mux.Post("/hashRangeMovements", s.handleHashRangeMovements)
+	mux.Get("/lastOperation", s.handleLastOperation)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -316,7 +331,7 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 		err = s.handleScaleDown(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync)
 	} else {
 		// Auto-healing: propagate cluster addresses to all nodes for consistency
-		err = s.handleAutoHealing(r.Context(), req.NewNodesAddresses)
+		err = s.handleAutoHealing(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses)
 	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error during auto scale operation: %v", err), http.StatusInternalServerError)
@@ -334,56 +349,58 @@ func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddress
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
-	// Step 1: Update cluster data with new addresses
-	if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
-		return fmt.Errorf("updating cluster data: %w", err)
-	}
-
-	// Step 2: Determine which hash ranges need to be moved and get ready-to-use maps
-	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
-		oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
-	)
-
-	// Step 3: Create snapshots from source nodes for hash ranges that will be moved
-	group, gCtx := errgroup.WithContext(ctx)
-	for sourceNodeID, hashRanges := range sourceNodeMovements {
-		if len(hashRanges) == 0 {
-			continue
+	return s.operator.ExecuteScalingWithRollback(operator.ScaleUp, oldAddresses, newAddresses, func() error {
+		// Step 1: Update cluster data with new addresses
+		if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+			return fmt.Errorf("updating cluster data: %w", err)
 		}
-		group.Go(func() error {
-			if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
-				return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
-					sourceNodeID, hashRanges, err,
-				)
-			}
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return fmt.Errorf("waiting for snapshot creation: %w", err)
-	}
 
-	// Step 4: Load snapshots to destination nodes
-	group, gCtx = errgroup.WithContext(ctx)
-	for nodeID, hashRanges := range destinationNodeMovements {
-		if len(hashRanges) == 0 {
-			continue
+		// Step 2: Determine which hash ranges need to be moved and get ready-to-use maps
+		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+			oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
+		)
+
+		// Step 3: Create snapshots from source nodes for hash ranges that will be moved
+		group, gCtx := errgroup.WithContext(ctx)
+		for sourceNodeID, hashRanges := range sourceNodeMovements {
+			if len(hashRanges) == 0 {
+				continue
+			}
+			group.Go(func() error {
+				if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+					return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+						sourceNodeID, hashRanges, err,
+					)
+				}
+				return nil
+			})
 		}
-		group.Go(func() error {
-			if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
-				return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
-					nodeID, hashRanges, err,
-				)
-			}
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return fmt.Errorf("waiting for snapshot loading: %w", err)
-	}
+		if err := group.Wait(); err != nil {
+			return fmt.Errorf("waiting for snapshot creation: %w", err)
+		}
 
-	// Step 5: Scale all nodes
-	return s.completeScaleOperation(ctx, newClusterSize)
+		// Step 4: Load snapshots to destination nodes
+		group, gCtx = errgroup.WithContext(ctx)
+		for nodeID, hashRanges := range destinationNodeMovements {
+			if len(hashRanges) == 0 {
+				continue
+			}
+			group.Go(func() error {
+				if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+					return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
+						nodeID, hashRanges, err,
+					)
+				}
+				return nil
+			})
+		}
+		if err := group.Wait(); err != nil {
+			return fmt.Errorf("waiting for snapshot loading: %w", err)
+		}
+
+		// Step 5: Scale all nodes
+		return s.completeScaleOperation(ctx, newClusterSize)
+	})
 }
 
 // handleScaleDown implements the scale down logic based on TestScaleUpAndDown
@@ -391,69 +408,73 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
-	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
-		oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
-	)
+	return s.operator.ExecuteScalingWithRollback(operator.ScaleDown, oldAddresses, newAddresses, func() error {
+		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+			oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
+		)
 
-	// Step 1: Create snapshots from source nodes for hash ranges that will be moved
-	group, gCtx := errgroup.WithContext(ctx)
-	for sourceNodeID, hashRanges := range sourceNodeMovements {
-		if len(hashRanges) == 0 {
-			continue
-		}
-		group.Go(func() error {
-			if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
-				return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
-					sourceNodeID, hashRanges, err,
-				)
+		// Step 1: Create snapshots from source nodes for hash ranges that will be moved
+		group, gCtx := errgroup.WithContext(ctx)
+		for sourceNodeID, hashRanges := range sourceNodeMovements {
+			if len(hashRanges) == 0 {
+				continue
 			}
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return fmt.Errorf("waiting for snapshot creation: %w", err)
-	}
-
-	// Step 2: Load snapshots to destination nodes
-	group, gCtx = errgroup.WithContext(ctx)
-	for nodeID, hashRanges := range destinationNodeMovements {
-		if len(hashRanges) == 0 {
-			continue
+			group.Go(func() error {
+				if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+					return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+						sourceNodeID, hashRanges, err,
+					)
+				}
+				return nil
+			})
 		}
-		group.Go(func() error {
-			if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
-				return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
-					nodeID, hashRanges, err,
-				)
+		if err := group.Wait(); err != nil {
+			return fmt.Errorf("waiting for snapshot creation: %w", err)
+		}
+
+		// Step 2: Load snapshots to destination nodes
+		group, gCtx = errgroup.WithContext(ctx)
+		for nodeID, hashRanges := range destinationNodeMovements {
+			if len(hashRanges) == 0 {
+				continue
 			}
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return fmt.Errorf("waiting for snapshot loading: %w", err)
-	}
+			group.Go(func() error {
+				if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+					return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
+						nodeID, hashRanges, err,
+					)
+				}
+				return nil
+			})
+		}
+		if err := group.Wait(); err != nil {
+			return fmt.Errorf("waiting for snapshot loading: %w", err)
+		}
 
-	// Step 3: Update cluster data with new addresses
-	if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
-		return fmt.Errorf("updating cluster data: %w", err)
-	}
+		// Step 3: Update cluster data with new addresses
+		if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+			return fmt.Errorf("updating cluster data: %w", err)
+		}
 
-	// Step 4: Scale remaining nodes
-	return s.completeScaleOperation(ctx, newClusterSize)
+		// Step 4: Scale remaining nodes
+		return s.completeScaleOperation(ctx, newClusterSize)
+	})
 }
 
 // handleAutoHealing implements auto-healing by propagating cluster addresses to all nodes
 // This ensures all nodes have consistent cluster topology information
-func (s *httpServer) handleAutoHealing(ctx context.Context, addresses []string) error {
-	clusterSize := uint32(len(addresses))
+func (s *httpServer) handleAutoHealing(ctx context.Context, oldAddresses, newAddresses []string) error {
+	clusterSize := uint32(len(newAddresses))
 
-	// Step 1: Update cluster data with current addresses to ensure consistency
-	if err := s.operator.UpdateClusterData(addresses...); err != nil {
-		return fmt.Errorf("updating cluster data for auto-healing: %w", err)
-	}
+	return s.operator.ExecuteScalingWithRollback(operator.AutoHealing, oldAddresses, newAddresses, func() error {
+		// Step 1: Update cluster data with current addresses to ensure consistency
+		if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+			return fmt.Errorf("updating cluster data for auto-healing: %w", err)
+		}
 
-	// Step 2: Scale all nodes to refresh their cluster information
-	return s.completeScaleOperation(ctx, clusterSize)
+		// Step 2: Scale all nodes to refresh their cluster information
+		return s.completeScaleOperation(ctx, clusterSize)
+	})
 }
 
 func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uint32) error {
@@ -571,6 +592,26 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	if err := jsonrs.NewEncoder(w).Encode(movements); err != nil {
+		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
+		return
+	}
+}
+
+// handleLastOperation handles GET /lastOperation requests
+func (s *httpServer) handleLastOperation(w http.ResponseWriter, r *http.Request) {
+	operation := s.operator.GetLastOperation()
+	if operation == nil {
+		http.Error(w, "No operation found", http.StatusNotFound)
+		return
+	}
+
+	response := LastOperationResponse{
+		Operation: operation,
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	if err := jsonrs.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
 		return
 	}
