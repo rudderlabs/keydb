@@ -10,63 +10,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
 	"google.golang.org/grpc"
 
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
-
-// mockNodeServiceServer is a mock implementation of the NodeServiceServer
-type mockNodeServiceServer struct {
-	pb.UnimplementedNodeServiceServer
-	scaleFunc         func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error)
-	scaleCompleteFunc func(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)
-}
-
-func (m *mockNodeServiceServer) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
-	if m.scaleFunc != nil {
-		return m.scaleFunc(ctx, req)
-	}
-	return &pb.ScaleResponse{Success: true}, nil
-}
-
-func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (
-	*pb.ScaleCompleteResponse, error,
-) {
-	if m.scaleCompleteFunc != nil {
-		return m.scaleCompleteFunc(ctx, req)
-	}
-	return &pb.ScaleCompleteResponse{Success: true}, nil
-}
-
-// startMockNodeService starts a mock gRPC server
-func startMockNodeService(t *testing.T,
-	scaleFunc func(context.Context, *pb.ScaleRequest) (*pb.ScaleResponse, error),
-	scaleCompleteFunc func(context.Context, *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)) (
-	string, func(),
-) {
-	t.Helper()
-
-	lis, err := net.Listen("tcp", "localhost:0")
-	require.NoError(t, err)
-
-	grpcServer := grpc.NewServer()
-	mockServer := &mockNodeServiceServer{
-		scaleFunc:         scaleFunc,
-		scaleCompleteFunc: scaleCompleteFunc,
-	}
-	pb.RegisterNodeServiceServer(grpcServer, mockServer)
-
-	go func() {
-		_ = grpcServer.Serve(lis)
-	}()
-
-	return lis.Addr().String(), func() {
-		grpcServer.GracefulStop()
-		_ = lis.Close()
-	}
-}
 
 func TestExecuteScalingWithRollback_Success(t *testing.T) {
 	// Setup
@@ -76,9 +24,12 @@ func TestExecuteScalingWithRollback_Success(t *testing.T) {
 
 	// Test successful operation
 	err := operatorClient.ExecuteScalingWithRollback(ScaleUp,
-		[]string{"node1", "node2"}, []string{"node1", "node2", "node3"}, func() error {
+		[]string{"node1", "node2"},
+		[]string{"node1", "node2", "node3"},
+		func() error {
 			return nil // Simulate successful operation
-		})
+		},
+	)
 
 	// Assertions
 	require.NoError(t, err)
@@ -299,4 +250,55 @@ func TestConcurrentOperations(t *testing.T) {
 	// Verify that we have an operation (the last one)
 	lastOp := operatorClient.GetLastOperation()
 	require.NotNil(t, lastOp)
+}
+
+// mockNodeServiceServer is a mock implementation of the NodeServiceServer
+type mockNodeServiceServer struct {
+	pb.UnimplementedNodeServiceServer
+	scaleFunc         func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error)
+	scaleCompleteFunc func(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)
+}
+
+func (m *mockNodeServiceServer) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
+	if m.scaleFunc != nil {
+		return m.scaleFunc(ctx, req)
+	}
+	return &pb.ScaleResponse{Success: true}, nil
+}
+
+func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (
+	*pb.ScaleCompleteResponse, error,
+) {
+	if m.scaleCompleteFunc != nil {
+		return m.scaleCompleteFunc(ctx, req)
+	}
+	return &pb.ScaleCompleteResponse{Success: true}, nil
+}
+
+// startMockNodeService starts a mock gRPC server
+func startMockNodeService(t *testing.T,
+	scaleFunc func(context.Context, *pb.ScaleRequest) (*pb.ScaleResponse, error),
+	scaleCompleteFunc func(context.Context, *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)) (
+	string, func(),
+) {
+	t.Helper()
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	require.NoError(t, err)
+
+	grpcServer := grpc.NewServer()
+	mockServer := &mockNodeServiceServer{
+		scaleFunc:         scaleFunc,
+		scaleCompleteFunc: scaleCompleteFunc,
+	}
+	pb.RegisterNodeServiceServer(grpcServer, mockServer)
+
+	go func() {
+		_ = grpcServer.Serve(lis)
+	}()
+
+	return lis.Addr().String(), func() {
+		grpcServer.GracefulStop()
+		_ = lis.Close()
+	}
 }
