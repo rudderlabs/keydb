@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"time"
 
-	pb "github.com/rudderlabs/keydb/proto"
-
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"golang.org/x/sync/errgroup"
@@ -15,6 +13,7 @@ import (
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/operator"
+	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
