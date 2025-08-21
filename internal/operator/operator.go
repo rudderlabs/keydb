@@ -502,38 +502,55 @@ func (c *Client) GetLastOperation() *ScalingOperation {
 }
 
 // ExecuteScalingWithRollback executes a scaling function with automatic rollback on failure
-func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType, oldClusterSize, newClusterSize uint32,
-	oldAddresses, newAddresses []string, fn func() error,
-) error {
+//
+// This function records the scaling operation details, executes the provided scaling function,
+// and automatically performs a rollback if the function returns an error. It ensures that
+// the cluster state remains consistent even when scaling operations fail.
+//
+// The background context is used for rollback operations to ensure that even if the original
+// request context is cancelled (e.g., client disconnects), the rollback can still complete
+// and leave the cluster in a consistent state.
+//
+// Parameters:
+//   - opType: The type of scaling operation (ScaleUp, ScaleDown, AutoHealing)
+//   - oldAddresses: The node addresses before the operation
+//   - newAddresses: The node addresses after the operation
+//   - fn: The function that performs the actual scaling operation
+//
+// Returns:
+//   - error: If the operation or rollback fails, or nil if successful
+func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType, oldAddresses, newAddresses []string, fn func() error) error {
 	// Record the operation
-	c.RecordOperation(opType, oldClusterSize, newClusterSize, oldAddresses, newAddresses)
+	c.RecordOperation(opType, uint32(len(oldAddresses)), uint32(len(newAddresses)), oldAddresses, newAddresses)
 
 	// Execute the scaling function
 	err := fn()
 	if err != nil {
 		c.UpdateOperationStatus(Failed)
 		c.logger.Warnn("Scaling operation failed, initiating rollback",
-			logger.NewStringField("operation_type", string(opType)),
+			logger.NewStringField("operationType", string(opType)),
 			obskit.Error(err))
 
 		// Attempt rollback
+		// background one is needed so that if a client disconnects or cancels the request
+		// then we won't leave the cluster in a bad state
 		rollbackErr := c.rollbackToOldConfiguration(context.Background(), c.GetLastOperation())
 		if rollbackErr != nil {
 			c.logger.Errorn("Rollback failed",
-				logger.NewStringField("operation_type", string(opType)),
+				logger.NewStringField("operationType", string(opType)),
 				obskit.Error(rollbackErr))
 			return fmt.Errorf("scaling failed: %v, rollback failed: %w", err, rollbackErr)
 		}
 
 		c.UpdateOperationStatus(RolledBack)
 		c.logger.Infon("Scaling operation rolled back successfully",
-			logger.NewStringField("operation_type", string(opType)))
+			logger.NewStringField("operationType", string(opType)))
 		return fmt.Errorf("scaling failed and rolled back: %w", err)
 	}
 
 	c.UpdateOperationStatus(Completed)
 	c.logger.Infon("Scaling operation completed successfully",
-		logger.NewStringField("operation_type", string(opType)))
+		logger.NewStringField("operationType", string(opType)))
 	return nil
 }
 
@@ -544,7 +561,7 @@ func (c *Client) rollbackToOldConfiguration(ctx context.Context, operation *Scal
 	}
 
 	c.logger.Infon("Rolling back operation",
-		logger.NewStringField("operation_type", string(operation.Type)))
+		logger.NewStringField("operationType", string(operation.Type)))
 
 	// Restore cluster to old configuration
 	if err := c.UpdateClusterData(operation.OldAddresses...); err != nil {

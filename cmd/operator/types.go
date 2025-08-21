@@ -1,5 +1,7 @@
 package main
 
+import "github.com/rudderlabs/keydb/internal/operator"
+
 // GetRequest represents a request to get keys
 type GetRequest struct {
 	Keys []string `json:"keys"`
@@ -80,4 +82,9 @@ type HashRangeMovement struct {
 	HashRange uint32 `json:"hashRange"`
 	From      uint32 `json:"from"`
 	To        uint32 `json:"to"`
+}
+
+// LastOperationResponse represents the response containing the last operation
+type LastOperationResponse struct {
+	Operation *operator.ScalingOperation `json:"operation"`
 }
