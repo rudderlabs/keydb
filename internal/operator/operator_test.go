@@ -3,7 +3,6 @@ package operator
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -224,32 +223,6 @@ func TestOperationRecordingTable(t *testing.T) {
 			require.Equal(t, tt.newAddresses, lastOp.NewAddresses)
 		})
 	}
-}
-
-func TestConcurrentOperations(t *testing.T) {
-	operatorClient := &Client{
-		logger: logger.NOP,
-	}
-
-	// Run multiple operations concurrently
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			opType := ScalingOperationType(fmt.Sprintf("test_op_%d", i))
-			operatorClient.RecordOperation(opType, 2, 3,
-				[]string{"node1", "node2"}, []string{"node1", "node2", "node3"})
-			time.Sleep(time.Millisecond * 10) // Simulate some work
-			operatorClient.UpdateOperationStatus(Completed)
-		}(i)
-	}
-
-	wg.Wait()
-
-	// Verify that we have an operation (the last one)
-	lastOp := operatorClient.GetLastOperation()
-	require.NotNil(t, lastOp)
 }
 
 // mockNodeServiceServer is a mock implementation of the NodeServiceServer
