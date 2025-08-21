@@ -550,6 +550,24 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	if req.Download {
+		ctx := r.Context()
+		group, gCtx := errgroup.WithContext(ctx)
+		for destinationNodeID, hashRanges := range destinationNodeMovements {
+			group.Go(func() error {
+				err := s.operator.LoadSnapshots(gCtx, destinationNodeID, hashRanges...)
+				if err != nil {
+					return fmt.Errorf("loading snapshots for node %d: %w", destinationNodeID, err)
+				}
+				return nil
+			})
+		}
+		if err := group.Wait(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	if err := jsonrs.NewEncoder(w).Encode(movements); err != nil {
