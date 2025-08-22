@@ -271,8 +271,11 @@ func TestAutoScale(t *testing.T) {
 		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
 	})
 	require.JSONEq(t,
-		`{"key1":true,"key2":true,"key3":true,"key4":false,"key5":true,"key6":true,"key7":true,"key8":true}`, body,
+		`{"key1":true,"key2":true,"key3":true,"key4":false,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		body,
 	)
+
+	t.Log("Scaling down from 2 nodes to 1 node...")
 
 	// Test Scale Down using autoScale
 	_ = op.Do("/autoScale", AutoScaleRequest{
@@ -804,7 +807,9 @@ func getService(
 
 	log := logger.NOP
 	if testing.Verbose() {
-		log = logger.NewLogger()
+		lf := logger.NewFactory(conf)
+		require.NoError(t, lf.SetLogLevel("", "DEBUG"))
+		log = lf.NewLogger()
 	}
 	conf.Set("BadgerDB.Dedup.NopLogger", true)
 	service, err := node.NewService(ctx, nodeConfig, cs, conf, stats.NOP, log)
