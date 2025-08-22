@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -310,7 +311,7 @@ func TestAutoScale(t *testing.T) {
 	node1.Close()
 }
 
-func TestAutoScaleTransientFailure(t *testing.T) {
+func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
 	pool.MaxWait = 1 * time.Minute
@@ -466,6 +467,74 @@ func TestAutoScaleTransientFailure(t *testing.T) {
 	cancel()
 	node0.Close()
 	node1.Close()
+}
+
+func TestAutoScaleTransientError(t *testing.T) {
+	// Create the node service
+	totalHashRanges := uint32(3)
+	node0 := startMockNodeService(t, "node0")
+	node1 := startMockNodeService(t, "node1")
+
+	// Start the Operator HTTP Server
+	op := startOperatorHTTPServer(t, totalHashRanges, node0.address)
+
+	t.Log("Scaling up from 1 node to 2 nodes...")
+	node0.createSnapshotsReturnError.Store(true)
+	node1.loadSnapshotsReturnError.Store(true)
+	node0.scaleReturnError.Store(true)
+	node0.scaleCompleteReturnError.Store(true)
+	done := make(chan struct{})
+	go func() {
+		close(done)
+		_ = op.Do("/autoScale", AutoScaleRequest{
+			OldNodesAddresses: []string{node0.address},
+			NewNodesAddresses: []string{node0.address, node1.address},
+			RetryPolicy: RetryPolicy{
+				InitialInterval: time.Millisecond,
+				Multiplier:      1,
+				MaxInterval:     1 * time.Second,
+			},
+		}, true)
+	}()
+
+	waitForRetries := uint64(10)
+
+	t.Logf("Waiting for at least %d retries to be done on CreateSnapshots", waitForRetries)
+	require.Eventuallyf(t, func() bool {
+		return node0.createSnapshotsCalls.Load() >= waitForRetries // wait for at least 10 retries
+	}, 10*time.Second, time.Millisecond, "Calls %d", node0.createSnapshotsCalls.Load())
+	node0.createSnapshotsReturnError.Store(false)
+
+	t.Logf("Waiting for at least %d retries to be done on LoadSnapshots", waitForRetries)
+	require.Eventuallyf(t, func() bool {
+		return node1.loadSnapshotsCalls.Load() >= waitForRetries // wait for at least 10 retries
+	}, 10*time.Second, time.Millisecond, "Calls %d", node1.loadSnapshotsCalls.Load())
+	node1.loadSnapshotsReturnError.Store(false)
+
+	t.Logf("Waiting for at least %d retries to be done on Scale", waitForRetries)
+	require.Eventuallyf(t, func() bool {
+		return node0.scaleCalls.Load() >= waitForRetries // wait for at least 10 retries
+	}, 10*time.Second, time.Millisecond, "Calls %d", node0.scaleCalls.Load())
+	node0.scaleReturnError.Store(false)
+
+	t.Logf("Waiting for at least %d retries to be done on ScaleComplete", waitForRetries)
+	require.Eventuallyf(t, func() bool {
+		return node0.scaleCompleteCalls.Load() >= waitForRetries // wait for at least 10 retries
+	}, 10*time.Second, time.Millisecond, "Calls %d", node0.scaleCompleteCalls.Load())
+	node0.scaleCompleteReturnError.Store(false)
+
+	<-done
+
+	t.Log("Scaling down from 2 nodes to 1 node...")
+	done = make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = op.Do("/autoScale", AutoScaleRequest{
+			OldNodesAddresses: []string{node0.address, node1.address},
+			NewNodesAddresses: []string{node0.address},
+		}, true)
+	}()
+	<-done
 }
 
 func TestHandleAutoScaleErrors(t *testing.T) {
@@ -1496,4 +1565,93 @@ func (c *opClient) Do(endpoint string, data any, success ...bool) string {
 	}
 
 	return string(body)
+}
+
+type mockNodeServiceServer struct {
+	pb.UnimplementedNodeServiceServer
+
+	t          testing.TB
+	address    string
+	identifier string
+
+	scaleCalls       atomic.Uint64
+	scaleReturnError atomic.Bool
+
+	scaleCompleteCalls       atomic.Uint64
+	scaleCompleteReturnError atomic.Bool
+
+	createSnapshotsCalls       atomic.Uint64
+	createSnapshotsReturnError atomic.Bool
+
+	loadSnapshotsCalls       atomic.Uint64
+	loadSnapshotsReturnError atomic.Bool
+}
+
+func (m *mockNodeServiceServer) Scale(_ context.Context, _ *pb.ScaleRequest) (*pb.ScaleResponse, error) {
+	m.t.Logf("mockNodeServiceServer.Scale called on %s", m.identifier)
+	defer m.scaleCalls.Add(1)
+	if m.scaleReturnError.Load() {
+		return nil, errors.New("scale mock error on " + m.identifier)
+	}
+	return &pb.ScaleResponse{Success: true}, nil
+}
+
+func (m *mockNodeServiceServer) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
+	*pb.ScaleCompleteResponse, error,
+) {
+	m.t.Logf("mockNodeServiceServer.ScaleComplete called on %s", m.identifier)
+	defer m.scaleCompleteCalls.Add(1)
+	if m.scaleCompleteReturnError.Load() {
+		return nil, errors.New("scale complete mock error on " + m.identifier)
+	}
+	return &pb.ScaleCompleteResponse{Success: true}, nil
+}
+
+func (m *mockNodeServiceServer) CreateSnapshots(_ context.Context, _ *pb.CreateSnapshotsRequest) (
+	*pb.CreateSnapshotsResponse, error,
+) {
+	m.t.Logf("mockNodeServiceServer.CreateSnapshots called on %s", m.identifier)
+	defer m.createSnapshotsCalls.Add(1)
+	if m.createSnapshotsReturnError.Load() {
+		return nil, errors.New("create snapshots mock error on " + m.identifier)
+	}
+	return &pb.CreateSnapshotsResponse{Success: true}, nil
+}
+
+func (m *mockNodeServiceServer) LoadSnapshots(_ context.Context, _ *pb.LoadSnapshotsRequest) (
+	*pb.LoadSnapshotsResponse, error,
+) {
+	m.t.Logf("mockNodeServiceServer.LoadSnapshots called on %s", m.identifier)
+	defer m.loadSnapshotsCalls.Add(1)
+	if m.loadSnapshotsReturnError.Load() {
+		return nil, errors.New("load snapshots mock error on " + m.identifier)
+	}
+	return &pb.LoadSnapshotsResponse{Success: true}, nil
+}
+
+func startMockNodeService(t testing.TB, identifier string) *mockNodeServiceServer {
+	t.Helper()
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+
+	address := "localhost:" + strconv.Itoa(freePort)
+	lis, err := net.Listen("tcp", address)
+	require.NoError(t, err)
+
+	grpcServer := grpc.NewServer()
+	mockServer := &mockNodeServiceServer{
+		t:          t,
+		identifier: identifier,
+		address:    lis.Addr().String(),
+	}
+	pb.RegisterNodeServiceServer(grpcServer, mockServer)
+
+	go func() { _ = grpcServer.Serve(lis) }()
+	t.Cleanup(func() {
+		grpcServer.GracefulStop()
+		_ = lis.Close()
+	})
+
+	return mockServer
 }
