@@ -774,7 +774,7 @@ func TestHandleLastOperation(t *testing.T) {
 	// Make request to /lastOperation endpoint
 	resp, err := http.Get(op.url + "/lastOperation")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.Equal(t, "application/json", resp.Header.Get("Content-Type"))
@@ -978,7 +978,7 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	// Check that the last operation was recorded and rolled back
 	lastOpResp, err := http.Get(op.url + "/lastOperation")
 	require.NoError(t, err)
-	defer lastOpResp.Body.Close()
+	defer func() { _ = lastOpResp.Body.Close() }()
 
 	require.Equal(t, http.StatusOK, lastOpResp.StatusCode)
 	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
@@ -1070,10 +1070,10 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
 
 	// Try to scale down by removing node1 - this should trigger rollback
-	randomAdd := "random-wefaofwef-address:12345"
+	unreachableAddr := "unreachable-address:12345"
 	autoScaleReq := AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
-		NewNodesAddresses: []string{randomAdd}, // Simulating a non-running node
+		NewNodesAddresses: []string{unreachableAddr}, // Simulating a non-running node
 		FullSync:          false,
 	}
 
@@ -1095,7 +1095,7 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	// Check that the last operation was recorded and rolled back
 	lastOpResp, err := http.Get(op.url + "/lastOperation")
 	require.NoError(t, err)
-	defer lastOpResp.Body.Close()
+	defer func() { _ = lastOpResp.Body.Close() }()
 
 	require.Equal(t, http.StatusOK, lastOpResp.StatusCode)
 	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
@@ -1112,7 +1112,7 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	require.Equal(t, uint32(2), lastOpResponse.Operation.OldClusterSize)
 	require.Equal(t, uint32(1), lastOpResponse.Operation.NewClusterSize)
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.OldAddresses)
-	require.Equal(t, []string{randomAdd}, lastOpResponse.Operation.NewAddresses)
+	require.Equal(t, []string{unreachableAddr}, lastOpResponse.Operation.NewAddresses)
 	require.Equal(t, operator.RolledBack, lastOpResponse.Operation.Status)
 
 	// Verify that both nodes still exist (rolled back to original state)
@@ -1189,10 +1189,10 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
 
 	// Try auto-healing with only node0 available - this should fail and trigger rollback
-	randomAdd := "random-wefaofwef-address:12345"
+	unreachableAddr := "unreachable-address:12345"
 	autoHealReq := AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
-		NewNodesAddresses: []string{node0Address, randomAdd}, // Only node0 is available now
+		NewNodesAddresses: []string{node0Address, unreachableAddr}, // Only node0 is available now
 	}
 
 	// This should fail and trigger rollback
@@ -1213,7 +1213,7 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	// Check that the last operation was recorded and rolled back
 	lastOpResp, err := http.Get(op.url + "/lastOperation")
 	require.NoError(t, err)
-	defer lastOpResp.Body.Close()
+	defer func() { _ = lastOpResp.Body.Close() }()
 
 	require.Equal(t, http.StatusOK, lastOpResp.StatusCode)
 	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
@@ -1230,7 +1230,7 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	require.Equal(t, uint32(2), lastOpResponse.Operation.OldClusterSize)
 	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize) // Same size for auto-healing
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.OldAddresses)
-	require.Equal(t, []string{node0Address, randomAdd}, lastOpResponse.Operation.NewAddresses)
+	require.Equal(t, []string{node0Address, unreachableAddr}, lastOpResponse.Operation.NewAddresses)
 	require.Equal(t, operator.RolledBack, lastOpResponse.Operation.Status)
 
 	// Verify that node0 still has the original cluster configuration
@@ -1286,7 +1286,7 @@ func TestRollbackFailure(t *testing.T) {
 	// Check that the last operation was recorded with failed status
 	lastOpResp, err := http.Get(op.url + "/lastOperation")
 	require.NoError(t, err)
-	defer lastOpResp.Body.Close()
+	defer func() { _ = lastOpResp.Body.Close() }()
 
 	require.Equal(t, http.StatusOK, lastOpResp.StatusCode)
 	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
