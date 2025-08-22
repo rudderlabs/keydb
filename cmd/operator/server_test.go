@@ -795,120 +795,6 @@ func TestHandleLastOperation(t *testing.T) {
 	require.Equal(t, []string{"node1", "node2", "node3"}, response.Operation.NewAddresses)
 }
 
-func getService(
-	ctx context.Context, t testing.TB, cs filemanager.S3Manager, nodeConfig node.Config, conf *config.Config,
-) (*node.Service, string) {
-	t.Helper()
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-	address := "localhost:" + strconv.Itoa(freePort)
-	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
-
-	log := logger.NOP
-	if testing.Verbose() {
-		lf := logger.NewFactory(conf)
-		require.NoError(t, lf.SetLogLevel("", "DEBUG"))
-		log = lf.NewLogger()
-	}
-	conf.Set("BadgerDB.Dedup.NopLogger", true)
-	service, err := node.NewService(ctx, nodeConfig, cs, conf, stats.NOP, log)
-	require.NoError(t, err)
-
-	// Create a gRPC server
-	server := grpc.NewServer()
-	pb.RegisterNodeServiceServer(server, service)
-
-	lis, err := net.Listen("tcp", address)
-	require.NoError(t, err)
-
-	// Start the server
-	go func() {
-		require.NoError(t, server.Serve(lis))
-	}()
-	t.Cleanup(func() {
-		server.GracefulStop()
-		_ = lis.Close()
-	})
-
-	return service, address
-}
-
-func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...string) *opClient { // nolint:unparam
-	t.Helper()
-
-	c, err := client.NewClient(client.Config{
-		Addresses:       addresses,
-		TotalHashRanges: totalHashRanges,
-	}, logger.NOP)
-	require.NoError(t, err)
-
-	op, err := operator.NewClient(operator.Config{
-		Addresses:       addresses,
-		TotalHashRanges: totalHashRanges,
-		RetryCount:      3,
-		RetryDelay:      time.Second,
-	}, logger.NOP)
-	require.NoError(t, err)
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-
-	addr := fmt.Sprintf(":%d", freePort)
-
-	opServer := newHTTPServer(c, op, addr, logger.NOP)
-	go func() {
-		err := opServer.Start()
-		if !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("Operator server error: %v", err)
-		}
-	}()
-	t.Cleanup(func() {
-		_ = opServer.Stop(context.Background())
-	})
-
-	return &opClient{
-		t:        t,
-		client:   http.DefaultClient,
-		url:      fmt.Sprintf("http://localhost:%d", freePort),
-		operator: op,
-	}
-}
-
-type opClient struct {
-	t        testing.TB
-	client   *http.Client
-	url      string
-	operator *operator.Client
-}
-
-func (c *opClient) Do(endpoint string, data any, success ...bool) string {
-	c.t.Helper()
-
-	buf, err := jsonrs.Marshal(data)
-	require.NoError(c.t, err)
-	req, err := http.NewRequest(http.MethodPost, c.url+endpoint, bytes.NewBuffer(buf))
-	require.NoError(c.t, err)
-
-	resp, err := c.client.Do(req)
-	require.NoError(c.t, err)
-
-	defer func() { httputil.CloseResponse(resp) }()
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(c.t, err)
-
-	if resp.StatusCode != http.StatusOK {
-		c.t.Fatalf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	if len(success) > 0 && success[0] {
-		require.JSONEq(c.t, `{"success":true}`, string(body))
-	}
-
-	return string(body)
-}
-
 func TestScaleUpFailureAndRollback(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
@@ -1305,4 +1191,118 @@ func TestRollbackFailure(t *testing.T) {
 	require.Equal(t, []string{node0Address}, lastOpResponse.Operation.OldAddresses)
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.NewAddresses)
 	require.Equal(t, operator.Failed, lastOpResponse.Operation.Status) // Should be failed, not rolled back
+}
+
+func getService(
+	ctx context.Context, t testing.TB, cs filemanager.S3Manager, nodeConfig node.Config, conf *config.Config,
+) (*node.Service, string) {
+	t.Helper()
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	address := "localhost:" + strconv.Itoa(freePort)
+	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
+
+	log := logger.NOP
+	if testing.Verbose() {
+		lf := logger.NewFactory(conf)
+		require.NoError(t, lf.SetLogLevel("", "DEBUG"))
+		log = lf.NewLogger()
+	}
+	conf.Set("BadgerDB.Dedup.NopLogger", true)
+	service, err := node.NewService(ctx, nodeConfig, cs, conf, stats.NOP, log)
+	require.NoError(t, err)
+
+	// Create a gRPC server
+	server := grpc.NewServer()
+	pb.RegisterNodeServiceServer(server, service)
+
+	lis, err := net.Listen("tcp", address)
+	require.NoError(t, err)
+
+	// Start the server
+	go func() {
+		require.NoError(t, server.Serve(lis))
+	}()
+	t.Cleanup(func() {
+		server.GracefulStop()
+		_ = lis.Close()
+	})
+
+	return service, address
+}
+
+func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...string) *opClient { // nolint:unparam
+	t.Helper()
+
+	c, err := client.NewClient(client.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+	}, logger.NOP)
+	require.NoError(t, err)
+
+	op, err := operator.NewClient(operator.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+		RetryCount:      3,
+		RetryDelay:      time.Second,
+	}, logger.NOP)
+	require.NoError(t, err)
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+
+	addr := fmt.Sprintf(":%d", freePort)
+
+	opServer := newHTTPServer(c, op, addr, logger.NOP)
+	go func() {
+		err := opServer.Start()
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Operator server error: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = opServer.Stop(context.Background())
+	})
+
+	return &opClient{
+		t:        t,
+		client:   http.DefaultClient,
+		url:      fmt.Sprintf("http://localhost:%d", freePort),
+		operator: op,
+	}
+}
+
+type opClient struct {
+	t        testing.TB
+	client   *http.Client
+	url      string
+	operator *operator.Client
+}
+
+func (c *opClient) Do(endpoint string, data any, success ...bool) string {
+	c.t.Helper()
+
+	buf, err := jsonrs.Marshal(data)
+	require.NoError(c.t, err)
+	req, err := http.NewRequest(http.MethodPost, c.url+endpoint, bytes.NewBuffer(buf))
+	require.NoError(c.t, err)
+
+	resp, err := c.client.Do(req)
+	require.NoError(c.t, err)
+
+	defer func() { httputil.CloseResponse(resp) }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(c.t, err)
+
+	if resp.StatusCode != http.StatusOK {
+		c.t.Fatalf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	if len(success) > 0 && success[0] {
+		require.JSONEq(c.t, `{"success":true}`, string(body))
+	}
+
+	return string(body)
 }
