@@ -76,6 +76,7 @@ type RetryPolicy struct {
 	InitialInterval time.Duration `json:"initial_interval"`
 	Multiplier      float64       `json:"multiplier"`
 	MaxInterval     time.Duration `json:"max_interval"`
+	MaxElapsedTime  time.Duration `json:"max_elapsed_time"`
 }
 
 // HashRangeMovementsRequest represents a request to preview hash range movements

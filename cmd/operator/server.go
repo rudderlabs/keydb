@@ -21,6 +21,13 @@ import (
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
+const (
+	defaultRetryPolicyInitialInterval = 3 * time.Second
+	defaultRetryPolicyMultiplier      = 1.5
+	defaultRetryPolicyMaxInterval     = 1 * time.Minute
+	defaultRetryPolicyMaxElapsedTime  = 3 * time.Minute
+)
+
 type operatorClient interface {
 	Scale(ctx context.Context, nodeIDs []uint32) error
 	ScaleComplete(ctx context.Context, nodeIDs []uint32) error
@@ -568,8 +575,17 @@ func (s *httpServer) retryViaPolicy(
 	ctx context.Context, retryPolicy RetryPolicy, fn func() error,
 	errorMessage string, loggerFields ...logger.Field,
 ) error {
+	if retryPolicy.InitialInterval == 0 {
+		retryPolicy.InitialInterval = defaultRetryPolicyInitialInterval
+	}
+	if retryPolicy.Multiplier == 0 {
+		retryPolicy.Multiplier = defaultRetryPolicyMultiplier
+	}
 	if retryPolicy.MaxInterval == 0 {
-		return fn() // retries are disabled
+		retryPolicy.MaxInterval = defaultRetryPolicyMaxInterval
+	}
+	if retryPolicy.MaxElapsedTime == 0 {
+		retryPolicy.MaxElapsedTime = defaultRetryPolicyMaxElapsedTime
 	}
 
 	bo := backoff.NewExponentialBackOff()
@@ -582,6 +598,7 @@ func (s *httpServer) retryViaPolicy(
 
 	_, err := backoff.Retry(ctx, operation,
 		backoff.WithBackOff(bo),
+		backoff.WithMaxElapsedTime(retryPolicy.MaxElapsedTime),
 		backoff.WithNotify(func(err error, duration time.Duration) {
 			s.logger.Warnn(errorMessage, append(loggerFields,
 				logger.NewDurationField("duration", duration),
