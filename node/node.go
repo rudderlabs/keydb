@@ -335,9 +335,14 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 		return fmt.Errorf("failed to list snapshot files: %w", err)
 	}
 
-	selected := make(map[uint32]struct{}, len(selectedHashRanges))
-	for _, r := range selectedHashRanges {
-		selected[r] = struct{}{}
+	var selected map[uint32]struct{}
+	if len(selectedHashRanges) > 0 {
+		selected = make(map[uint32]struct{}, len(selectedHashRanges))
+		for _, r := range selectedHashRanges {
+			selected[r] = struct{}{}
+		}
+	} else { // no hash range was selected, download the data for all the ranges handled by this node
+		selected = currentRanges
 	}
 
 	filesByHashRange := make(map[uint32][]string, len(files))
@@ -369,11 +374,17 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 		if filesByHashRange[hashRange] == nil {
 			filesByHashRange[hashRange] = make([]string, 0, 1)
 		}
+
+		s.logger.Debugn("Found snapshot file",
+			logger.NewIntField("hashRange", int64(hashRange)),
+			logger.NewStringField("filename", file.Key),
+		)
 		filesByHashRange[hashRange] = append(filesByHashRange[hashRange], file.Key)
 	}
 
 	if !download {
 		// We still had to do the above in order to populate the "since" map
+		s.logger.Infon("Downloading disabled, skipping snapshot initialization")
 		return nil
 	}
 
@@ -386,7 +397,7 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 		buffers     = make([]io.Reader, 0, len(filesByHashRange))
 		buffersMu   sync.Mutex
 	)
-	for r := range currentRanges {
+	for r := range filesByHashRange {
 		snapshotFiles := filesByHashRange[r]
 		if len(snapshotFiles) == 0 {
 			s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", int64(r)))
@@ -736,14 +747,24 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 	)
 	if fullSync {
 		since = make(map[uint32]uint64, len(currentRanges))
+		i := 0
 		for r := range currentRanges {
+			if i != 0 {
+				sinceLog.WriteString(",")
+			}
 			since[r] = 0
-			sinceLog.WriteString(fmt.Sprintf("%d:%d,", r, 0))
+			sinceLog.WriteString(fmt.Sprintf("%d:%d", r, 0))
+			i++
 		}
 	} else {
+		i := 0
 		since = s.since
 		for hr, ss := range since {
-			sinceLog.WriteString(fmt.Sprintf("%d:%d,", hr, ss))
+			if i != 0 {
+				sinceLog.WriteString(",")
+			}
+			sinceLog.WriteString(fmt.Sprintf("%d:%d", hr, ss))
+			i++
 		}
 	}
 
