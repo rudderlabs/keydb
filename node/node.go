@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -70,6 +71,9 @@ type Config struct {
 
 	// logTableStructureDuration defines the duration for which the table structure is logged
 	LogTableStructureDuration time.Duration
+
+	// backupFolderName is the name of the folder in the S3 bucket where snapshots are stored
+	BackupFolderName string
 }
 
 // Service implements the NodeService gRPC service
@@ -329,7 +333,7 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 	}
 
 	// List all files in the bucket
-	list := s.storage.ListFilesWithPrefix(ctx, "", getSnapshotFilenamePrefix(), s.maxFilesToList)
+	list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
 	files, err := list.Next()
 	if err != nil {
 		return fmt.Errorf("failed to list snapshot files: %w", err)
@@ -786,7 +790,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 	if fullSync {
 		log.Infon("Getting list of existing snapshot files")
 
-		list := s.storage.ListFilesWithPrefix(ctx, "", getSnapshotFilenamePrefix(), s.maxFilesToList)
+		list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
 		files, err := list.Next()
 		if err != nil {
 			return fmt.Errorf("failed to list snapshot files: %w", err)
@@ -809,7 +813,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 				continue
 			}
 			// If we're going to overwrite the file, we don't need to delete it.
-			newFilename := getSnapshotFilenamePrefix() +
+			newFilename := s.getSnapshotFilenamePrefix() +
 				getSnapshotFilenamePostfix(hashRange, since[hashRange], newSince)
 			if newFilename != file.Key {
 				filesToBeDeletedByHashRange[hashRange] = append(filesToBeDeletedByHashRange[hashRange], file.Key)
@@ -829,7 +833,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			continue // no data to upload
 		}
 
-		filename := getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, since[hashRange], newSince)
+		filename := s.getSnapshotFilenamePrefix() + getSnapshotFilenamePostfix(hashRange, since[hashRange], newSince)
 		log.Infon("Uploading snapshot file",
 			logger.NewIntField("from", int64(since[hashRange])),
 			logger.NewIntField("to", int64(newSince)),
@@ -873,8 +877,8 @@ func (s *Service) GetKeysByHashRangeWithIndexes(keys []string) (map[uint32][]str
 	return hash.GetKeysByHashRangeWithIndexes(keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
 }
 
-func getSnapshotFilenamePrefix() string {
-	return "hr_"
+func (s *Service) getSnapshotFilenamePrefix() string {
+	return path.Join(s.config.BackupFolderName, "hr_")
 }
 
 func getSnapshotFilenamePostfix(hashRange uint32, from, to uint64) string {
