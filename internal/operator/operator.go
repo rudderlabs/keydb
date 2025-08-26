@@ -415,7 +415,7 @@ func (c *Client) ScaleComplete(ctx context.Context, nodeIDs []uint32) error {
 					return fmt.Errorf("failed to complete scale operation on node %d: %w", nodeID, err)
 				}
 
-				logErr := errors.New("response unsuccessful")
+				logErr := errors.New("unsuccessful response from nodes")
 				if err != nil {
 					logErr = err
 				}
