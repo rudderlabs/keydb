@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1-alpha](https://github.com/rudderlabs/keydb/compare/v0.3.0-alpha...v0.3.1-alpha) (2025-08-26)
+
+
+### Miscellaneous
+
+* retry policy ([#29](https://github.com/rudderlabs/keydb/issues/29)) ([0553cc1](https://github.com/rudderlabs/keydb/commit/0553cc1159c3da63bbfe78dac58712ce74044da4))
+* skipCreateSnapshots and disable retry policy ([#32](https://github.com/rudderlabs/keydb/issues/32)) ([d3db4d5](https://github.com/rudderlabs/keydb/commit/d3db4d5db464a6ee9ba40f357cde646c00fc4700))
+
 ## [0.3.0-alpha](https://github.com/rudderlabs/keydb/compare/v0.2.1-alpha...v0.3.0-alpha) (2025-08-21)
 
 
