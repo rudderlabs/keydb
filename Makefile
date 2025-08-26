@@ -82,8 +82,8 @@ build-scaler:
 		echo "Error: DOCKER_USER variable is empty"; \
 		exit 1; \
 	fi
-	docker build -t $(DOCKER_USER)/keydb-scaler:latest -f Dockerfile-scaler .
-	docker push $(DOCKER_USER)/keydb-scaler:latest
+	docker build -t $(DOCKER_USER)/rudder-keydb-scaler:latest -f Dockerfile-scaler .
+	docker push $(DOCKER_USER)/rudder-keydb-scaler:latest
 
 run:
 	@if [ -z "$(DOCKER_USER)" ]; then \
@@ -95,14 +95,18 @@ run:
 		-e KEYDB_BADGERDB_DEDUP_COMPRESS=true \
 		$(DOCKER_USER)/keydb:latest
 
-deploy:
+deploy-scaler:
 	@if [ -z "$(NAMESPACE)" ]; then \
 		echo "Error: NAMESPACE variable is empty"; \
 		exit 1; \
 	fi
+	@if [ -z "$(DOCKER_USER)" ]; then \
+		echo "Error: DOCKER_USER variable is empty"; \
+		exit 1; \
+	fi
 	helm upgrade --install keydb-scaler ./helm/keydb-scaler \
 		--namespace $(NAMESPACE) \
-		--set image.repository=rudderstack/rudder-keydb-scaler
+		--set image.repository=$(DOCKER_USER)/rudder-keydb-scaler
 
 .PHONY: lint
 lint: fmt vulncheck ## Run linters on all go files
