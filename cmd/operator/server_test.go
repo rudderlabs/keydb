@@ -342,7 +342,6 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	require.NoError(t, err)
 	proxy := &tcpproxy.Proxy{
 		LocalAddr: "localhost:" + strconv.Itoa(proxyPort),
-		Verbose:   testing.Verbose(),
 	}
 
 	// Create the node service
@@ -473,6 +472,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	cancel()
 	node0.Close()
 	node1.Close()
+	proxy.Stop()
 }
 
 func TestAutoScaleTransientError(t *testing.T) {
