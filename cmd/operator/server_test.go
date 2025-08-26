@@ -238,6 +238,9 @@ func TestAutoScale(t *testing.T) {
 	_ = op.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, node1Address},
+		RetryPolicy: RetryPolicy{
+			Disabled: true,
+		},
 	}, true)
 
 	// Verify scale up worked - check node info
@@ -283,6 +286,9 @@ func TestAutoScale(t *testing.T) {
 	_ = op.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
+		RetryPolicy: RetryPolicy{
+			Disabled: true,
+		},
 	}, true)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
@@ -385,6 +391,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 			OldNodesAddresses: []string{node0Address},
 			NewNodesAddresses: []string{node0Address, node1Address},
 			RetryPolicy: RetryPolicy{
+				Disabled:        true,
 				InitialInterval: time.Second,
 				Multiplier:      1,
 				MaxInterval:     3 * time.Second,
@@ -441,6 +448,9 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	_ = op.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
+		RetryPolicy: RetryPolicy{
+			Disabled: true,
+		},
 	}, true)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
@@ -532,6 +542,9 @@ func TestAutoScaleTransientError(t *testing.T) {
 		_ = op.Do("/autoScale", AutoScaleRequest{
 			OldNodesAddresses: []string{node0.address, node1.address},
 			NewNodesAddresses: []string{node0.address},
+			RetryPolicy: RetryPolicy{
+				Disabled: true,
+			},
 		}, true)
 	}()
 	<-done
@@ -669,6 +682,9 @@ func TestAutoHealing(t *testing.T) {
 	_ = op.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address},
+		RetryPolicy: RetryPolicy{
+			Disabled: true,
+		},
 	}, true)
 
 	// Verify auto-healing worked - check node info
@@ -1072,6 +1088,9 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, "random-no1-address:12345"}, // Simulating a non-running node
 		FullSync:          false,
+		RetryPolicy: RetryPolicy{
+			Disabled: true,
+		},
 	}
 
 	// This should fail and trigger rollback
@@ -1189,6 +1208,9 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{unreachableAddr}, // Simulating a non-running node
 		FullSync:          false,
+		RetryPolicy: RetryPolicy{
+			Disabled: true,
+		},
 	}
 
 	// This should fail and trigger rollback
@@ -1307,6 +1329,9 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	autoHealReq := AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address, unreachableAddr}, // Only node0 is available now
+		RetryPolicy: RetryPolicy{
+			Disabled: true,
+		},
 	}
 
 	// This should fail and trigger rollback
@@ -1380,6 +1405,9 @@ func TestRollbackFailure(t *testing.T) {
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, node1Address},
 		FullSync:          false,
+		RetryPolicy: RetryPolicy{
+			Disabled: true,
+		},
 	}
 
 	// This should fail and rollback should also fail

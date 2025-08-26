@@ -408,6 +408,17 @@ func (c *Client) ScaleComplete(ctx context.Context, nodeIDs []uint32) error {
 					return fmt.Errorf("failed to complete scale operation on node %d: %w", nodeID, err)
 				}
 
+				logErr := errors.New("response unsuccessful")
+				if err != nil {
+					logErr = err
+				}
+
+				c.logger.Warnn("Cannot complete scale operation",
+					logger.NewIntField("nodeID", int64(nodeID)),
+					logger.NewDurationField("retryDelay", c.config.RetryDelay),
+					obskit.Error(logErr),
+				)
+
 				// Wait before retrying
 				select {
 				case <-ctx.Done():

@@ -68,11 +68,13 @@ type AutoScaleRequest struct {
 	NewNodesAddresses []string `json:"new_nodes_addresses"`
 	// FullSync indicates whether to perform a full synchronization during snapshot creation.
 	// When true, all data will be included in snapshots regardless of incremental changes.
-	FullSync    bool        `json:"full_sync,omitempty"`
-	RetryPolicy RetryPolicy `json:"retry_policy,omitempty"`
+	FullSync            bool        `json:"full_sync,omitempty"`
+	RetryPolicy         RetryPolicy `json:"retry_policy,omitempty"`
+	SkipCreateSnapshots bool        `json:"skip_create_snapshots,omitempty"`
 }
 
 type RetryPolicy struct {
+	Disabled        bool          `json:"disabled"`
 	InitialInterval time.Duration `json:"initial_interval"`
 	Multiplier      float64       `json:"multiplier"`
 	MaxInterval     time.Duration `json:"max_interval"`
