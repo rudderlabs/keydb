@@ -25,7 +25,8 @@ import (
 )
 
 const (
-	testTTL = 5 * time.Minute
+	testTTL                 = 5 * time.Minute
+	defaultBackupFolderName = "default"
 )
 
 func TestSimple(t *testing.T) {
@@ -67,10 +68,10 @@ func TestSimple(t *testing.T) {
 		require.NoError(t, err)
 
 		// we expect one hash range to be empty so the file won't be uploaded
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
 		)
 
 		cancel()
@@ -153,10 +154,10 @@ func TestScaleUpAndDown(t *testing.T) {
 		op := getScaler(t, totalHashRanges, node0Address)
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 		)
 
 		node1Conf := newConf()
@@ -257,10 +258,10 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		op := getScaler(t, totalHashRanges, node0Address)
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-			regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 		)
 
 		// Using a different path for the new node1 to avoid a conflict with node0
@@ -382,10 +383,10 @@ func TestIncrementalSnapshots(t *testing.T) {
 
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 		// we expect one hash range to be empty so the file won't be uploaded
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
 		)
 
 		require.NoError(t, c.Put(ctx, []string{"key5"}, testTTL))
@@ -394,11 +395,11 @@ func TestIncrementalSnapshots(t *testing.T) {
 		require.Equal(t, []bool{true, true, true, false, true}, exists)
 
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_3_s_([1-9])+_2.snapshot$"),
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_([1-9])+_2.snapshot$"),
 		)
 
 		cancel()
@@ -426,10 +427,10 @@ func TestIncrementalSnapshots(t *testing.T) {
 		// All files should be removed but the new ones.
 		// Being "full syncs" they start from the beginning (i.e. 0) up to the latest recorded (i.e. 2).
 		require.NoError(t, op.CreateSnapshots(ctx, 0, true))
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-			regexp.MustCompile("^hr_1_s_0_2.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0_2.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0_2.snapshot$"),
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_1_s_0_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_0_2.snapshot$"),
 		)
 
 		cancel()
@@ -493,16 +494,16 @@ func TestSelectedSnapshots(t *testing.T) {
 		// Create only the snapshots for the hash ranges 0 and 1.
 		// We expect one hash range to be empty so the file won't be uploaded.
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false, 0, 1))
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
 		)
 
 		// Now create the snapshot for the remaining hash ranges
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false, 2, 3))
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
 		)
 
 		// Now try to create a snapshot for a hash range that is not handled by the node
@@ -561,6 +562,7 @@ func getService(
 	require.NoError(t, err)
 	address := "localhost:" + strconv.Itoa(freePort)
 	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
+	nodeConfig.BackupFolderName = defaultBackupFolderName
 
 	log := logger.NOP
 	if testing.Verbose() {

@@ -15,11 +15,11 @@ import (
 )
 
 func RequireExpectedFiles(
-	ctx context.Context, t testing.TB, minio *miniokit.Resource, expectedFiles ...*regexp.Regexp,
+	ctx context.Context, t testing.TB, minio *miniokit.Resource, folder string, expectedFiles ...*regexp.Regexp,
 ) {
 	t.Helper()
 
-	files, err := minio.Contents(ctx, "hr_")
+	files, err := minio.Contents(ctx, folder+"/hr_")
 	require.NoError(t, err)
 	require.Len(t, files, len(expectedFiles))
 
