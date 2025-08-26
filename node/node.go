@@ -788,13 +788,13 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 
 	filesToBeDeletedByHashRange := make(map[uint32][]string)
 	if fullSync {
-		log.Infon("Getting list of existing snapshot files")
-
 		list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
 		files, err := list.Next()
 		if err != nil {
 			return fmt.Errorf("failed to list snapshot files: %w", err)
 		}
+
+		log.Infon("Got list of existing snapshot files", logger.NewIntField("numFiles", int64(len(files))))
 
 		for _, file := range files {
 			matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
@@ -848,18 +848,28 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 
 		s.since[hashRange] = newSince
 
-		if fullSync && len(filesToBeDeletedByHashRange[hashRange]) > 0 {
-			// Clearing up old files that are incremental updates.
-			// Since we've done a "full sync" they are not needed anymore and shouldn't be loaded next time.
-			filesToBeDeleted := filesToBeDeletedByHashRange[hashRange]
-			filesToBeDeletedLogField := logger.NewStringField("filenames", strings.Join(filesToBeDeleted, ","))
+		if fullSync {
+			if len(filesToBeDeletedByHashRange[hashRange]) > 0 {
+				// Clearing up old files that are incremental updates.
+				// Since we've done a "full sync" they are not needed anymore and shouldn't be loaded next time.
+				filesToBeDeleted := filesToBeDeletedByHashRange[hashRange]
+				filesToBeDeletedLogField := logger.NewStringField("filenames", strings.Join(filesToBeDeleted, ","))
 
-			log.Infon("Deleting old snapshot files", filesToBeDeletedLogField)
+				log.Infon("Deleting old snapshot files",
+					filesToBeDeletedLogField, logger.NewIntField("hashRange", int64(hashRange)),
+				)
 
-			err = s.storage.Delete(ctx, filesToBeDeleted)
-			if err != nil {
-				log.Errorn("Failed to delete old snapshot files", filesToBeDeletedLogField, obskit.Error(err))
-				return fmt.Errorf("failed to delete old snapshot files: %w", err)
+				err = s.storage.Delete(ctx, filesToBeDeleted)
+				if err != nil {
+					log.Errorn("Failed to delete old snapshot files",
+						filesToBeDeletedLogField, logger.NewIntField("hashRange", int64(hashRange)), obskit.Error(err),
+					)
+					return fmt.Errorf("failed to delete old snapshot files: %w", err)
+				}
+			} else {
+				log.Infon("No old snapshots files to be deleted",
+					logger.NewIntField("hashRange", int64(hashRange)),
+				)
 			}
 		}
 	}
