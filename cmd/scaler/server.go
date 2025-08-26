@@ -669,6 +669,13 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	log := s.logger.Withn(
+		logger.NewIntField("oldClusterSize", int64(req.OldClusterSize)),
+		logger.NewIntField("newClusterSize", int64(req.NewClusterSize)),
+		logger.NewIntField("totalHashRanges", int64(req.TotalHashRanges)),
+	)
+	log.Infon("Received hash range movements request")
+
 	// Get hash range movements
 	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
 		req.OldClusterSize, req.NewClusterSize, req.TotalHashRanges,
@@ -702,11 +709,16 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 			if sourceNodeID < req.OldClusterSize {
 				// Call CreateSnapshots once per node with all hash ranges
 				group.Go(func() error {
-					err := s.scaler.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRanges...)
-					if err != nil {
-						return fmt.Errorf("creating snapshots for node %d: %w", sourceNodeID, err)
-					}
-					return nil
+					return s.retryViaPolicy(gCtx, req.RetryPolicy, func() error {
+						err := s.scaler.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRanges...)
+						if err != nil {
+							return fmt.Errorf("creating snapshots for node %d: %w", sourceNodeID, err)
+						}
+						log.Infon("Node snapshots created", logger.NewIntField("nodeId", int64(sourceNodeID)))
+						return nil
+					}, "Cannot create snapshots",
+						logger.NewIntField("nodeId", int64(sourceNodeID)),
+					)
 				})
 			}
 		}
@@ -714,6 +726,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		log.Infon("All snapshots created")
 	}
 
 	if req.Download {
@@ -721,17 +734,23 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		group, gCtx := errgroup.WithContext(ctx)
 		for destinationNodeID, hashRanges := range destinationNodeMovements {
 			group.Go(func() error {
-				err := s.scaler.LoadSnapshots(gCtx, destinationNodeID, hashRanges...)
-				if err != nil {
-					return fmt.Errorf("loading snapshots for node %d: %w", destinationNodeID, err)
-				}
-				return nil
+				return s.retryViaPolicy(gCtx, req.RetryPolicy, func() error {
+					err := s.scaler.LoadSnapshots(gCtx, destinationNodeID, hashRanges...)
+					if err != nil {
+						return fmt.Errorf("loading snapshots for node %d: %w", destinationNodeID, err)
+					}
+					log.Infon("Node snapshots loaded", logger.NewIntField("nodeId", int64(destinationNodeID)))
+					return nil
+				}, "Cannot load snapshots",
+					logger.NewIntField("nodeId", int64(destinationNodeID)),
+				)
 			})
 		}
 		if err := group.Wait(); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		log.Infon("All snapshots loaded")
 	}
 
 	// Write response
