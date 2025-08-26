@@ -673,6 +673,9 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		logger.NewIntField("oldClusterSize", int64(req.OldClusterSize)),
 		logger.NewIntField("newClusterSize", int64(req.NewClusterSize)),
 		logger.NewIntField("totalHashRanges", int64(req.TotalHashRanges)),
+		logger.NewBoolField("upload", req.Upload),
+		logger.NewBoolField("download", req.Download),
+		logger.NewBoolField("fullSync", req.FullSync),
 	)
 	log.Infon("Received hash range movements request")
 
