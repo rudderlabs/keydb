@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"golang.org/x/sync/errgroup"
@@ -16,6 +18,14 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+)
+
+const (
+	defaultRetryPolicyInitialInterval = 3 * time.Second
+	defaultRetryPolicyMultiplier      = 1.5
+	defaultRetryPolicyMaxInterval     = 1 * time.Minute
+	defaultRetryPolicyMaxElapsedTime  = 3 * time.Minute
 )
 
 type operatorClient interface {
@@ -35,6 +45,7 @@ type httpServer struct {
 	client   *client.Client
 	operator operatorClient
 	server   *http.Server
+	logger   logger.Logger
 }
 
 // newHTTPServer creates a new HTTP server
@@ -42,6 +53,7 @@ func newHTTPServer(client *client.Client, operator *operator.Client, addr string
 	s := &httpServer{
 		client:   client,
 		operator: operator,
+		logger:   log,
 	}
 
 	mux := chi.NewRouter()
@@ -326,12 +338,14 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 	if newClusterSize > oldClusterSize {
-		err = s.handleScaleUp(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync)
+		err = s.handleScaleUp(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync, req.RetryPolicy)
 	} else if newClusterSize < oldClusterSize {
-		err = s.handleScaleDown(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync)
+		err = s.handleScaleDown(
+			r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.FullSync, req.RetryPolicy,
+		)
 	} else {
 		// Auto-healing: propagate cluster addresses to all nodes for consistency
-		err = s.handleAutoHealing(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses)
+		err = s.handleAutoHealing(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses, req.RetryPolicy)
 	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error during auto scale operation: %v", err), http.StatusInternalServerError)
@@ -345,14 +359,24 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleScaleUp implements the scale up logic based on TestScaleUpAndDown
-func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddresses []string, fullSync bool) error {
+func (s *httpServer) handleScaleUp(
+	ctx context.Context, oldAddresses, newAddresses []string, fullSync bool, retryPolicy RetryPolicy,
+) error {
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
 	return s.operator.ExecuteScalingWithRollback(operator.ScaleUp, oldAddresses, newAddresses, func() error {
 		// Step 1: Update cluster data with new addresses
-		if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
-			return fmt.Errorf("updating cluster data: %w", err)
+		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
+			if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+				return fmt.Errorf("updating cluster data: %w", err)
+			}
+			return nil
+		}, "Cannot update cluster data",
+			logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
+		)
+		if err != nil {
+			return err
 		}
 
 		// Step 2: Determine which hash ranges need to be moved and get ready-to-use maps
@@ -367,16 +391,21 @@ func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddress
 				continue
 			}
 			group.Go(func() error {
-				if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
-					return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
-						sourceNodeID, hashRanges, err,
-					)
-				}
-				return nil
+				return s.retryViaPolicy(gCtx, retryPolicy, func() error {
+					err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...)
+					if err != nil {
+						return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+							sourceNodeID, hashRanges, err,
+						)
+					}
+					return nil
+				}, "Cannot create snapshots",
+					logger.NewIntField("nodeId", int64(sourceNodeID)),
+				)
 			})
 		}
 		if err := group.Wait(); err != nil {
-			return fmt.Errorf("waiting for snapshot creation: %w", err)
+			return err
 		}
 
 		// Step 4: Load snapshots to destination nodes
@@ -386,12 +415,16 @@ func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddress
 				continue
 			}
 			group.Go(func() error {
-				if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
-					return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
-						nodeID, hashRanges, err,
-					)
-				}
-				return nil
+				return s.retryViaPolicy(gCtx, retryPolicy, func() error {
+					if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+						return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
+							nodeID, hashRanges, err,
+						)
+					}
+					return nil
+				}, "Cannot load snapshots",
+					logger.NewIntField("nodeId", int64(nodeID)),
+				)
 			})
 		}
 		if err := group.Wait(); err != nil {
@@ -399,12 +432,14 @@ func (s *httpServer) handleScaleUp(ctx context.Context, oldAddresses, newAddress
 		}
 
 		// Step 5: Scale all nodes
-		return s.completeScaleOperation(ctx, newClusterSize)
+		return s.completeScaleOperation(ctx, newClusterSize, retryPolicy)
 	})
 }
 
 // handleScaleDown implements the scale down logic based on TestScaleUpAndDown
-func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddresses []string, fullSync bool) error {
+func (s *httpServer) handleScaleDown(
+	ctx context.Context, oldAddresses, newAddresses []string, fullSync bool, retryPolicy RetryPolicy,
+) error {
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
@@ -420,12 +455,16 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 				continue
 			}
 			group.Go(func() error {
-				if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
-					return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
-						sourceNodeID, hashRanges, err,
-					)
-				}
-				return nil
+				return s.retryViaPolicy(gCtx, retryPolicy, func() error {
+					if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+						return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
+							sourceNodeID, hashRanges, err,
+						)
+					}
+					return nil
+				}, "Cannot create snapshots",
+					logger.NewIntField("nodeId", int64(sourceNodeID)),
+				)
 			})
 		}
 		if err := group.Wait(); err != nil {
@@ -439,12 +478,16 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 				continue
 			}
 			group.Go(func() error {
-				if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
-					return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
-						nodeID, hashRanges, err,
-					)
-				}
-				return nil
+				return s.retryViaPolicy(gCtx, retryPolicy, func() error {
+					if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+						return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
+							nodeID, hashRanges, err,
+						)
+					}
+					return nil
+				}, "Cannot load snapshots",
+					logger.NewIntField("nodeId", int64(nodeID)),
+				)
 			})
 		}
 		if err := group.Wait(); err != nil {
@@ -452,45 +495,118 @@ func (s *httpServer) handleScaleDown(ctx context.Context, oldAddresses, newAddre
 		}
 
 		// Step 3: Update cluster data with new addresses
-		if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
-			return fmt.Errorf("updating cluster data: %w", err)
+		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
+			if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+				return fmt.Errorf("updating cluster data: %w", err)
+			}
+			return nil
+		}, "Cannot update cluster data",
+			logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
+		)
+		if err != nil {
+			return err
 		}
 
 		// Step 4: Scale remaining nodes
-		return s.completeScaleOperation(ctx, newClusterSize)
+		return s.completeScaleOperation(ctx, newClusterSize, retryPolicy)
 	})
 }
 
 // handleAutoHealing implements auto-healing by propagating cluster addresses to all nodes
 // This ensures all nodes have consistent cluster topology information
-func (s *httpServer) handleAutoHealing(ctx context.Context, oldAddresses, newAddresses []string) error {
+func (s *httpServer) handleAutoHealing(
+	ctx context.Context, oldAddresses, newAddresses []string, retryPolicy RetryPolicy,
+) error {
 	clusterSize := uint32(len(newAddresses))
 
 	return s.operator.ExecuteScalingWithRollback(operator.AutoHealing, oldAddresses, newAddresses, func() error {
 		// Step 1: Update cluster data with current addresses to ensure consistency
-		if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
-			return fmt.Errorf("updating cluster data for auto-healing: %w", err)
+		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
+			if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+				return fmt.Errorf("updating cluster data for auto-healing: %w", err)
+			}
+			return nil
+		}, "Cannot update cluster data",
+			logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
+		)
+		if err != nil {
+			return err
 		}
 
 		// Step 2: Scale all nodes to refresh their cluster information
-		return s.completeScaleOperation(ctx, clusterSize)
+		return s.completeScaleOperation(ctx, clusterSize, retryPolicy)
 	})
 }
 
-func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uint32) error {
+func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uint32, rp RetryPolicy) error {
 	nodeIDs := make([]uint32, clusterSize)
 	for i := uint32(0); i < clusterSize; i++ {
 		nodeIDs[i] = i
 	}
-	if err := s.operator.Scale(ctx, nodeIDs); err != nil {
-		return fmt.Errorf("scaling nodes: %w", err)
+
+	err := s.retryViaPolicy(ctx, rp, func() error {
+		if err := s.operator.Scale(ctx, nodeIDs); err != nil {
+			return fmt.Errorf("scaling nodes: %w", err)
+		}
+		return nil
+	}, "Cannot scale",
+		logger.NewIntSliceField("nodeIds", nodeIDs),
+	)
+	if err != nil {
+		return err
 	}
 
-	if err := s.operator.ScaleComplete(ctx, nodeIDs); err != nil {
-		return fmt.Errorf("completing scale operation: %w", err)
+	err = s.retryViaPolicy(ctx, rp, func() error {
+		if err := s.operator.ScaleComplete(ctx, nodeIDs); err != nil {
+			return fmt.Errorf("completing scale operation: %w", err)
+		}
+		return nil
+	}, "Cannot complete scale operation",
+		logger.NewIntSliceField("nodeIds", nodeIDs),
+	)
+	if err != nil {
+		return err
 	}
 
 	return nil
+}
+
+func (s *httpServer) retryViaPolicy(
+	ctx context.Context, retryPolicy RetryPolicy, fn func() error,
+	errorMessage string, loggerFields ...logger.Field,
+) error {
+	if retryPolicy.InitialInterval == 0 {
+		retryPolicy.InitialInterval = defaultRetryPolicyInitialInterval
+	}
+	if retryPolicy.Multiplier == 0 {
+		retryPolicy.Multiplier = defaultRetryPolicyMultiplier
+	}
+	if retryPolicy.MaxInterval == 0 {
+		retryPolicy.MaxInterval = defaultRetryPolicyMaxInterval
+	}
+	if retryPolicy.MaxElapsedTime == 0 {
+		retryPolicy.MaxElapsedTime = defaultRetryPolicyMaxElapsedTime
+	}
+
+	bo := backoff.NewExponentialBackOff()
+	bo.Multiplier = retryPolicy.Multiplier
+	bo.InitialInterval = retryPolicy.InitialInterval
+	bo.MaxInterval = retryPolicy.MaxInterval
+	operation := func() (string, error) {
+		return "", fn()
+	}
+
+	_, err := backoff.Retry(ctx, operation,
+		backoff.WithBackOff(bo),
+		backoff.WithMaxElapsedTime(retryPolicy.MaxElapsedTime),
+		backoff.WithNotify(func(err error, duration time.Duration) {
+			s.logger.Warnn(errorMessage, append(loggerFields,
+				logger.NewDurationField("duration", duration),
+				obskit.Error(err),
+			)...)
+		}),
+	)
+	return err
 }
 
 // handleHashRangeMovements handles POST /hashRangeMovements requests

@@ -1,6 +1,10 @@
 package main
 
-import "github.com/rudderlabs/keydb/internal/operator"
+import (
+	"time"
+
+	"github.com/rudderlabs/keydb/internal/operator"
+)
 
 // GetRequest represents a request to get keys
 type GetRequest struct {
@@ -64,7 +68,15 @@ type AutoScaleRequest struct {
 	NewNodesAddresses []string `json:"new_nodes_addresses"`
 	// FullSync indicates whether to perform a full synchronization during snapshot creation.
 	// When true, all data will be included in snapshots regardless of incremental changes.
-	FullSync bool `json:"full_sync,omitempty"`
+	FullSync    bool        `json:"full_sync,omitempty"`
+	RetryPolicy RetryPolicy `json:"retry_policy,omitempty"`
+}
+
+type RetryPolicy struct {
+	InitialInterval time.Duration `json:"initial_interval"`
+	Multiplier      float64       `json:"multiplier"`
+	MaxInterval     time.Duration `json:"max_interval"`
+	MaxElapsedTime  time.Duration `json:"max_elapsed_time"`
 }
 
 // HashRangeMovementsRequest represents a request to preview hash range movements
