@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0-alpha](https://github.com/rudderlabs/keydb/compare/v0.3.1-alpha...v0.4.0-alpha) (2025-08-26)
+
+
+### Features
+
+* **node:** add configurable backup folder name and refactor snapshot file path ([#33](https://github.com/rudderlabs/keydb/issues/33)) ([d79c882](https://github.com/rudderlabs/keydb/commit/d79c8829babcf62b714d3181b031810b59976f23))
+
 ## [0.3.1-alpha](https://github.com/rudderlabs/keydb/compare/v0.3.0-alpha...v0.3.1-alpha) (2025-08-26)
 
 
