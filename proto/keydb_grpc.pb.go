@@ -46,7 +46,7 @@ type NodeServiceClient interface {
 	CreateSnapshots(ctx context.Context, in *CreateSnapshotsRequest, opts ...grpc.CallOption) (*CreateSnapshotsResponse, error)
 	// Scale changes the number of nodes in the cluster
 	Scale(ctx context.Context, in *ScaleRequest, opts ...grpc.CallOption) (*ScaleResponse, error)
-	// ScaleComplete is used by the operator to notify all nodes that the scale is complete and they can now start serving traffic again
+	// ScaleComplete is used by the scaler to notify all nodes that the scale is complete and they can now start serving traffic again
 	ScaleComplete(ctx context.Context, in *ScaleCompleteRequest, opts ...grpc.CallOption) (*ScaleCompleteResponse, error)
 }
 
@@ -146,7 +146,7 @@ type NodeServiceServer interface {
 	CreateSnapshots(context.Context, *CreateSnapshotsRequest) (*CreateSnapshotsResponse, error)
 	// Scale changes the number of nodes in the cluster
 	Scale(context.Context, *ScaleRequest) (*ScaleResponse, error)
-	// ScaleComplete is used by the operator to notify all nodes that the scale is complete and they can now start serving traffic again
+	// ScaleComplete is used by the scaler to notify all nodes that the scale is complete and they can now start serving traffic again
 	ScaleComplete(context.Context, *ScaleCompleteRequest) (*ScaleCompleteResponse, error)
 	mustEmbedUnimplementedNodeServiceServer()
 }

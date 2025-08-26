@@ -1,4 +1,4 @@
-package operator
+package scaler
 
 import (
 	"context"
@@ -17,12 +17,12 @@ import (
 
 func TestExecuteScalingWithRollback_Success(t *testing.T) {
 	// Setup
-	operatorClient := &Client{
+	scalerClient := &Client{
 		logger: logger.NOP,
 	}
 
 	// Test successful operation
-	err := operatorClient.ExecuteScalingWithRollback(ScaleUp,
+	err := scalerClient.ExecuteScalingWithRollback(ScaleUp,
 		[]string{"node1", "node2"},
 		[]string{"node1", "node2", "node3"},
 		func() error {
@@ -32,7 +32,7 @@ func TestExecuteScalingWithRollback_Success(t *testing.T) {
 
 	// Assertions
 	require.NoError(t, err)
-	lastOp := operatorClient.GetLastOperation()
+	lastOp := scalerClient.GetLastOperation()
 	require.NotNil(t, lastOp)
 	require.Equal(t, ScaleUp, lastOp.Type)
 	require.Equal(t, Completed, lastOp.Status)
@@ -131,16 +131,16 @@ func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
 }
 
 func TestRecordAndGetOperation(t *testing.T) {
-	operatorClient := &Client{
+	scalerClient := &Client{
 		logger: logger.NOP,
 	}
 
 	// Record an operation
-	operatorClient.RecordOperation(ScaleDown, 4, 2,
+	scalerClient.RecordOperation(ScaleDown, 4, 2,
 		[]string{"node1", "node2", "node3", "node4"}, []string{"node1", "node2"})
 
 	// Retrieve and verify
-	lastOp := operatorClient.GetLastOperation()
+	lastOp := scalerClient.GetLastOperation()
 	require.NotNil(t, lastOp)
 	require.Equal(t, ScaleDown, lastOp.Type)
 	require.Equal(t, uint32(4), lastOp.OldClusterSize)
@@ -151,19 +151,19 @@ func TestRecordAndGetOperation(t *testing.T) {
 }
 
 func TestUpdateOperationStatus(t *testing.T) {
-	operatorClient := &Client{
+	scalerClient := &Client{
 		logger: logger.NOP,
 	}
 
 	// Record an operation
-	operatorClient.RecordOperation(AutoHealing, 3, 3,
+	scalerClient.RecordOperation(AutoHealing, 3, 3,
 		[]string{"node1", "node2", "node3"}, []string{"node1", "node2", "node3"})
 
 	// Update status
-	operatorClient.UpdateOperationStatus(Failed)
+	scalerClient.UpdateOperationStatus(Failed)
 
 	// Verify
-	lastOp := operatorClient.GetLastOperation()
+	lastOp := scalerClient.GetLastOperation()
 	require.Equal(t, Failed, lastOp.Status)
 }
 
@@ -208,13 +208,13 @@ func TestOperationRecordingTable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			operatorClient := &Client{
+			scalerClient := &Client{
 				logger: logger.NOP,
 			}
 
-			operatorClient.RecordOperation(tt.opType, tt.oldClusterSize, tt.newClusterSize,
+			scalerClient.RecordOperation(tt.opType, tt.oldClusterSize, tt.newClusterSize,
 				tt.oldAddresses, tt.newAddresses)
-			lastOp := operatorClient.GetLastOperation()
+			lastOp := scalerClient.GetLastOperation()
 
 			require.Equal(t, tt.expectedType, lastOp.Type)
 			require.Equal(t, tt.oldClusterSize, lastOp.OldClusterSize)

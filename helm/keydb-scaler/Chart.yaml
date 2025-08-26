@@ -1,6 +1,6 @@
 apiVersion: v2
-name: keydb-operator
-description: A Helm chart for KeyDB Operator
+name: keydb-scaler
+description: A Helm chart for KeyDB Scaler
 type: application
 version: 0.1.0
 appVersion: "1.0.0"

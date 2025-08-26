@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"github.com/rudderlabs/keydb/internal/operator"
+	"github.com/rudderlabs/keydb/internal/scaler"
 )
 
 // GetRequest represents a request to get keys
@@ -100,5 +100,5 @@ type HashRangeMovement struct {
 
 // LastOperationResponse represents the response containing the last operation
 type LastOperationResponse struct {
-	Operation *operator.ScalingOperation `json:"operation"`
+	Operation *scaler.ScalingOperation `json:"operation"`
 }

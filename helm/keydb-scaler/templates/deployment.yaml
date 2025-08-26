@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-keydb-operator
+  name: {{ .Release.Name }}-keydb-scaler
   labels:
-    app: {{ .Release.Name }}-keydb-operator
+    app: {{ .Release.Name }}-keydb-scaler
     chart: {{ .Chart.Name }}-{{ .Chart.Version }}
     release: {{ .Release.Name }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: {{ .Release.Name }}-keydb-operator
+      app: {{ .Release.Name }}-keydb-scaler
       release: {{ .Release.Name }}
   template:
     metadata:
       labels:
-        app: {{ .Release.Name }}-keydb-operator
+        app: {{ .Release.Name }}-keydb-scaler
         release: {{ .Release.Name }}
     spec:
       containers:
@@ -27,17 +27,17 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
-            - name: KEYDB_OPERATOR_SERVER_ADDR
+            - name: KEYDB_SCALER_SERVER_ADDR
               value: ":8080"
             {{- if .Values.nodeAddresses }}
-            - name: KEYDB_OPERATOR_NODE_ADDRESSES
+            - name: KEYDB_SCALER_NODE_ADDRESSES
               value: {{ join "," .Values.nodeAddresses | quote }}
             {{- end }}
-            - name: KEYDB_OPERATOR_TOTAL_HASH_RANGES
+            - name: KEYDB_SCALER_TOTAL_HASH_RANGES
               value: "{{ .Values.config.totalHashRanges }}"
-            - name: KEYDB_OPERATOR_RETRY_COUNT
+            - name: KEYDB_SCALER_RETRY_COUNT
               value: "{{ .Values.config.retryCount }}"
-            - name: KEYDB_OPERATOR_RETRY_DELAY
+            - name: KEYDB_SCALER_RETRY_DELAY
               value: "{{ .Values.config.retryDelay }}"
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

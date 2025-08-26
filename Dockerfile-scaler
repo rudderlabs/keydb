@@ -32,7 +32,7 @@ RUN go build \
     -X 'github.com/rudderlabs/keydb/release.commit=${COMMIT_HASH}' \
     -X 'github.com/rudderlabs/keydb/release.buildDate=${BUILD_DATE}' \
     -X 'github.com/rudderlabs/keydb/release.builtBy=${REVISION}'" \
-    -o ./keydb-operator ./cmd/operator
+    -o ./keydb-scaler ./cmd/scaler
 
 # Final stage
 FROM alpine:${ALPINE_VERSION}
@@ -42,10 +42,10 @@ RUN apk --no-cache upgrade && \
     apk --no-cache add tzdata curl bash
 
 # Copy built binary from previous stage
-COPY --from=builder /app/keydb-operator ./
+COPY --from=builder /app/keydb-scaler ./
 
 # Expose the HTTP server port
 EXPOSE 8080
 
 # Specify default command to run when container starts
-CMD ["/keydb-operator"]
+CMD ["/keydb-scaler"]

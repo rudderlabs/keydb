@@ -26,7 +26,7 @@ service NodeService {
   // Scale changes the number of nodes in the cluster
   rpc Scale(ScaleRequest) returns (ScaleResponse) {}
 
-  // ScaleComplete is used by the operator to notify all nodes that the scale is complete and they can now start serving traffic again
+  // ScaleComplete is used by the scaler to notify all nodes that the scale is complete and they can now start serving traffic again
   rpc ScaleComplete(ScaleCompleteRequest) returns (ScaleCompleteResponse) {}
 }
 
@@ -111,7 +111,7 @@ message CreateSnapshotsResponse {
 
 // ScaleRequest changes the number of nodes in the cluster
 message ScaleRequest {
-  // When the cluster_size changes the operator can use this field to tell all nodes which addresses are to be broadcast
+  // When the cluster_size changes the scaler can use this field to tell all nodes which addresses are to be broadcast
   // to clients
   repeated string nodesAddresses = 1;
 }

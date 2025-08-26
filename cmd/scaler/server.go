@@ -14,7 +14,7 @@ import (
 
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/hash"
-	"github.com/rudderlabs/keydb/internal/operator"
+	"github.com/rudderlabs/keydb/internal/scaler"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
@@ -28,32 +28,32 @@ const (
 	defaultRetryPolicyMaxElapsedTime  = 3 * time.Minute
 )
 
-type operatorClient interface {
+type scalerClient interface {
 	Scale(ctx context.Context, nodeIDs []uint32) error
 	ScaleComplete(ctx context.Context, nodeIDs []uint32) error
 	UpdateClusterData(addresses ...string) error
 	CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error
 	LoadSnapshots(ctx context.Context, nodeID uint32, hashRanges ...uint32) error
-	ExecuteScalingWithRollback(opType operator.ScalingOperationType, oldAddresses, newAddresses []string,
+	ExecuteScalingWithRollback(opType scaler.ScalingOperationType, oldAddresses, newAddresses []string,
 		fn func() error) error
-	GetLastOperation() *operator.ScalingOperation
+	GetLastOperation() *scaler.ScalingOperation
 	TotalHashRanges() uint32
 	GetNodeInfo(ctx context.Context, id uint32) (*pb.GetNodeInfoResponse, error)
 }
 
 type httpServer struct {
-	client   *client.Client
-	operator operatorClient
-	server   *http.Server
-	logger   logger.Logger
+	client *client.Client
+	scaler scalerClient
+	server *http.Server
+	logger logger.Logger
 }
 
 // newHTTPServer creates a new HTTP server
-func newHTTPServer(client *client.Client, operator *operator.Client, addr string, log logger.Logger) *httpServer {
+func newHTTPServer(client *client.Client, scaler *scaler.Client, addr string, log logger.Logger) *httpServer {
 	s := &httpServer{
-		client:   client,
-		operator: operator,
-		logger:   log,
+		client: client,
+		scaler: scaler,
+		logger: log,
 	}
 
 	mux := chi.NewRouter()
@@ -80,7 +80,7 @@ func newHTTPServer(client *client.Client, operator *operator.Client, addr string
 	s.server = &http.Server{
 		Addr:         addr,
 		Handler:      mux,
-		ReadTimeout:  10 * time.Minute, // using very long timeouts for now to allow for long operator ops
+		ReadTimeout:  10 * time.Minute, // using very long timeouts for now to allow for long scaler ops
 		WriteTimeout: 10 * time.Minute,
 		IdleTimeout:  10 * time.Minute,
 	}
@@ -175,7 +175,7 @@ func (s *httpServer) handleInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get node info
-	info, err := s.operator.GetNodeInfo(r.Context(), req.NodeID)
+	info, err := s.scaler.GetNodeInfo(r.Context(), req.NodeID)
 	if err != nil {
 		http.Error(w,
 			fmt.Sprintf("Error getting info for node %d: %v", req.NodeID, err),
@@ -202,7 +202,7 @@ func (s *httpServer) handleCreateSnapshots(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Create snapshot
-	if err := s.operator.CreateSnapshots(r.Context(), req.NodeID, req.FullSync, req.HashRanges...); err != nil {
+	if err := s.scaler.CreateSnapshots(r.Context(), req.NodeID, req.FullSync, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error creating snapshot: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -223,7 +223,7 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Load snapshots from cloud storage
-	if err := s.operator.LoadSnapshots(r.Context(), req.NodeID, req.HashRanges...); err != nil {
+	if err := s.scaler.LoadSnapshots(r.Context(), req.NodeID, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -250,7 +250,7 @@ func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Scale cluster
-	if err := s.operator.Scale(r.Context(), req.NodeIDs); err != nil {
+	if err := s.scaler.Scale(r.Context(), req.NodeIDs); err != nil {
 		http.Error(w, fmt.Sprintf("Error scaling cluster: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -277,7 +277,7 @@ func (s *httpServer) handleScaleComplete(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Complete scale operation
-	if err := s.operator.ScaleComplete(r.Context(), req.NodeIDs); err != nil {
+	if err := s.scaler.ScaleComplete(r.Context(), req.NodeIDs); err != nil {
 		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -304,7 +304,7 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Complete scale operation
-	if err := s.operator.UpdateClusterData(req.Addresses...); err != nil {
+	if err := s.scaler.UpdateClusterData(req.Addresses...); err != nil {
 		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -370,10 +370,10 @@ func (s *httpServer) handleScaleUp(
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
-	return s.operator.ExecuteScalingWithRollback(operator.ScaleUp, oldAddresses, newAddresses, func() error {
+	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleUp, oldAddresses, newAddresses, func() error {
 		// Step 1: Update cluster data with new addresses
 		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
-			if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+			if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
 				return fmt.Errorf("updating cluster data: %w", err)
 			}
 			return nil
@@ -390,7 +390,7 @@ func (s *httpServer) handleScaleUp(
 
 		// Step 2: Determine which hash ranges need to be moved and get ready-to-use maps
 		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
-			oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
+			oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
 		)
 
 		// Step 3: Create snapshots from source nodes for hash ranges that will be moved
@@ -402,7 +402,7 @@ func (s *httpServer) handleScaleUp(
 				}
 				group.Go(func() error {
 					return s.retryViaPolicy(gCtx, retryPolicy, func() error {
-						err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...)
+						err := s.scaler.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...)
 						if err != nil {
 							return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
 								sourceNodeID, hashRanges, err,
@@ -429,7 +429,7 @@ func (s *httpServer) handleScaleUp(
 			}
 			group.Go(func() error {
 				return s.retryViaPolicy(gCtx, retryPolicy, func() error {
-					if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+					if err := s.scaler.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
 						return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
 							nodeID, hashRanges, err,
 						)
@@ -459,9 +459,9 @@ func (s *httpServer) handleScaleDown(
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
-	return s.operator.ExecuteScalingWithRollback(operator.ScaleDown, oldAddresses, newAddresses, func() error {
+	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleDown, oldAddresses, newAddresses, func() error {
 		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
-			oldClusterSize, newClusterSize, s.operator.TotalHashRanges(),
+			oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
 		)
 
 		// Step 1: Create snapshots from source nodes for hash ranges that will be moved
@@ -473,7 +473,7 @@ func (s *httpServer) handleScaleDown(
 				}
 				group.Go(func() error {
 					return s.retryViaPolicy(gCtx, retryPolicy, func() error {
-						if err := s.operator.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+						if err := s.scaler.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
 							return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
 								sourceNodeID, hashRanges, err,
 							)
@@ -499,7 +499,7 @@ func (s *httpServer) handleScaleDown(
 			}
 			group.Go(func() error {
 				return s.retryViaPolicy(gCtx, retryPolicy, func() error {
-					if err := s.operator.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
+					if err := s.scaler.LoadSnapshots(gCtx, nodeID, hashRanges...); err != nil {
 						return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
 							nodeID, hashRanges, err,
 						)
@@ -518,7 +518,7 @@ func (s *httpServer) handleScaleDown(
 
 		// Step 3: Update cluster data with new addresses
 		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
-			if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+			if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
 				return fmt.Errorf("updating cluster data: %w", err)
 			}
 			return nil
@@ -545,10 +545,10 @@ func (s *httpServer) handleAutoHealing(
 ) error {
 	clusterSize := uint32(len(newAddresses))
 
-	return s.operator.ExecuteScalingWithRollback(operator.AutoHealing, oldAddresses, newAddresses, func() error {
+	return s.scaler.ExecuteScalingWithRollback(scaler.AutoHealing, oldAddresses, newAddresses, func() error {
 		// Step 1: Update cluster data with current addresses to ensure consistency
 		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
-			if err := s.operator.UpdateClusterData(newAddresses...); err != nil {
+			if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
 				return fmt.Errorf("updating cluster data for auto-healing: %w", err)
 			}
 			return nil
@@ -571,7 +571,7 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 	}
 
 	err := s.retryViaPolicy(ctx, rp, func() error {
-		if err := s.operator.Scale(ctx, nodeIDs); err != nil {
+		if err := s.scaler.Scale(ctx, nodeIDs); err != nil {
 			return fmt.Errorf("scaling nodes: %w", err)
 		}
 		return nil
@@ -583,7 +583,7 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 	}
 
 	err = s.retryViaPolicy(ctx, rp, func() error {
-		if err := s.operator.ScaleComplete(ctx, nodeIDs); err != nil {
+		if err := s.scaler.ScaleComplete(ctx, nodeIDs); err != nil {
 			return fmt.Errorf("completing scale operation: %w", err)
 		}
 		return nil
@@ -702,7 +702,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 			if sourceNodeID < req.OldClusterSize {
 				// Call CreateSnapshots once per node with all hash ranges
 				group.Go(func() error {
-					err := s.operator.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRanges...)
+					err := s.scaler.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRanges...)
 					if err != nil {
 						return fmt.Errorf("creating snapshots for node %d: %w", sourceNodeID, err)
 					}
@@ -721,7 +721,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		group, gCtx := errgroup.WithContext(ctx)
 		for destinationNodeID, hashRanges := range destinationNodeMovements {
 			group.Go(func() error {
-				err := s.operator.LoadSnapshots(gCtx, destinationNodeID, hashRanges...)
+				err := s.scaler.LoadSnapshots(gCtx, destinationNodeID, hashRanges...)
 				if err != nil {
 					return fmt.Errorf("loading snapshots for node %d: %w", destinationNodeID, err)
 				}
@@ -744,7 +744,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 
 // handleLastOperation handles GET /lastOperation requests
 func (s *httpServer) handleLastOperation(w http.ResponseWriter, r *http.Request) {
-	operation := s.operator.GetLastOperation()
+	operation := s.scaler.GetLastOperation()
 	if operation == nil {
 		http.Error(w, "No operation found", http.StatusNotFound)
 		return
