@@ -391,7 +391,6 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 			OldNodesAddresses: []string{node0Address},
 			NewNodesAddresses: []string{node0Address, node1Address},
 			RetryPolicy: RetryPolicy{
-				Disabled:        true,
 				InitialInterval: time.Second,
 				Multiplier:      1,
 				MaxInterval:     3 * time.Second,
@@ -448,9 +447,6 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	_ = op.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
-		RetryPolicy: RetryPolicy{
-			Disabled: true,
-		},
 	}, true)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
