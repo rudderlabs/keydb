@@ -340,16 +340,23 @@ func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
 					break
 				}
 
+				errMsg := "unknown error"
+				if err != nil {
+					errMsg = err.Error()
+				} else if resp != nil {
+					errMsg = resp.ErrorMessage
+				}
+
 				// If this is the last retry, save the error
 				if i == c.config.RetryCount {
-					errMsg := "unknown error"
-					if err != nil {
-						errMsg = err.Error()
-					} else if resp != nil {
-						errMsg = resp.ErrorMessage
-					}
 					return fmt.Errorf("failed to scale node %d: %s", nodeID, errMsg)
 				}
+
+				c.logger.Warnn("Cannot scale node",
+					logger.NewIntField("nodeID", int64(nodeID)),
+					logger.NewDurationField("retryDelay", c.config.RetryDelay),
+					obskit.Error(errors.New(errMsg)),
+				)
 
 				// Wait before retrying
 				select {
@@ -407,6 +414,17 @@ func (c *Client) ScaleComplete(ctx context.Context, nodeIDs []uint32) error {
 				if i == c.config.RetryCount {
 					return fmt.Errorf("failed to complete scale operation on node %d: %w", nodeID, err)
 				}
+
+				logErr := errors.New("unsuccessful response from nodes")
+				if err != nil {
+					logErr = err
+				}
+
+				c.logger.Warnn("Cannot complete scale operation",
+					logger.NewIntField("nodeID", int64(nodeID)),
+					logger.NewDurationField("retryDelay", c.config.RetryDelay),
+					obskit.Error(logErr),
+				)
 
 				// Wait before retrying
 				select {
