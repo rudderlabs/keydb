@@ -19,20 +19,20 @@ type PutRequest struct {
 
 // InfoRequest represents a request to get node info
 type InfoRequest struct {
-	NodeID uint32 `json:"nodeID"`
+	NodeID uint32 `json:"node_id"`
 }
 
 // CreateSnapshotsRequest represents a request to create snapshots
 type CreateSnapshotsRequest struct {
-	NodeID     uint32   `json:"nodeID"`
-	FullSync   bool     `json:"fullSync"`
-	HashRanges []uint32 `json:"hashRanges,omitempty"`
+	NodeID     uint32   `json:"node_id"`
+	FullSync   bool     `json:"full_sync"`
+	HashRanges []uint32 `json:"hash_ranges,omitempty"`
 }
 
 // LoadSnapshotsRequest represents a request to load snapshots
 type LoadSnapshotsRequest struct {
-	NodeID     uint32   `json:"nodeID"`
-	HashRanges []uint32 `json:"hashRanges,omitempty"`
+	NodeID     uint32   `json:"node_id"`
+	HashRanges []uint32 `json:"hash_ranges,omitempty"`
 }
 
 // ScaleRequest represents a request to scale the cluster
@@ -83,17 +83,18 @@ type RetryPolicy struct {
 
 // HashRangeMovementsRequest represents a request to preview hash range movements
 type HashRangeMovementsRequest struct {
-	OldClusterSize  uint32 `json:"oldClusterSize"`
-	NewClusterSize  uint32 `json:"newClusterSize"`
-	TotalHashRanges uint32 `json:"totalHashRanges"`
-	Upload          bool   `json:"upload,omitempty"`
-	Download        bool   `json:"download,omitempty"`
-	FullSync        bool   `json:"fullSync,omitempty"`
+	OldClusterSize  uint32      `json:"old_cluster_size"`
+	NewClusterSize  uint32      `json:"new_cluster_size"`
+	TotalHashRanges uint32      `json:"total_hash_ranges"`
+	Upload          bool        `json:"upload,omitempty"`
+	Download        bool        `json:"download,omitempty"`
+	FullSync        bool        `json:"full_sync,omitempty"`
+	RetryPolicy     RetryPolicy `json:"retry_policy,omitempty"`
 }
 
 // HashRangeMovement represents a single hash range movement
 type HashRangeMovement struct {
-	HashRange uint32 `json:"hashRange"`
+	HashRange uint32 `json:"hash_range"`
 	From      uint32 `json:"from"`
 	To        uint32 `json:"to"`
 }
