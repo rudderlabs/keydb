@@ -340,16 +340,23 @@ func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
 					break
 				}
 
+				errMsg := "unknown error"
+				if err != nil {
+					errMsg = err.Error()
+				} else if resp != nil {
+					errMsg = resp.ErrorMessage
+				}
+
 				// If this is the last retry, save the error
 				if i == c.config.RetryCount {
-					errMsg := "unknown error"
-					if err != nil {
-						errMsg = err.Error()
-					} else if resp != nil {
-						errMsg = resp.ErrorMessage
-					}
 					return fmt.Errorf("failed to scale node %d: %s", nodeID, errMsg)
 				}
+
+				c.logger.Warnn("Cannot scale node",
+					logger.NewIntField("nodeID", int64(nodeID)),
+					logger.NewDurationField("retryDelay", c.config.RetryDelay),
+					obskit.Error(errors.New(errMsg)),
+				)
 
 				// Wait before retrying
 				select {
