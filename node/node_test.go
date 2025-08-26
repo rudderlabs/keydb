@@ -14,7 +14,7 @@ import (
 
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/hash"
-	"github.com/rudderlabs/keydb/internal/operator"
+	"github.com/rudderlabs/keydb/internal/scaler"
 	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
@@ -54,7 +54,7 @@ func TestSimple(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
 		c := getClient(t, totalHashRanges, node0Address)
-		op := getOperator(t, totalHashRanges, node0Address)
+		op := getScaler(t, totalHashRanges, node0Address)
 
 		// Test Put
 		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
@@ -150,7 +150,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		op := getOperator(t, totalHashRanges, node0Address)
+		op := getScaler(t, totalHashRanges, node0Address)
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 
 		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
@@ -254,7 +254,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
 
-		op := getOperator(t, totalHashRanges, node0Address)
+		op := getScaler(t, totalHashRanges, node0Address)
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 
 		keydbth.RequireExpectedFiles(ctx, t, minioContainer,
@@ -371,7 +371,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
 		c := getClient(t, totalHashRanges, node0Address)
-		op := getOperator(t, totalHashRanges, node0Address)
+		op := getScaler(t, totalHashRanges, node0Address)
 
 		// Test Put
 		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
@@ -481,7 +481,7 @@ func TestSelectedSnapshots(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
 		c := getClient(t, totalHashRanges, node0Address)
-		op := getOperator(t, totalHashRanges, node0Address)
+		op := getScaler(t, totalHashRanges, node0Address)
 
 		// Test Put
 		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
@@ -606,17 +606,17 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 	return c
 }
 
-func getOperator(t testing.TB, totalHashRanges uint32, addresses ...string) *operator.Client {
+func getScaler(t testing.TB, totalHashRanges uint32, addresses ...string) *scaler.Client {
 	t.Helper()
 
-	opConfig := operator.Config{
+	opConfig := scaler.Config{
 		Addresses:       addresses,
 		TotalHashRanges: totalHashRanges,
 		RetryCount:      3,
 		RetryDelay:      100 * time.Millisecond,
 	}
 
-	op, err := operator.NewClient(opConfig, logger.NOP)
+	op, err := scaler.NewClient(opConfig, logger.NOP)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = op.Close() })
 

@@ -665,7 +665,7 @@ func (x *CreateSnapshotsResponse) GetNodeId() uint32 {
 // ScaleRequest changes the number of nodes in the cluster
 type ScaleRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// When the cluster_size changes the operator can use this field to tell all nodes which addresses are to be broadcast
+	// When the cluster_size changes the scaler can use this field to tell all nodes which addresses are to be broadcast
 	// to clients
 	NodesAddresses []string `protobuf:"bytes,1,rep,name=nodesAddresses,proto3" json:"nodesAddresses,omitempty"`
 	unknownFields  protoimpl.UnknownFields

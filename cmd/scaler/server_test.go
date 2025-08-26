@@ -20,7 +20,7 @@ import (
 
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/hash"
-	"github.com/rudderlabs/keydb/internal/operator"
+	"github.com/rudderlabs/keydb/internal/scaler"
 	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
 	"github.com/rudderlabs/keydb/node"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -69,22 +69,22 @@ func TestScaleUpAndDown(t *testing.T) {
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
 
 	// Test Put
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
 	}, true)
 
 	// Test Get
-	body := op.Do("/get", GetRequest{
+	body := s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
 
 	// Test CreateSnapshots
-	_ = op.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 0, FullSync: false}, true)
+	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 0, FullSync: false}, true)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 		regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
@@ -102,18 +102,18 @@ func TestScaleUpAndDown(t *testing.T) {
 	}, node1Conf)
 
 	// Test scaling procedure
-	_ = op.Do("/updateClusterData", UpdateClusterDataRequest{
+	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{
 		Addresses: []string{node0Address, node1Address},
 	}, true)
-	_ = op.Do("/loadSnapshots", LoadSnapshotsRequest{
+	_ = s.Do("/loadSnapshots", LoadSnapshotsRequest{
 		NodeID:     1,
 		HashRanges: hash.GetNodeHashRangesList(1, 2, totalHashRanges),
 	}, true)
-	_ = op.Do("/scale", ScaleRequest{NodeIDs: []uint32{0, 1}}, true)
-	_ = op.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0, 1}}, true)
+	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0, 1}}, true)
+	_ = s.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0, 1}}, true)
 
 	// Test node info 0
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse := pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
@@ -122,7 +122,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
 
 	// Test node info 1
-	body = op.Do("/info", InfoRequest{NodeID: 1})
+	body = s.Do("/info", InfoRequest{NodeID: 1})
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
@@ -131,13 +131,13 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
 
 	// Get again now that the cluster is made of two nodes
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
 
 	// Let's write something to generate more snapshots due to incremental updates
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key5", "key6", "key7"}, TTL: testTTL,
 	}, true)
 
@@ -146,8 +146,8 @@ func TestScaleUpAndDown(t *testing.T) {
 	// then it will be node2 and the clusterSize will be 3
 	// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't
 	// remove node0, you have to remove node1
-	_ = op.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 0, FullSync: false}, true)
-	_ = op.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 1, FullSync: false}, true)
+	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 0, FullSync: false}, true)
+	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 1, FullSync: false}, true)
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
 		regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
 		regexp.MustCompile("^hr_0_s_1_2.snapshot$"),
@@ -156,16 +156,16 @@ func TestScaleUpAndDown(t *testing.T) {
 		regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
 		regexp.MustCompile("^hr_2_s_1_2.snapshot$"),
 	)
-	_ = op.Do("/loadSnapshots", LoadSnapshotsRequest{
+	_ = s.Do("/loadSnapshots", LoadSnapshotsRequest{
 		NodeID:     0,
 		HashRanges: hash.GetNodeHashRangesList(0, 1, totalHashRanges),
 	}, true)
-	_ = op.Do("/updateClusterData", UpdateClusterDataRequest{Addresses: []string{node0Address}}, true)
-	_ = op.Do("/scale", ScaleRequest{NodeIDs: []uint32{0}}, true)
-	_ = op.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0}}, true)
+	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{Addresses: []string{node0Address}}, true)
+	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0}}, true)
+	_ = s.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0}}, true)
 
 	// Get node info again
-	body = op.Do("/info", InfoRequest{
+	body = s.Do("/info", InfoRequest{
 		NodeID: 0,
 	})
 	infoResponse = pb.GetNodeInfoResponse{}
@@ -210,16 +210,16 @@ func TestAutoScale(t *testing.T) {
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
 
 	// Test Put some initial data
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
 	}, true)
 
 	// Test Get to verify data exists
-	body := op.Do("/get", GetRequest{
+	body := s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
@@ -235,7 +235,7 @@ func TestAutoScale(t *testing.T) {
 	}, node1Conf)
 
 	// Test Scale Up using autoScale
-	_ = op.Do("/autoScale", AutoScaleRequest{
+	_ = s.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, node1Address},
 		RetryPolicy: RetryPolicy{
@@ -244,13 +244,13 @@ func TestAutoScale(t *testing.T) {
 	}, true)
 
 	// Verify scale up worked - check node info
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse := pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
 
-	body = op.Do("/info", InfoRequest{NodeID: 1})
+	body = s.Do("/info", InfoRequest{NodeID: 1})
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
@@ -261,18 +261,18 @@ func TestAutoScale(t *testing.T) {
 	)
 
 	// Verify data is still accessible after scale up
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
 
 	// Write more keys after scale up to test data preservation during scale down
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key5", "key6", "key7", "key8"}, TTL: testTTL,
 	}, true)
 
 	// Verify all keys are accessible before scale down
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
 	})
 	require.JSONEq(t,
@@ -283,7 +283,7 @@ func TestAutoScale(t *testing.T) {
 	t.Log("Scaling down from 2 nodes to 1 node...")
 
 	// Test Scale Down using autoScale
-	_ = op.Do("/autoScale", AutoScaleRequest{
+	_ = s.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
 		RetryPolicy: RetryPolicy{
@@ -297,14 +297,14 @@ func TestAutoScale(t *testing.T) {
 	)
 
 	// Verify scale down worked - check node info
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 1, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 1)
 
 	// Verify all data is still accessible after scale down
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
 	})
 	require.JSONEq(t,
@@ -355,16 +355,16 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	}, node0Conf, withProxy(proxy))
 	go proxy.Start(t) // Starting the proxy after we get the service to populate RemoteAddr
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
 
 	// Test Put some initial data
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
 	}, true)
 
 	// Test Get to verify data exists
-	body := op.Do("/get", GetRequest{
+	body := s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
@@ -386,7 +386,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	go func() {
 		defer close(done)
 		t.Log("Firing autoScale request")
-		_ = op.Do("/autoScale", AutoScaleRequest{
+		_ = s.Do("/autoScale", AutoScaleRequest{
 			OldNodesAddresses: []string{node0Address},
 			NewNodesAddresses: []string{node0Address, node1Address},
 			RetryPolicy: RetryPolicy{
@@ -404,13 +404,13 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	<-done
 
 	// Verify scale up worked - check node info
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse := pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
 
-	body = op.Do("/info", InfoRequest{NodeID: 1})
+	body = s.Do("/info", InfoRequest{NodeID: 1})
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
@@ -421,18 +421,18 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	)
 
 	// Verify data is still accessible after scale up
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
 
 	// Write more keys after scale up to test data preservation during scale down
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key5", "key6", "key7", "key8"}, TTL: testTTL,
 	}, true)
 
 	// Verify all keys are accessible before scale down
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
 	})
 	require.JSONEq(t,
@@ -443,7 +443,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	t.Log("Scaling down from 2 nodes to 1 node...")
 
 	// Test Scale Down using autoScale
-	_ = op.Do("/autoScale", AutoScaleRequest{
+	_ = s.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
 	}, true)
@@ -454,14 +454,14 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	)
 
 	// Verify scale down worked - check node info
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 1, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 1)
 
 	// Verify all data is still accessible after scale down
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
 	})
 	require.JSONEq(t,
@@ -481,8 +481,8 @@ func TestAutoScaleTransientError(t *testing.T) {
 	node0 := startMockNodeService(t, "node0")
 	node1 := startMockNodeService(t, "node1")
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0.address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0.address)
 
 	t.Log("Scaling up from 1 node to 2 nodes...")
 	node0.createSnapshotsReturnError.Store(true)
@@ -492,7 +492,7 @@ func TestAutoScaleTransientError(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		close(done)
-		_ = op.Do("/autoScale", AutoScaleRequest{
+		_ = s.Do("/autoScale", AutoScaleRequest{
 			OldNodesAddresses: []string{node0.address},
 			NewNodesAddresses: []string{node0.address, node1.address},
 			RetryPolicy: RetryPolicy{
@@ -535,7 +535,7 @@ func TestAutoScaleTransientError(t *testing.T) {
 	done = make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = op.Do("/autoScale", AutoScaleRequest{
+		_ = s.Do("/autoScale", AutoScaleRequest{
 			OldNodesAddresses: []string{node0.address, node1.address},
 			NewNodesAddresses: []string{node0.address},
 			RetryPolicy: RetryPolicy{
@@ -576,8 +576,8 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
 
 	// Test error cases
 	testCases := []struct {
@@ -615,10 +615,10 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			buf, err := jsonrs.Marshal(tc.request)
 			require.NoError(t, err)
-			req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+			req, err := http.NewRequest(http.MethodPost, s.url+"/autoScale", bytes.NewBuffer(buf))
 			require.NoError(t, err)
 
-			resp, err := op.client.Do(req)
+			resp, err := s.client.Do(req)
 			require.NoError(t, err)
 			defer func() { httputil.CloseResponse(resp) }()
 
@@ -660,22 +660,22 @@ func TestAutoHealing(t *testing.T) {
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
 
 	// Test Put some initial data
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"heal1", "heal2", "heal3"}, TTL: testTTL,
 	}, true)
 
 	// Test Get to verify data exists
-	body := op.Do("/get", GetRequest{
+	body := s.Do("/get", GetRequest{
 		Keys: []string{"heal1", "heal2", "heal3", "heal4"},
 	})
 	require.JSONEq(t, `{"heal1":true,"heal2":true,"heal3":true,"heal4":false}`, body)
 
 	// Test Auto-Healing with same cluster size (should trigger auto-healing instead of error)
-	_ = op.Do("/autoScale", AutoScaleRequest{
+	_ = s.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address},
 		RetryPolicy: RetryPolicy{
@@ -684,7 +684,7 @@ func TestAutoHealing(t *testing.T) {
 	}, true)
 
 	// Verify auto-healing worked - check node info
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse := pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 1, infoResponse.ClusterSize)
@@ -692,7 +692,7 @@ func TestAutoHealing(t *testing.T) {
 	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
 
 	// Verify data is still accessible after auto-healing
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"heal1", "heal2", "heal3", "heal4"},
 	})
 	require.JSONEq(t, `{"heal1":true,"heal2":true,"heal3":true,"heal4":false}`, body)
@@ -731,12 +731,12 @@ func TestHashRangeMovements(t *testing.T) {
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
 
 	// Test successful hash range movements preview
 	t.Run("successful scale up preview", func(t *testing.T) {
-		body := op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+		body := s.Do("/hashRangeMovements", HashRangeMovementsRequest{
 			OldClusterSize:  2,
 			NewClusterSize:  3,
 			TotalHashRanges: 8,
@@ -758,7 +758,7 @@ func TestHashRangeMovements(t *testing.T) {
 	})
 
 	t.Run("successful scale down preview", func(t *testing.T) {
-		body := op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+		body := s.Do("/hashRangeMovements", HashRangeMovementsRequest{
 			OldClusterSize:  3,
 			NewClusterSize:  2,
 			TotalHashRanges: 8,
@@ -780,7 +780,7 @@ func TestHashRangeMovements(t *testing.T) {
 	})
 
 	t.Run("no movements when cluster size unchanged", func(t *testing.T) {
-		body := op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+		body := s.Do("/hashRangeMovements", HashRangeMovementsRequest{
 			OldClusterSize:  2,
 			NewClusterSize:  2,
 			TotalHashRanges: 8,
@@ -850,10 +850,10 @@ func TestHashRangeMovements(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			buf, err := jsonrs.Marshal(tc.request)
 			require.NoError(t, err)
-			req, err := http.NewRequest(http.MethodPost, op.url+"/hashRangeMovements", bytes.NewBuffer(buf))
+			req, err := http.NewRequest(http.MethodPost, s.url+"/hashRangeMovements", bytes.NewBuffer(buf))
 			require.NoError(t, err)
 
-			resp, err := op.client.Do(req)
+			resp, err := s.client.Do(req)
 			require.NoError(t, err)
 			defer func() { httputil.CloseResponse(resp) }()
 
@@ -862,7 +862,7 @@ func TestHashRangeMovements(t *testing.T) {
 	}
 
 	t.Run("upload and download", func(t *testing.T) {
-		_ = op.Do("/put", PutRequest{
+		_ = s.Do("/put", PutRequest{
 			Keys: []string{
 				"key1", "key2", "key3", "key4",
 				"key5", "key6", "key7", "key8",
@@ -871,7 +871,7 @@ func TestHashRangeMovements(t *testing.T) {
 			}, TTL: testTTL,
 		}, true)
 
-		body := op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+		body := s.Do("/hashRangeMovements", HashRangeMovementsRequest{
 			OldClusterSize:  1,
 			NewClusterSize:  2,
 			TotalHashRanges: 8,
@@ -899,7 +899,7 @@ func TestHashRangeMovements(t *testing.T) {
 			regexp.MustCompile("^hr_7_s_0_1.snapshot$"),
 		)
 
-		_ = op.Do("/put", PutRequest{
+		_ = s.Do("/put", PutRequest{
 			Keys: []string{
 				"key17", "key18", "key19", "key20",
 				"key21", "key22", "key23", "key24",
@@ -908,7 +908,7 @@ func TestHashRangeMovements(t *testing.T) {
 			}, TTL: testTTL,
 		}, true)
 
-		body = op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+		body = s.Do("/hashRangeMovements", HashRangeMovementsRequest{
 			OldClusterSize:  1,
 			NewClusterSize:  2,
 			TotalHashRanges: 8,
@@ -955,9 +955,9 @@ func TestHashRangeMovements(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, newNodeConf)
 
-		op := startOperatorHTTPServer(t, totalHashRanges, node0Address, newNodeAddress)
+		s := startScalerHTTPServer(t, totalHashRanges, node0Address, newNodeAddress)
 
-		body = op.Do("/hashRangeMovements", HashRangeMovementsRequest{
+		body = s.Do("/hashRangeMovements", HashRangeMovementsRequest{
 			OldClusterSize:  1,
 			NewClusterSize:  2,
 			TotalHashRanges: 8,
@@ -989,7 +989,7 @@ func TestHashRangeMovements(t *testing.T) {
 		}
 		require.Greater(t, len(node1Keys), 0, "node 1 should have some keys")
 
-		body = op.Do("/get", GetRequest{
+		body = s.Do("/get", GetRequest{
 			Keys: node1Keys,
 		})
 		require.JSONEq(t, `{
@@ -1006,13 +1006,13 @@ func TestHashRangeMovements(t *testing.T) {
 
 func TestHandleLastOperation(t *testing.T) {
 	// Start test server
-	op := startOperatorHTTPServer(t, 128, "localhost:0")
+	s := startScalerHTTPServer(t, 128, "localhost:0")
 
 	// Record an operation
-	op.operator.RecordOperation(operator.ScaleUp, 2, 3, []string{"node1", "node2"}, []string{"node1", "node2", "node3"})
+	s.scaler.RecordOperation(scaler.ScaleUp, 2, 3, []string{"node1", "node2"}, []string{"node1", "node2", "node3"})
 
 	// Make request to /lastOperation endpoint
-	resp, err := http.Get(op.url + "/lastOperation")
+	resp, err := http.Get(s.url + "/lastOperation")
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 
@@ -1021,14 +1021,14 @@ func TestHandleLastOperation(t *testing.T) {
 
 	// Parse response
 	var response struct {
-		Operation *operator.ScalingOperation `json:"operation"`
+		Operation *scaler.ScalingOperation `json:"operation"`
 	}
 	err = jsonrs.NewDecoder(resp.Body).Decode(&response)
 	require.NoError(t, err)
 
 	// Verify operation details
 	require.NotNil(t, response.Operation)
-	require.Equal(t, operator.ScaleUp, response.Operation.Type)
+	require.Equal(t, scaler.ScaleUp, response.Operation.Type)
 	require.Equal(t, uint32(2), response.Operation.OldClusterSize)
 	require.Equal(t, uint32(3), response.Operation.NewClusterSize)
 	require.Equal(t, []string{"node1", "node2"}, response.Operation.OldAddresses)
@@ -1065,16 +1065,16 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
 
 	// Test Put some data
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
 	}, true)
 
 	// Verify data can be retrieved
-	body := op.Do("/get", GetRequest{
+	body := s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
@@ -1092,11 +1092,11 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	// This should fail and trigger rollback
 	buf, err := jsonrs.Marshal(autoScaleReq)
 	require.NoError(t, err)
-	req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+	req, err := http.NewRequest(http.MethodPost, s.url+"/autoScale", bytes.NewBuffer(buf))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := op.client.Do(req)
+	resp, err := s.client.Do(req)
 	require.NoError(t, err)
 
 	defer func() { httputil.CloseResponse(resp) }()
@@ -1105,7 +1105,7 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 
 	// Check that the last operation was recorded and rolled back
-	lastOpResp, err := http.Get(op.url + "/lastOperation")
+	lastOpResp, err := http.Get(s.url + "/lastOperation")
 	require.NoError(t, err)
 	defer func() { _ = lastOpResp.Body.Close() }()
 
@@ -1113,22 +1113,22 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
 
 	var lastOpResponse struct {
-		Operation *operator.ScalingOperation `json:"operation"`
+		Operation *scaler.ScalingOperation `json:"operation"`
 	}
 	err = jsonrs.NewDecoder(lastOpResp.Body).Decode(&lastOpResponse)
 	require.NoError(t, err)
 
 	// Verify operation details
 	require.NotNil(t, lastOpResponse.Operation)
-	require.Equal(t, operator.ScaleUp, lastOpResponse.Operation.Type)
+	require.Equal(t, scaler.ScaleUp, lastOpResponse.Operation.Type)
 	require.Equal(t, uint32(1), lastOpResponse.Operation.OldClusterSize)
 	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize)
 	require.Equal(t, []string{node0Address}, lastOpResponse.Operation.OldAddresses)
 	// For the failed step, we expect some error message
-	require.Equal(t, operator.RolledBack, lastOpResponse.Operation.Status)
+	require.Equal(t, scaler.RolledBack, lastOpResponse.Operation.Status)
 
 	// Verify that node0 still has the original cluster size
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse := pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 1, infoResponse.ClusterSize)
@@ -1136,7 +1136,7 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
 
 	// Verify data is still accessible after rollback
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
@@ -1184,16 +1184,16 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 		Addresses:        []string{node0Address},
 	}, node1Conf)
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address, node1Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address, node1Address)
 
 	// Test Put some data
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
 	}, true)
 
 	// Verify data can be retrieved
-	body := op.Do("/get", GetRequest{
+	body := s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
@@ -1212,11 +1212,11 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	// This should fail and trigger rollback
 	buf, err := jsonrs.Marshal(autoScaleReq)
 	require.NoError(t, err)
-	req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+	req, err := http.NewRequest(http.MethodPost, s.url+"/autoScale", bytes.NewBuffer(buf))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := op.client.Do(req)
+	resp, err := s.client.Do(req)
 	require.NoError(t, err)
 
 	defer func() { httputil.CloseResponse(resp) }()
@@ -1225,7 +1225,7 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 
 	// Check that the last operation was recorded and rolled back
-	lastOpResp, err := http.Get(op.url + "/lastOperation")
+	lastOpResp, err := http.Get(s.url + "/lastOperation")
 	require.NoError(t, err)
 	defer func() { _ = lastOpResp.Body.Close() }()
 
@@ -1233,23 +1233,23 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
 
 	var lastOpResponse struct {
-		Operation *operator.ScalingOperation `json:"operation"`
+		Operation *scaler.ScalingOperation `json:"operation"`
 	}
 	err = jsonrs.NewDecoder(lastOpResp.Body).Decode(&lastOpResponse)
 	require.NoError(t, err)
 
 	// Verify operation details
 	require.NotNil(t, lastOpResponse.Operation)
-	require.Equal(t, operator.ScaleDown, lastOpResponse.Operation.Type)
+	require.Equal(t, scaler.ScaleDown, lastOpResponse.Operation.Type)
 	require.Equal(t, uint32(2), lastOpResponse.Operation.OldClusterSize)
 	require.Equal(t, uint32(1), lastOpResponse.Operation.NewClusterSize)
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.OldAddresses)
 	require.Equal(t, []string{unreachableAddr}, lastOpResponse.Operation.NewAddresses)
-	require.Equal(t, operator.RolledBack, lastOpResponse.Operation.Status)
+	require.Equal(t, scaler.RolledBack, lastOpResponse.Operation.Status)
 
 	// Verify that both nodes still exist (rolled back to original state)
 	// Node 0 should still think there are 2 nodes in the cluster
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse := pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
@@ -1258,7 +1258,7 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	require.Contains(t, infoResponse.NodesAddresses, node1Address)
 
 	// Verify data is still accessible after rollback
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
@@ -1306,16 +1306,16 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 		Addresses:        []string{node0Address},
 	}, node1Conf)
 
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, totalHashRanges, node0Address, node1Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, node0Address, node1Address)
 
 	// Test Put some data
-	_ = op.Do("/put", PutRequest{
+	_ = s.Do("/put", PutRequest{
 		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
 	}, true)
 
 	// Verify data can be retrieved
-	body := op.Do("/get", GetRequest{
+	body := s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
@@ -1333,11 +1333,11 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	// This should fail and trigger rollback
 	buf, err := jsonrs.Marshal(autoHealReq)
 	require.NoError(t, err)
-	req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+	req, err := http.NewRequest(http.MethodPost, s.url+"/autoScale", bytes.NewBuffer(buf))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := op.client.Do(req)
+	resp, err := s.client.Do(req)
 	require.NoError(t, err)
 
 	defer func() { httputil.CloseResponse(resp) }()
@@ -1346,7 +1346,7 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 
 	// Check that the last operation was recorded and rolled back
-	lastOpResp, err := http.Get(op.url + "/lastOperation")
+	lastOpResp, err := http.Get(s.url + "/lastOperation")
 	require.NoError(t, err)
 	defer func() { _ = lastOpResp.Body.Close() }()
 
@@ -1354,22 +1354,22 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
 
 	var lastOpResponse struct {
-		Operation *operator.ScalingOperation `json:"operation"`
+		Operation *scaler.ScalingOperation `json:"operation"`
 	}
 	err = jsonrs.NewDecoder(lastOpResp.Body).Decode(&lastOpResponse)
 	require.NoError(t, err)
 
 	// Verify operation details
 	require.NotNil(t, lastOpResponse.Operation)
-	require.Equal(t, operator.AutoHealing, lastOpResponse.Operation.Type)
+	require.Equal(t, scaler.AutoHealing, lastOpResponse.Operation.Type)
 	require.Equal(t, uint32(2), lastOpResponse.Operation.OldClusterSize)
 	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize) // Same size for auto-healing
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.OldAddresses)
 	require.Equal(t, []string{node0Address, unreachableAddr}, lastOpResponse.Operation.NewAddresses)
-	require.Equal(t, operator.RolledBack, lastOpResponse.Operation.Status)
+	require.Equal(t, scaler.RolledBack, lastOpResponse.Operation.Status)
 
 	// Verify that node0 still has the original cluster configuration
-	body = op.Do("/info", InfoRequest{NodeID: 0})
+	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse := pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
@@ -1378,7 +1378,7 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	require.Contains(t, infoResponse.NodesAddresses, node1Address)
 
 	// Verify data is still accessible after rollback
-	body = op.Do("/get", GetRequest{
+	body = s.Do("/get", GetRequest{
 		Keys: []string{"key1", "key2", "key3"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
@@ -1393,8 +1393,8 @@ func TestRollbackFailure(t *testing.T) {
 
 	node0Address := "random-node0-address:12345"
 	node1Address := "random-node1-address:12345"
-	// Start the Operator HTTP Server
-	op := startOperatorHTTPServer(t, 3, node0Address)
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, 3, node0Address)
 
 	// Try to scale up with no nodes running - this should fail and rollback should also fail
 	autoScaleReq := AutoScaleRequest{
@@ -1409,11 +1409,11 @@ func TestRollbackFailure(t *testing.T) {
 	// This should fail and rollback should also fail
 	buf, err := jsonrs.Marshal(autoScaleReq)
 	require.NoError(t, err)
-	req, err := http.NewRequest(http.MethodPost, op.url+"/autoScale", bytes.NewBuffer(buf))
+	req, err := http.NewRequest(http.MethodPost, s.url+"/autoScale", bytes.NewBuffer(buf))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := op.client.Do(req)
+	resp, err := s.client.Do(req)
 	require.NoError(t, err)
 
 	defer func() { httputil.CloseResponse(resp) }()
@@ -1422,7 +1422,7 @@ func TestRollbackFailure(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
 
 	// Check that the last operation was recorded with failed status
-	lastOpResp, err := http.Get(op.url + "/lastOperation")
+	lastOpResp, err := http.Get(s.url + "/lastOperation")
 	require.NoError(t, err)
 	defer func() { _ = lastOpResp.Body.Close() }()
 
@@ -1430,19 +1430,19 @@ func TestRollbackFailure(t *testing.T) {
 	require.Equal(t, "application/json", lastOpResp.Header.Get("Content-Type"))
 
 	var lastOpResponse struct {
-		Operation *operator.ScalingOperation `json:"operation"`
+		Operation *scaler.ScalingOperation `json:"operation"`
 	}
 	err = jsonrs.NewDecoder(lastOpResp.Body).Decode(&lastOpResponse)
 	require.NoError(t, err)
 
 	// Verify operation details
 	require.NotNil(t, lastOpResponse.Operation)
-	require.Equal(t, operator.ScaleUp, lastOpResponse.Operation.Type)
+	require.Equal(t, scaler.ScaleUp, lastOpResponse.Operation.Type)
 	require.Equal(t, uint32(1), lastOpResponse.Operation.OldClusterSize)
 	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize)
 	require.Equal(t, []string{node0Address}, lastOpResponse.Operation.OldAddresses)
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.NewAddresses)
-	require.Equal(t, operator.Failed, lastOpResponse.Operation.Status) // Should be failed, not rolled back
+	require.Equal(t, scaler.Failed, lastOpResponse.Operation.Status) // Should be failed, not rolled back
 }
 
 type serviceConfig struct {
@@ -1509,7 +1509,7 @@ func getService(
 	return service, address
 }
 
-func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...string) *opClient { // nolint:unparam
+func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...string) *opClient { // nolint:unparam
 	t.Helper()
 
 	log := logger.NOP
@@ -1525,7 +1525,7 @@ func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...
 	}, log)
 	require.NoError(t, err)
 
-	op, err := operator.NewClient(operator.Config{
+	op, err := scaler.NewClient(scaler.Config{
 		Addresses:       addresses,
 		TotalHashRanges: totalHashRanges,
 		RetryCount:      3,
@@ -1542,7 +1542,7 @@ func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...
 	go func() {
 		err := opServer.Start()
 		if !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("Operator server error: %v", err)
+			t.Errorf("Scaler server error: %v", err)
 		}
 	}()
 	t.Cleanup(func() {
@@ -1550,18 +1550,18 @@ func startOperatorHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...
 	})
 
 	return &opClient{
-		t:        t,
-		client:   http.DefaultClient,
-		url:      fmt.Sprintf("http://localhost:%d", freePort),
-		operator: op,
+		t:      t,
+		client: http.DefaultClient,
+		url:    fmt.Sprintf("http://localhost:%d", freePort),
+		scaler: op,
 	}
 }
 
 type opClient struct {
-	t        testing.TB
-	client   *http.Client
-	url      string
-	operator *operator.Client
+	t      testing.TB
+	client *http.Client
+	url    string
+	scaler *scaler.Client
 }
 
 func (c *opClient) Do(endpoint string, data any, success ...bool) string {

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/internal/operator"
+	"github.com/rudderlabs/keydb/internal/scaler"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
@@ -21,7 +21,7 @@ import (
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM)
 
-	conf := config.New(config.WithEnvPrefix("KEYDB_OPERATOR"))
+	conf := config.New(config.WithEnvPrefix("KEYDB_SCALER"))
 	logFactory := logger.NewFactory(conf)
 	defer logFactory.Sync()
 	log := logFactory.NewLogger()
@@ -55,23 +55,23 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 			log.Warnn("Failed to close client", obskit.Error(err))
 		}
 	}()
-	opRetryDelay := conf.GetDuration("operatorRetryDelay", int64(client.DefaultRetryDelay), time.Second)
-	op, err := operator.NewClient(operator.Config{
+	scRetryDelay := conf.GetDuration("scalerRetryDelay", int64(client.DefaultRetryDelay), time.Second)
+	op, err := scaler.NewClient(scaler.Config{
 		Addresses:       strings.Split(nodeAddresses, ","),
 		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
-		RetryCount:      conf.GetInt("operatorRetryCount", client.DefaultRetryCount),
-		RetryDelay:      opRetryDelay,
-	}, log.Child("operator"))
+		RetryCount:      conf.GetInt("scalerRetryCount", client.DefaultRetryCount),
+		RetryDelay:      scRetryDelay,
+	}, log.Child("scaler"))
 	if err != nil {
-		return fmt.Errorf("failed to create operator: %w", err)
+		return fmt.Errorf("failed to create scaler: %w", err)
 	}
 	defer func() {
 		if err := op.Close(); err != nil {
-			log.Warnn("Failed to close operator", obskit.Error(err))
+			log.Warnn("Failed to close scaler", obskit.Error(err))
 		}
 	}()
 
-	log.Infon("Starting operator",
+	log.Infon("Starting scaler",
 		logger.NewIntField("totalHashRanges", int64(clientConfig.TotalHashRanges)),
 		logger.NewIntField("retryCount", int64(clientConfig.RetryCount)),
 		logger.NewDurationField("retryDelay", clientConfig.RetryDelay),

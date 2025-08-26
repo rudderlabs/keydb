@@ -24,9 +24,9 @@ env:
     type=semver,pattern={{version}},enable=${{ github.ref == format('refs/heads/{0}', 'main') || github.event_name == 'release' }}
     type=semver,pattern={{major}},enable=${{ github.ref == format('refs/heads/{0}', 'main') || github.event_name == 'release' }}
     type=semver,pattern={{major}}.{{minor}},enable=${{ github.ref == format('refs/heads/{0}', 'main') || github.event_name == 'release' }}
-  docker_images_keydb_operator: |
-    name=rudderstack/rudder-keydb-operator
-  docker_tags_keydb_operator: |
+  docker_images_keydb_scaler: |
+    name=rudderstack/rudder-keydb-scaler
+  docker_tags_keydb_scaler: |
     type=ref,event=branch
     type=raw,value=${{ github.head_ref }},enable=${{ github.event_name == 'pull_request' }}
     type=raw,value=latest,enable=${{ github.event_name == 'release' }}
@@ -130,7 +130,7 @@ jobs:
             docker buildx imagetools create -t $tag $arm_tag $amd_tag
           done <<< "${{ needs.docker-meta-keydb.outputs.tags }}"
 
-  docker-meta-keydb-operator:
+  docker-meta-keydb-scaler:
     runs-on: ubuntu-latest
     outputs:
       labels: ${{ steps.meta.outputs.labels }}
@@ -147,37 +147,37 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{env.docker_images_keydb_operator}}
-          tags: ${{env.docker_tags_keydb_operator}}
+          images: ${{env.docker_images_keydb_scaler}}
+          tags: ${{env.docker_tags_keydb_scaler}}
       - name: Docker arm64 meta
         id: arm64_meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{env.docker_images_keydb_operator}}
-          tags: ${{env.docker_tags_keydb_operator}}
+          images: ${{env.docker_images_keydb_scaler}}
+          tags: ${{env.docker_tags_keydb_scaler}}
           flavor: |
             suffix=-${{env.arch_arm64}},onlatest=true
       - name: Docker amd64 meta
         id: amd64_meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{env.docker_images_keydb_operator}}
-          tags: ${{env.docker_tags_keydb_operator}}
+          images: ${{env.docker_images_keydb_scaler}}
+          tags: ${{env.docker_tags_keydb_scaler}}
           flavor: |
             suffix=-${{env.arch_amd64}},onlatest=true
-  docker-keydb-operator:
+  docker-keydb-scaler:
     needs:
-      - docker-meta-keydb-operator
+      - docker-meta-keydb-scaler
     strategy:
       matrix:
         build-config:
           - os: [ self-hosted, Linux, ARM64, ubuntu-22 ]
-            tags: ${{needs.docker-meta-keydb-operator.outputs.arm64_tags}}
-            labels: ${{needs.docker-meta-keydb-operator.outputs.arm64_labels}}
+            tags: ${{needs.docker-meta-keydb-scaler.outputs.arm64_tags}}
+            labels: ${{needs.docker-meta-keydb-scaler.outputs.arm64_labels}}
             platform: linux/arm64
           - os: ubuntu-latest
-            tags: ${{needs.docker-meta-keydb-operator.outputs.amd64_tags}}
-            labels: ${{needs.docker-meta-keydb-operator.outputs.amd64_labels}}
+            tags: ${{needs.docker-meta-keydb-scaler.outputs.amd64_tags}}
+            labels: ${{needs.docker-meta-keydb-scaler.outputs.amd64_labels}}
             platform: linux/amd64
     runs-on: ${{matrix.build-config.os}}
     steps:
@@ -194,20 +194,20 @@ jobs:
         uses: rudderlabs/build-scan-push-action@v1.5.3
         with:
           context: .
-          file: ./Dockerfile-operator
+          file: ./Dockerfile-scaler
           platforms: ${{ matrix.build-config.platform }}
           push: true
           tags: ${{ matrix.build-config.tags }}
           labels: ${{ matrix.build-config.labels }}
           build-args: |
-            BUILD_DATE=${{ needs.docker-meta-keydb-operator.outputs.build-date }}
-            VERSION=${{ needs.docker-meta-keydb-operator.outputs.version }}
+            BUILD_DATE=${{ needs.docker-meta-keydb-scaler.outputs.build-date }}
+            VERSION=${{ needs.docker-meta-keydb-scaler.outputs.version }}
             COMMIT_HASH=${{ github.sha }}
-            REVISION=${{ needs.docker-meta-keydb-operator.outputs.revision }}
+            REVISION=${{ needs.docker-meta-keydb-scaler.outputs.revision }}
 
-  create-manifest-keydb-operator:
+  create-manifest-keydb-scaler:
     runs-on: ubuntu-latest
-    needs: [ docker-keydb-operator, docker-meta-keydb-operator ]
+    needs: [ docker-keydb-scaler, docker-meta-keydb-scaler ]
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -220,9 +220,9 @@ jobs:
         run: |
           while read -r tag; do
             echo "$tag"
-            arm_tag=$(echo "${{ needs.docker-meta-keydb-operator.outputs.arm64_tags }}" | grep "$tag")
+            arm_tag=$(echo "${{ needs.docker-meta-keydb-scaler.outputs.arm64_tags }}" | grep "$tag")
             echo "$arm_tag"
-            amd_tag=$(echo "${{ needs.docker-meta-keydb-operator.outputs.amd64_tags }}" | grep "$tag")
+            amd_tag=$(echo "${{ needs.docker-meta-keydb-scaler.outputs.amd64_tags }}" | grep "$tag")
             echo "$amd_tag"
             docker buildx imagetools create -t $tag $arm_tag $amd_tag
-          done <<< "${{ needs.docker-meta-keydb-operator.outputs.tags }}"
+          done <<< "${{ needs.docker-meta-keydb-scaler.outputs.tags }}"

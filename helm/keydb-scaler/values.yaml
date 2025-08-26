@@ -1,10 +1,10 @@
-# Default values for keydb-operator.
+# Default values for keydb-scaler.
 # This is a YAML-formatted file.
 
 replicaCount: 1
 
 image:
-  repository: rudderstack/rudder-keydb-operator
+  repository: rudderstack/rudder-keydb-scaler
   tag: latest
   pullPolicy: Always
 
@@ -26,14 +26,14 @@ tolerations: []
 
 affinity: {}
 
-# KeyDB node addresses that the operator will connect to
+# KeyDB node addresses that the scaler will connect to
 nodeAddresses: [
   "keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051",
   "keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051",
   "keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051"
 ]
 
-# Configuration for the operator
+# Configuration for the scaler
 config:
   # Total hash ranges for the client
   totalHashRanges: 128

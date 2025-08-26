@@ -94,9 +94,9 @@ for i, key := range keys {
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
 
-## Operator
+## Scaler
 
-The Operator is responsible for managing the KeyDB cluster, including scaling operations.
+The Scaler is responsible for managing the KeyDB cluster, including scaling operations.
 
 ### Starting a Node
 
@@ -124,29 +124,29 @@ go run cmd/node/main.go
 ### Scaling the Cluster
 
 To scale the KeyDB cluster, use the client's `CreateSnapshots`, `Scale` and `ScaleComplete` methods:
-Before scaling the cluster you should call `/createSnapshots` on the Operator HTTP API to force all nodes to create
+Before scaling the cluster you should call `/createSnapshots` on the Scaler HTTP API to force all nodes to create
 snapshots of the hash ranges that need moving.
 
 If the `CreateSnapshots` operation is skipped, new nodes added to the cluster during a scale operation, won't be
 able to get the data for the hash ranges that they are going to serve, leading to missing data.
 
 ```go
-// Create a client for operator operations
+// Create a client for scaler operations
 existingNodes := []string{
     "localhost:50051",
     "localhost:50052",
     "localhost:50053",
 }
-operatorClient, err := client.NewClient(client.Config{
+scalerClient, err := client.NewClient(client.Config{
     Addresses: existingNodes, // Connect to any existing node
 })
 if err != nil {
     // Handle error
 }
-defer operatorClient.Close()
+defer scalerClient.Close()
 
 // Let's force a snapshot creation on the old nodes first
-err = operatorClient.CreateSnapshots(context.Background())
+err = scalerClient.CreateSnapshots(context.Background())
 if err != nil {
     // Handle error
 }
@@ -156,13 +156,13 @@ newNode := "localhost:50054", // New node
 existingNodes = append(existingNodes, newNode)
 
 // Scale the cluster
-err = operatorClient.Scale(context.Background(), existingNodes...)
+err = scalerClient.Scale(context.Background(), existingNodes...)
 if err != nil {
     // Handle error
 }
 
 // Notify all nodes that scaling is complete
-err = operatorClient.ScaleComplete(context.Background())
+err = scalerClient.ScaleComplete(context.Background())
 if err != nil {
     // Handle error
 }
@@ -173,7 +173,7 @@ if err != nil {
 To get information about a specific node:
 
 ```go
-nodeInfo, err := operatorClient.GetNodeInfo(context.Background(), 0) // Node ID 0
+nodeInfo, err := scalerClient.GetNodeInfo(context.Background(), 0) // Node ID 0
 if err != nil {
     // Handle error
 }
@@ -194,7 +194,7 @@ fmt.Printf("Last Snapshot: %s\n", time.Unix(int64(nodeInfo.LastSnapshotTimestamp
 
 # Known issues
 
-* Scaling operations have not been tested during failures (e.g. operator crash, nodes crash, etc...)
+* Scaling operations have not been tested during failures (e.g. scaler crash, nodes crash, etc...)
 * New nodes are to be created first before scaling
 * Creating and uploading snapshots isn't optimal at the moment
 * Compaction is creating latencies at times
