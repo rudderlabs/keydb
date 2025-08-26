@@ -116,6 +116,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		),
 		Addresses:                 strings.Split(nodeAddresses, ","),
 		LogTableStructureDuration: conf.GetDuration("logTableStructureDuration", 10, time.Minute),
+		BackupFolderName:          conf.GetString("KUBE_NAMESPACE", ""),
 	}
 
 	port := conf.GetInt("port", 50051)
