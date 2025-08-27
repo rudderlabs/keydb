@@ -370,6 +370,12 @@ func (s *httpServer) handleScaleUp(
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
+	log := s.logger.Withn(
+		logger.NewIntField("oldClusterSize", int64(oldClusterSize)),
+		logger.NewIntField("newClusterSize", int64(newClusterSize)),
+	)
+	log.Infon("Starting scale up")
+
 	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleUp, oldAddresses, newAddresses, func() error {
 		// Step 1: Update cluster data with new addresses
 		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
@@ -419,6 +425,8 @@ func (s *httpServer) handleScaleUp(
 				return err
 			}
 			s.logger.Infon("All snapshots created")
+		} else {
+			log.Infon("Skipping snapshot creation")
 		}
 
 		// Step 4: Load snapshots to destination nodes
@@ -459,6 +467,12 @@ func (s *httpServer) handleScaleDown(
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
 
+	log := s.logger.Withn(
+		logger.NewIntField("oldClusterSize", int64(oldClusterSize)),
+		logger.NewIntField("newClusterSize", int64(newClusterSize)),
+	)
+	log.Infon("Starting scale down")
+
 	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleDown, oldAddresses, newAddresses, func() error {
 		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
 			oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
@@ -489,6 +503,8 @@ func (s *httpServer) handleScaleDown(
 				return fmt.Errorf("waiting for snapshot creation: %w", err)
 			}
 			s.logger.Infon("All snapshots created")
+		} else {
+			log.Infon("Skipping snapshot creation")
 		}
 
 		// Step 2: Load snapshots to destination nodes
@@ -570,6 +586,8 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 		nodeIDs[i] = i
 	}
 
+	s.logger.Infon("Starting scale complete operation")
+
 	err := s.retryViaPolicy(ctx, rp, func() error {
 		if err := s.scaler.Scale(ctx, nodeIDs); err != nil {
 			return fmt.Errorf("scaling nodes: %w", err)
@@ -582,6 +600,8 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 		return err
 	}
 
+	s.logger.Infon("Scale command sent to all nodes")
+
 	err = s.retryViaPolicy(ctx, rp, func() error {
 		if err := s.scaler.ScaleComplete(ctx, nodeIDs); err != nil {
 			return fmt.Errorf("completing scale operation: %w", err)
@@ -593,6 +613,8 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 	if err != nil {
 		return err
 	}
+
+	s.logger.Infon("Scale complete command sent to all nodes")
 
 	return nil
 }
