@@ -3,6 +3,7 @@ package badger
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -194,4 +195,49 @@ func TestCancelSnapshot(t *testing.T) {
 	t.Run("compression", func(t *testing.T) {
 		run(t, true)
 	})
+}
+
+func TestSnapshotContextCancellationResourceCleanup(t *testing.T) {
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Compress", true)
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+
+	bdb, err := New(conf, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, bdb.Close())
+	})
+
+	// Add some data to make the snapshot process take some time
+	keys := make([]string, 1000)
+	for i := 0; i < 1000; i++ {
+		keys[i] = fmt.Sprintf("key%d", i)
+	}
+
+	err = bdb.Put(map[uint32][]string{0: keys}, time.Hour)
+	require.NoError(t, err)
+
+	// Create a context that we'll cancel during snapshot creation
+	snapshotCtx, cancel := context.WithCancel(context.Background())
+
+	// Run snapshot creation in a separate goroutine
+	snapshotErr := make(chan error, 1)
+	go func() {
+		_, _, err := bdb.CreateSnapshots(snapshotCtx, map[uint32]io.Writer{0: &bytes.Buffer{}}, map[uint32]uint64{})
+		snapshotErr <- err
+	}()
+
+	// Give the snapshot process a moment to start, then cancel the context
+	time.Sleep(100 * time.Nanosecond)
+	cancel()
+
+	// Wait for the snapshot process to complete
+	err = <-snapshotErr
+	close(snapshotErr)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, context.Canceled), "Expected context.Canceled error, got: %v", err)
+
+	// Try to create another snapshot to ensure the cache is in a good state
+	_, _, err = bdb.CreateSnapshots(context.Background(), map[uint32]io.Writer{0: &bytes.Buffer{}}, map[uint32]uint64{})
+	require.NoError(t, err, "Cache should be in a good state after context cancellation")
 }
