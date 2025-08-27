@@ -209,7 +209,7 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 }
 
 // CreateSnapshots forces the creation of snapshots on a node
-// WARNING: This method is meant to be used ONLY by an Scaler!!!
+// WARNING: This method is meant to be used ONLY by a Scaler!!!
 func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -259,7 +259,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 }
 
 // LoadSnapshots forces all nodes to load snapshots from cloud storage
-// This method is meant to be used by an Scaler process only!
+// This method is meant to be used by a Scaler process only!
 func (c *Client) LoadSnapshots(ctx context.Context, nodeID uint32, hashRanges ...uint32) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
