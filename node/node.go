@@ -388,7 +388,7 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 
 	if !download {
 		// We still had to do the above in order to populate the "since" map
-		s.logger.Infon("Downloading disabled, skipping snapshot initialization")
+		s.logger.Infon("Downloading disabled, skipping snapshots initialization")
 		return nil
 	}
 
@@ -694,7 +694,7 @@ func (s *Service) CreateSnapshots(
 	s.logger.Infon("Create snapshots request received")
 
 	if s.scaling {
-		s.logger.Warnn("Skipping snapshot while scaling")
+		s.logger.Warnn("Skipping snapshots while scaling")
 		return &pb.CreateSnapshotsResponse{
 			Success:      false,
 			ErrorMessage: "scaling operation in progress",

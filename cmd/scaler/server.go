@@ -379,7 +379,7 @@ func (s *httpServer) handleScaleUp(
 	start := time.Now()
 	defer func() {
 		s.logger.Infon("Scale up completed",
-			logger.NewDurationField("duration", time.Since(start)),
+			logger.NewStringField("duration", time.Since(start).String()),
 		)
 	}()
 
@@ -425,7 +425,7 @@ func (s *httpServer) handleScaleUp(
 						}
 						s.logger.Infon("Node snapshots created",
 							logger.NewIntField("nodeId", int64(sourceNodeID)),
-							logger.NewDurationField("duration", time.Since(start)),
+							logger.NewStringField("duration", time.Since(start).String()),
 						)
 						return nil
 					}, "Cannot create snapshots",
@@ -436,9 +436,9 @@ func (s *httpServer) handleScaleUp(
 			if err := group.Wait(); err != nil {
 				return err
 			}
-			s.logger.Infon("All snapshots created", logger.NewDurationField("duration", time.Since(start)))
+			s.logger.Infon("All snapshots created", logger.NewStringField("duration", time.Since(start).String()))
 		} else {
-			log.Infon("Skipping snapshot creation")
+			log.Infon("Skipping snapshots creation")
 		}
 
 		// Step 4: Load snapshots to destination nodes
@@ -458,7 +458,7 @@ func (s *httpServer) handleScaleUp(
 					}
 					s.logger.Infon("Node snapshots loaded",
 						logger.NewIntField("nodeId", int64(nodeID)),
-						logger.NewDurationField("duration", time.Since(start)),
+						logger.NewStringField("duration", time.Since(start).String()),
 					)
 					return nil
 				}, "Cannot load snapshots",
@@ -469,7 +469,7 @@ func (s *httpServer) handleScaleUp(
 		if err := group.Wait(); err != nil {
 			return fmt.Errorf("waiting for snapshot loading: %w", err)
 		}
-		s.logger.Infon("All snapshots loaded", logger.NewDurationField("duration", time.Since(start)))
+		s.logger.Infon("All snapshots loaded", logger.NewStringField("duration", time.Since(start).String()))
 
 		// Step 5: Scale all nodes
 		return s.completeScaleOperation(ctx, newClusterSize, retryPolicy)
@@ -493,7 +493,7 @@ func (s *httpServer) handleScaleDown(
 	start := time.Now()
 	defer func() {
 		s.logger.Infon("Scale down completed",
-			logger.NewDurationField("duration", time.Since(start)),
+			logger.NewStringField("duration", time.Since(start).String()),
 		)
 	}()
 
@@ -520,7 +520,7 @@ func (s *httpServer) handleScaleDown(
 						}
 						s.logger.Infon("Node snapshots created",
 							logger.NewIntField("nodeId", int64(sourceNodeID)),
-							logger.NewDurationField("duration", time.Since(start)),
+							logger.NewStringField("duration", time.Since(start).String()),
 						)
 						return nil
 					}, "Cannot create snapshots",
@@ -531,9 +531,9 @@ func (s *httpServer) handleScaleDown(
 			if err := group.Wait(); err != nil {
 				return fmt.Errorf("waiting for snapshot creation: %w", err)
 			}
-			s.logger.Infon("All snapshots created", logger.NewDurationField("duration", time.Since(start)))
+			s.logger.Infon("All snapshots created", logger.NewStringField("duration", time.Since(start).String()))
 		} else {
-			log.Infon("Skipping snapshot creation")
+			log.Infon("Skipping snapshots creation")
 		}
 
 		// Step 2: Load snapshots to destination nodes
@@ -553,7 +553,7 @@ func (s *httpServer) handleScaleDown(
 					}
 					s.logger.Infon("Node snapshots loaded",
 						logger.NewIntField("nodeId", int64(nodeID)),
-						logger.NewDurationField("duration", time.Since(start)),
+						logger.NewStringField("duration", time.Since(start).String()),
 					)
 					return nil
 				}, "Cannot load snapshots",
@@ -564,7 +564,7 @@ func (s *httpServer) handleScaleDown(
 		if err := group.Wait(); err != nil {
 			return fmt.Errorf("waiting for snapshot loading: %w", err)
 		}
-		s.logger.Infon("All snapshots loaded", logger.NewDurationField("duration", time.Since(start)))
+		s.logger.Infon("All snapshots loaded", logger.NewStringField("duration", time.Since(start).String()))
 
 		// Step 3: Update cluster data with new addresses
 		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
@@ -603,7 +603,7 @@ func (s *httpServer) handleAutoHealing(
 	start := time.Now()
 	defer func() {
 		s.logger.Infon("Auto-healing completed",
-			logger.NewDurationField("duration", time.Since(start)),
+			logger.NewStringField("duration", time.Since(start).String()),
 		)
 	}()
 
@@ -698,7 +698,7 @@ func (s *httpServer) retryViaPolicy(
 		backoff.WithMaxElapsedTime(retryPolicy.MaxElapsedTime),
 		backoff.WithNotify(func(err error, duration time.Duration) {
 			s.logger.Warnn(errorMessage, append(loggerFields,
-				logger.NewDurationField("duration", duration),
+				logger.NewStringField("duration", duration.String()),
 				obskit.Error(err),
 			)...)
 		}),
@@ -750,7 +750,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 	start := time.Now()
 	defer func() {
 		log.Infon("Hash range movements request completed",
-			logger.NewDurationField("duration", time.Since(start)),
+			logger.NewStringField("duration", time.Since(start).String()),
 		)
 	}()
 
@@ -795,7 +795,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 						}
 						log.Infon("Node snapshots created",
 							logger.NewIntField("nodeId", int64(sourceNodeID)),
-							logger.NewDurationField("duration", time.Since(start)),
+							logger.NewStringField("duration", time.Since(start).String()),
 						)
 						return nil
 					}, "Cannot create snapshots",
@@ -824,7 +824,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 					}
 					log.Infon("Node snapshots loaded",
 						logger.NewIntField("nodeId", int64(destinationNodeID)),
-						logger.NewDurationField("duration", time.Since(start)),
+						logger.NewStringField("duration", time.Since(start).String()),
 					)
 					return nil
 				}, "Cannot load snapshots",
