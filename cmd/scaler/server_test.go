@@ -743,14 +743,15 @@ func TestHashRangeMovements(t *testing.T) {
 			TotalHashRanges: 8,
 		})
 
-		var movements []HashRangeMovement
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		var response HashRangeMovementsResponse
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we have some movements
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Verify each movement has valid data
-		for _, movement := range movements {
+		for _, movement := range response.Movements {
 			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
 			require.Less(t, movement.From, uint32(2), "from node should be less than old cluster size")
 			require.Less(t, movement.To, uint32(3), "to node should be less than new cluster size")
@@ -765,14 +766,15 @@ func TestHashRangeMovements(t *testing.T) {
 			TotalHashRanges: 8,
 		})
 
-		var movements []HashRangeMovement
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		var response HashRangeMovementsResponse
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we have some movements
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Verify each movement has valid data
-		for _, movement := range movements {
+		for _, movement := range response.Movements {
 			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
 			require.Less(t, movement.From, uint32(3), "from node should be less than old cluster size")
 			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
@@ -787,11 +789,12 @@ func TestHashRangeMovements(t *testing.T) {
 			TotalHashRanges: 8,
 		})
 
-		var movements []HashRangeMovement
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		var response HashRangeMovementsResponse
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Should be empty when cluster size doesn't change
-		require.Empty(t, movements)
+		require.EqualValues(t, 0, response.Total)
+		require.Len(t, response.Movements, 0)
 	})
 
 	// Test error cases
@@ -879,14 +882,15 @@ func TestHashRangeMovements(t *testing.T) {
 			Upload:          true,
 		})
 
-		var movements []HashRangeMovement
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		var response HashRangeMovementsResponse
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with upload=true
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Verify each movement has valid data
-		for _, movement := range movements {
+		for _, movement := range response.Movements {
 			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
 			require.Less(t, movement.From, uint32(1), "from node should be less than old cluster size")
 			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
@@ -916,13 +920,14 @@ func TestHashRangeMovements(t *testing.T) {
 			Upload:          true,
 		})
 
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with upload=true and splitUploads=true
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Verify each movement has valid data
-		for _, movement := range movements {
+		for _, movement := range response.Movements {
 			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
 			require.Less(t, movement.From, uint32(1), "from node should be less than old cluster size")
 			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
@@ -965,10 +970,11 @@ func TestHashRangeMovements(t *testing.T) {
 			Download:        true,
 		})
 
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with download=true
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Try to fetch only keys that are served by the new node to see if they exist
 		keys := []string{

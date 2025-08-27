@@ -95,6 +95,11 @@ type HashRangeMovementsRequest struct {
 	LoadSnapshotsMaxConcurrency uint32      `json:"load_snapshots_max_concurrency,omitempty"`
 }
 
+type HashRangeMovementsResponse struct {
+	Total     int                 `json:"total"`
+	Movements []HashRangeMovement `json:"movements"`
+}
+
 // HashRangeMovement represents a single hash range movement
 type HashRangeMovement struct {
 	HashRange uint32 `json:"hash_range"`

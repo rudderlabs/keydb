@@ -426,6 +426,7 @@ func (s *httpServer) handleScaleUp(
 						}
 						s.logger.Infon("Node snapshots created",
 							logger.NewIntField("nodeId", int64(sourceNodeID)),
+							logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 							logger.NewStringField("duration", time.Since(start).String()),
 						)
 						return nil
@@ -460,6 +461,7 @@ func (s *httpServer) handleScaleUp(
 					}
 					s.logger.Infon("Node snapshots loaded",
 						logger.NewIntField("nodeId", int64(nodeID)),
+						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 						logger.NewStringField("duration", time.Since(start).String()),
 					)
 					return nil
@@ -522,6 +524,7 @@ func (s *httpServer) handleScaleDown(
 						}
 						s.logger.Infon("Node snapshots created",
 							logger.NewIntField("nodeId", int64(sourceNodeID)),
+							logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 							logger.NewStringField("duration", time.Since(start).String()),
 						)
 						return nil
@@ -556,6 +559,7 @@ func (s *httpServer) handleScaleDown(
 					}
 					s.logger.Infon("Node snapshots loaded",
 						logger.NewIntField("nodeId", int64(nodeID)),
+						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 						logger.NewStringField("duration", time.Since(start).String()),
 					)
 					return nil
@@ -771,14 +775,15 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 	}
 
 	// Convert to response format
-	var movements []HashRangeMovement
+	var response HashRangeMovementsResponse
 	for sourceNodeID, hashRanges := range sourceNodeMovements {
 		for _, hashRange := range hashRanges {
-			movements = append(movements, HashRangeMovement{
+			response.Movements = append(response.Movements, HashRangeMovement{
 				HashRange: hashRange,
 				From:      sourceNodeID,
 				To:        destinationMap[hashRange],
 			})
+			response.Total++
 		}
 	}
 
@@ -799,6 +804,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 						}
 						log.Infon("Node snapshots created",
 							logger.NewIntField("nodeId", int64(sourceNodeID)),
+							logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 							logger.NewStringField("duration", time.Since(start).String()),
 						)
 						return nil
@@ -830,6 +836,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 					}
 					log.Infon("Node snapshots loaded",
 						logger.NewIntField("nodeId", int64(destinationNodeID)),
+						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 						logger.NewStringField("duration", time.Since(start).String()),
 					)
 					return nil
@@ -847,7 +854,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
-	if err := jsonrs.NewEncoder(w).Encode(movements); err != nil {
+	if err := jsonrs.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
 		return
 	}
