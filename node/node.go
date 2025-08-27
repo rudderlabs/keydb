@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -351,6 +352,7 @@ func (s *Service) initCaches(
 		selected = currentRanges
 	}
 
+	totalFiles := int64(0)
 	filesByHashRange := make(map[uint32][]string, len(files))
 	for _, file := range files {
 		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
@@ -386,6 +388,7 @@ func (s *Service) initCaches(
 			logger.NewStringField("filename", file.Key),
 		)
 		filesByHashRange[hashRange] = append(filesByHashRange[hashRange], file.Key)
+		totalFiles++
 	}
 
 	if !download {
@@ -403,9 +406,10 @@ func (s *Service) initCaches(
 	}
 
 	var (
-		group, gCtx = kitsync.NewEagerGroup(ctx, int(maxConcurrency))
-		buffers     = make([]io.Reader, 0, len(filesByHashRange))
-		buffersMu   sync.Mutex
+		group, gCtx  = kitsync.NewEagerGroup(ctx, int(maxConcurrency))
+		buffers      = make([]io.Reader, 0, len(filesByHashRange))
+		buffersMu    sync.Mutex
+		filesLoading atomic.Int64
 	)
 	for r := range filesByHashRange {
 		snapshotFiles := filesByHashRange[r]
@@ -416,7 +420,12 @@ func (s *Service) initCaches(
 
 		group.Go(func() error { // Try to load snapshot for this range
 			for _, snapshotFile := range snapshotFiles {
-				s.logger.Infon("Loading snapshot file", logger.NewStringField("filename", snapshotFile))
+				filesLoading.Add(1)
+				s.logger.Infon("Loading snapshot file",
+					logger.NewStringField("filename", snapshotFile),
+					logger.NewIntField("totalFiles", totalFiles),
+					logger.NewFloatField("percentage", float64(filesLoading.Load())/float64(totalFiles)),
+				)
 
 				buf := aws.NewWriteAtBuffer([]byte{})
 				err := s.storage.Download(gCtx, buf, snapshotFile)
@@ -440,6 +449,7 @@ func (s *Service) initCaches(
 	if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
 		return fmt.Errorf("failed to load snapshots: %w", err)
 	}
+	s.logger.Infon("Caches initialized successfully")
 	return nil
 }
 
