@@ -260,7 +260,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 
 // LoadSnapshots forces all nodes to load snapshots from cloud storage
 // This method is meant to be used by a Scaler process only!
-func (c *Client) LoadSnapshots(ctx context.Context, nodeID uint32, hashRanges ...uint32) error {
+func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint32, hashRanges ...uint32) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -273,7 +273,8 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID uint32, hashRanges ..
 	}
 
 	req := &pb.LoadSnapshotsRequest{
-		HashRange: hashRanges,
+		HashRange:      hashRanges,
+		MaxConcurrency: maxConcurrency,
 	}
 
 	var err error

@@ -89,7 +89,7 @@ func TestSimple(t *testing.T) {
 		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
 		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 0))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
 		require.NoError(t, err)
@@ -172,7 +172,7 @@ func TestScaleUpAndDown(t *testing.T) {
 			"Node should populate the since map upon start-up",
 		)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 1, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1}))
 
@@ -197,7 +197,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		// remove node0, you have to remove node1
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, hash.GetNodeHashRangesList(0, 1, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, hash.GetNodeHashRangesList(0, 1, totalHashRanges)...))
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
@@ -274,7 +274,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			Addresses:        []string{node0Address},
 		}, node1Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 1, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1}))
 
@@ -295,7 +295,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			Addresses:        []string{node0Address, node1Address},
 		}, node2Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address, node2Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 2, hash.GetNodeHashRangesList(2, 3, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 2, 0, hash.GetNodeHashRangesList(2, 3, totalHashRanges)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1, 2}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1, 2}))
 
@@ -321,7 +321,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// node0, you have to remove node1
 		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
 		require.NoError(t, op.CreateSnapshots(ctx, 2, false))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, hash.GetNodeHashRangesList(0, 1, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, hash.GetNodeHashRangesList(0, 1, totalHashRanges)...))
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
@@ -417,7 +417,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
 		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 0))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
 		require.NoError(t, err)
@@ -524,7 +524,7 @@ func TestSelectedSnapshots(t *testing.T) {
 		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
 		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 0))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
 		require.NoError(t, err)

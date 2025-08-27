@@ -31,8 +31,9 @@ type CreateSnapshotsRequest struct {
 
 // LoadSnapshotsRequest represents a request to load snapshots
 type LoadSnapshotsRequest struct {
-	NodeID     uint32   `json:"node_id"`
-	HashRanges []uint32 `json:"hash_ranges,omitempty"`
+	NodeID         uint32   `json:"node_id"`
+	HashRanges     []uint32 `json:"hash_ranges,omitempty"`
+	MaxConcurrency uint32   `json:"max_concurrency"`
 }
 
 // ScaleRequest represents a request to scale the cluster
@@ -68,9 +69,10 @@ type AutoScaleRequest struct {
 	NewNodesAddresses []string `json:"new_nodes_addresses"`
 	// FullSync indicates whether to perform a full synchronization during snapshot creation.
 	// When true, all data will be included in snapshots regardless of incremental changes.
-	FullSync            bool        `json:"full_sync,omitempty"`
-	RetryPolicy         RetryPolicy `json:"retry_policy,omitempty"`
-	SkipCreateSnapshots bool        `json:"skip_create_snapshots,omitempty"`
+	FullSync                    bool        `json:"full_sync,omitempty"`
+	RetryPolicy                 RetryPolicy `json:"retry_policy,omitempty"`
+	SkipCreateSnapshots         bool        `json:"skip_create_snapshots,omitempty"`
+	LoadSnapshotsMaxConcurrency uint32      `json:"load_snapshots_max_concurrency,omitempty"`
 }
 
 type RetryPolicy struct {
@@ -83,13 +85,14 @@ type RetryPolicy struct {
 
 // HashRangeMovementsRequest represents a request to preview hash range movements
 type HashRangeMovementsRequest struct {
-	OldClusterSize  uint32      `json:"old_cluster_size"`
-	NewClusterSize  uint32      `json:"new_cluster_size"`
-	TotalHashRanges uint32      `json:"total_hash_ranges"`
-	Upload          bool        `json:"upload,omitempty"`
-	Download        bool        `json:"download,omitempty"`
-	FullSync        bool        `json:"full_sync,omitempty"`
-	RetryPolicy     RetryPolicy `json:"retry_policy,omitempty"`
+	OldClusterSize              uint32      `json:"old_cluster_size"`
+	NewClusterSize              uint32      `json:"new_cluster_size"`
+	TotalHashRanges             uint32      `json:"total_hash_ranges"`
+	Upload                      bool        `json:"upload,omitempty"`
+	Download                    bool        `json:"download,omitempty"`
+	FullSync                    bool        `json:"full_sync,omitempty"`
+	RetryPolicy                 RetryPolicy `json:"retry_policy,omitempty"`
+	LoadSnapshotsMaxConcurrency uint32      `json:"load_snapshots_max_concurrency,omitempty"`
 }
 
 // HashRangeMovement represents a single hash range movement

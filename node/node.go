@@ -219,7 +219,7 @@ func NewService(
 		stats.TimerType, stats.Tags{"success": "false"})
 
 	// Initialize caches for all hash ranges this node handles
-	if err := service.initCaches(ctx, false); err != nil {
+	if err := service.initCaches(ctx, false, 0); err != nil {
 		return nil, err
 	}
 
@@ -308,7 +308,9 @@ func (s *Service) getCurrentRanges() map[uint32]struct{} {
 }
 
 // initCaches initializes the caches for all hash ranges this node handles
-func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRanges ...uint32) error {
+func (s *Service) initCaches(
+	ctx context.Context, download bool, maxConcurrency uint32, selectedHashRanges ...uint32,
+) error {
 	currentRanges := s.getCurrentRanges() // gets the hash ranges for this node
 
 	// Remove caches and key maps for ranges this node no longer handles
@@ -396,8 +398,12 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 		sort.Strings(filesByHashRange[i])
 	}
 
+	if maxConcurrency == 0 {
+		maxConcurrency = uint32(len(currentRanges))
+	}
+
 	var (
-		group, gCtx = kitsync.NewEagerGroup(ctx, len(currentRanges))
+		group, gCtx = kitsync.NewEagerGroup(ctx, int(maxConcurrency))
 		buffers     = make([]io.Reader, 0, len(filesByHashRange))
 		buffersMu   sync.Mutex
 	)
@@ -619,7 +625,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	s.config.Addresses = req.NodesAddresses
 
 	// Reinitialize caches for the new cluster size
-	if err := s.initCaches(ctx, false); err != nil { // Revert to previous cluster size on error
+	if err := s.initCaches(ctx, false, 0); err != nil { // Revert to previous cluster size on error
 		log.Errorn("Failed to initialize caches", obskit.Error(err))
 		s.config.ClusterSize = previousClusterSize
 		s.scaling = false
@@ -667,7 +673,7 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 	s.logger.Infon("Load snapshots request received")
 
 	// Load snapshots for all hash ranges this node handles
-	if err := s.initCaches(ctx, true, req.HashRange...); err != nil {
+	if err := s.initCaches(ctx, true, req.MaxConcurrency, req.HashRange...); err != nil {
 		s.logger.Errorn("Failed to load snapshots", obskit.Error(err))
 		return &pb.LoadSnapshotsResponse{
 			Success:      false,
