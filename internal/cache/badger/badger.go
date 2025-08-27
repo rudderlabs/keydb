@@ -234,7 +234,10 @@ func (c *Cache) CreateSnapshots(
 	defer func() {
 		for _, lw := range lockedWriters {
 			if lw.closer != nil {
+				// this prevents race conditions with Badger's background goroutines
+				lw.mu.Lock()
 				_ = lw.closer.Close()
+				lw.mu.Unlock()
 			}
 		}
 	}()
