@@ -36,7 +36,8 @@ import (
 )
 
 const (
-	testTTL = "5m" // 5 minutes
+	testTTL                 = "5m" // 5 minutes
+	defaultBackupFolderName = "default"
 )
 
 func TestScaleUpAndDown(t *testing.T) {
@@ -86,10 +87,10 @@ func TestScaleUpAndDown(t *testing.T) {
 	// Test CreateSnapshots
 	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 0, FullSync: false}, true)
 
-	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-		regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
-		regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-		regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
+	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+		regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 	)
 
 	node1Conf := newConf()
@@ -148,13 +149,13 @@ func TestScaleUpAndDown(t *testing.T) {
 	// remove node0, you have to remove node1
 	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 0, FullSync: false}, true)
 	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 1, FullSync: false}, true)
-	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-		regexp.MustCompile("^hr_0_s_0_1.snapshot$"),
-		regexp.MustCompile("^hr_0_s_1_2.snapshot$"),
-		regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-		regexp.MustCompile("^hr_1_s_1_2.snapshot$"),
-		regexp.MustCompile("^hr_2_s_0_1.snapshot$"),
-		regexp.MustCompile("^hr_2_s_1_2.snapshot$"),
+	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+		regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_0_s_1_2.snapshot$"),
+		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
 	)
 	_ = s.Do("/loadSnapshots", LoadSnapshotsRequest{
 		NodeID:     0,
@@ -256,8 +257,8 @@ func TestAutoScale(t *testing.T) {
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
 
-	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-		regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
 	)
 
 	// Verify data is still accessible after scale up
@@ -291,9 +292,9 @@ func TestAutoScale(t *testing.T) {
 		},
 	}, true)
 
-	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-		regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-		regexp.MustCompile("^hr_1_s_1_2.snapshot$"),
+	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
 	)
 
 	// Verify scale down worked - check node info
@@ -416,8 +417,8 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
 
-	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-		regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
+	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
 	)
 
 	// Verify data is still accessible after scale up
@@ -448,9 +449,9 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		NewNodesAddresses: []string{node0Address},
 	}, true)
 
-	keydbth.RequireExpectedFiles(ctx, t, minioContainer,
-		regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-		regexp.MustCompile("^hr_1_s_1_2.snapshot$"),
+	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
 	)
 
 	// Verify scale down worked - check node info
@@ -742,14 +743,15 @@ func TestHashRangeMovements(t *testing.T) {
 			TotalHashRanges: 8,
 		})
 
-		var movements []HashRangeMovement
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		var response HashRangeMovementsResponse
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we have some movements
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Verify each movement has valid data
-		for _, movement := range movements {
+		for _, movement := range response.Movements {
 			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
 			require.Less(t, movement.From, uint32(2), "from node should be less than old cluster size")
 			require.Less(t, movement.To, uint32(3), "to node should be less than new cluster size")
@@ -764,14 +766,15 @@ func TestHashRangeMovements(t *testing.T) {
 			TotalHashRanges: 8,
 		})
 
-		var movements []HashRangeMovement
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		var response HashRangeMovementsResponse
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we have some movements
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Verify each movement has valid data
-		for _, movement := range movements {
+		for _, movement := range response.Movements {
 			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
 			require.Less(t, movement.From, uint32(3), "from node should be less than old cluster size")
 			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
@@ -786,11 +789,12 @@ func TestHashRangeMovements(t *testing.T) {
 			TotalHashRanges: 8,
 		})
 
-		var movements []HashRangeMovement
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		var response HashRangeMovementsResponse
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Should be empty when cluster size doesn't change
-		require.Empty(t, movements)
+		require.EqualValues(t, 0, response.Total)
+		require.Len(t, response.Movements, 0)
 	})
 
 	// Test error cases
@@ -878,25 +882,26 @@ func TestHashRangeMovements(t *testing.T) {
 			Upload:          true,
 		})
 
-		var movements []HashRangeMovement
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		var response HashRangeMovementsResponse
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with upload=true
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Verify each movement has valid data
-		for _, movement := range movements {
+		for _, movement := range response.Movements {
 			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
 			require.Less(t, movement.From, uint32(1), "from node should be less than old cluster size")
 			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
 			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
 		}
 
-		keydbth.RequireExpectedFiles(context.Background(), t, minioContainer,
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_5_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_7_s_0_1.snapshot$"),
+		keydbth.RequireExpectedFiles(context.Background(), t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_5_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_7_s_0_1.snapshot$"),
 		)
 
 		_ = s.Do("/put", PutRequest{
@@ -915,13 +920,14 @@ func TestHashRangeMovements(t *testing.T) {
 			Upload:          true,
 		})
 
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with upload=true and splitUploads=true
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Verify each movement has valid data
-		for _, movement := range movements {
+		for _, movement := range response.Movements {
 			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
 			require.Less(t, movement.From, uint32(1), "from node should be less than old cluster size")
 			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
@@ -931,17 +937,17 @@ func TestHashRangeMovements(t *testing.T) {
 		// When splitUploads is true, each hash range gets its own CreateSnapshots call,
 		// resulting in separate snapshot files with different naming patterns.
 		// We expect both the files from the previous test and the new split upload files.
-		keydbth.RequireExpectedFiles(context.Background(), t, minioContainer,
+		keydbth.RequireExpectedFiles(context.Background(), t, minioContainer, defaultBackupFolderName,
 			// Files from the previous "upload" test
-			regexp.MustCompile("^hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_3_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_5_s_0_1.snapshot$"),
-			regexp.MustCompile("^hr_7_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_5_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_7_s_0_1.snapshot$"),
 			// Files from the current "upload with split uploads" test
-			regexp.MustCompile("^hr_1_s_1_2.snapshot$"),
-			regexp.MustCompile("^hr_3_s_1_2.snapshot$"),
-			regexp.MustCompile("^hr_5_s_1_2.snapshot$"),
-			regexp.MustCompile("^hr_7_s_1_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_3_s_1_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_5_s_1_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_7_s_1_2.snapshot$"),
 		)
 
 		newNodeCtx, newNodeCancel := context.WithCancel(context.Background())
@@ -964,10 +970,11 @@ func TestHashRangeMovements(t *testing.T) {
 			Download:        true,
 		})
 
-		require.NoError(t, jsonrs.Unmarshal([]byte(body), &movements))
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with download=true
-		require.NotEmpty(t, movements)
+		require.EqualValues(t, 4, response.Total)
+		require.Len(t, response.Movements, 4)
 
 		// Try to fetch only keys that are served by the new node to see if they exist
 		keys := []string{
@@ -1487,6 +1494,7 @@ func getService(
 		log = lf.NewLogger()
 	}
 	conf.Set("BadgerDB.Dedup.NopLogger", true)
+	nodeConfig.BackupFolderName = defaultBackupFolderName
 	service, err := node.NewService(ctx, nodeConfig, cs, conf, stats.NOP, log)
 	require.NoError(t, err)
 

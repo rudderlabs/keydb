@@ -444,10 +444,11 @@ func (x *GetNodeInfoResponse) GetLastSnapshotTimestamp() uint64 {
 
 // LoadSnapshotsRequest initiates loading snapshots from cloud storage
 type LoadSnapshotsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	HashRange     []uint32               `protobuf:"varint,1,rep,packed,name=hash_range,json=hashRange,proto3" json:"hash_range,omitempty"` // repeated means 0 or more values, pass none to load all snapshots handled by that node
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	HashRange      []uint32               `protobuf:"varint,1,rep,packed,name=hash_range,json=hashRange,proto3" json:"hash_range,omitempty"`         // repeated means 0 or more values, pass none to load all snapshots handled by that node
+	MaxConcurrency uint32                 `protobuf:"varint,2,opt,name=max_concurrency,json=maxConcurrency,proto3" json:"max_concurrency,omitempty"` // how many snapshots should be downloaded concurrently and loaded up (affects node memory)
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *LoadSnapshotsRequest) Reset() {
@@ -485,6 +486,13 @@ func (x *LoadSnapshotsRequest) GetHashRange() []uint32 {
 		return x.HashRange
 	}
 	return nil
+}
+
+func (x *LoadSnapshotsRequest) GetMaxConcurrency() uint32 {
+	if x != nil {
+		return x.MaxConcurrency
+	}
+	return 0
 }
 
 // LoadSnapshotsResponse contains the result of the snapshot loading operation
@@ -893,10 +901,11 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\x0enodesAddresses\x18\x03 \x03(\tR\x0enodesAddresses\x12\x1f\n" +
 	"\vhash_ranges\x18\x04 \x03(\rR\n" +
 	"hashRanges\x126\n" +
-	"\x17last_snapshot_timestamp\x18\x05 \x01(\x04R\x15lastSnapshotTimestamp\"5\n" +
+	"\x17last_snapshot_timestamp\x18\x05 \x01(\x04R\x15lastSnapshotTimestamp\"^\n" +
 	"\x14LoadSnapshotsRequest\x12\x1d\n" +
 	"\n" +
-	"hash_range\x18\x01 \x03(\rR\thashRange\"o\n" +
+	"hash_range\x18\x01 \x03(\rR\thashRange\x12'\n" +
+	"\x0fmax_concurrency\x18\x02 \x01(\rR\x0emaxConcurrency\"o\n" +
 	"\x15LoadSnapshotsResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x17\n" +

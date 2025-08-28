@@ -87,6 +87,7 @@ message GetNodeInfoResponse {
 // LoadSnapshotsRequest initiates loading snapshots from cloud storage
 message LoadSnapshotsRequest {
   repeated uint32 hash_range = 1; // repeated means 0 or more values, pass none to load all snapshots handled by that node
+  uint32 max_concurrency = 2; // how many snapshots should be downloaded concurrently and loaded up (affects node memory)
 }
 
 // LoadSnapshotsResponse contains the result of the snapshot loading operation

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -44,7 +45,7 @@ const (
 )
 
 // file format is hr_<hash_range>_s_<from_timestamp>_<to_timestamp>.snapshot
-var snapshotFilenameRegex = regexp.MustCompile(`^hr_(\d+)_s_(\d+)_(\d+).snapshot$`)
+var snapshotFilenameRegex = regexp.MustCompile(`^.+/hr_(\d+)_s_(\d+)_(\d+).snapshot$`)
 
 // Config holds the configuration for a node
 type Config struct {
@@ -219,7 +220,7 @@ func NewService(
 		stats.TimerType, stats.Tags{"success": "false"})
 
 	// Initialize caches for all hash ranges this node handles
-	if err := service.initCaches(ctx, false); err != nil {
+	if err := service.initCaches(ctx, false, 0); err != nil {
 		return nil, err
 	}
 
@@ -308,7 +309,9 @@ func (s *Service) getCurrentRanges() map[uint32]struct{} {
 }
 
 // initCaches initializes the caches for all hash ranges this node handles
-func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRanges ...uint32) error {
+func (s *Service) initCaches(
+	ctx context.Context, download bool, maxConcurrency uint32, selectedHashRanges ...uint32,
+) error {
 	currentRanges := s.getCurrentRanges() // gets the hash ranges for this node
 
 	// Remove caches and key maps for ranges this node no longer handles
@@ -349,6 +352,7 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 		selected = currentRanges
 	}
 
+	totalFiles := int64(0)
 	filesByHashRange := make(map[uint32][]string, len(files))
 	for _, file := range files {
 		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
@@ -384,11 +388,12 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 			logger.NewStringField("filename", file.Key),
 		)
 		filesByHashRange[hashRange] = append(filesByHashRange[hashRange], file.Key)
+		totalFiles++
 	}
 
 	if !download {
 		// We still had to do the above in order to populate the "since" map
-		s.logger.Infon("Downloading disabled, skipping snapshot initialization")
+		s.logger.Infon("Downloading disabled, skipping snapshots initialization")
 		return nil
 	}
 
@@ -396,10 +401,15 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 		sort.Strings(filesByHashRange[i])
 	}
 
+	if maxConcurrency == 0 {
+		maxConcurrency = uint32(len(currentRanges))
+	}
+
 	var (
-		group, gCtx = kitsync.NewEagerGroup(ctx, len(currentRanges))
-		buffers     = make([]io.Reader, 0, len(filesByHashRange))
-		buffersMu   sync.Mutex
+		group, gCtx  = kitsync.NewEagerGroup(ctx, int(maxConcurrency))
+		buffers      = make([]io.Reader, 0, len(filesByHashRange))
+		buffersMu    sync.Mutex
+		filesLoading atomic.Int64
 	)
 	for r := range filesByHashRange {
 		snapshotFiles := filesByHashRange[r]
@@ -410,7 +420,12 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 
 		group.Go(func() error { // Try to load snapshot for this range
 			for _, snapshotFile := range snapshotFiles {
-				s.logger.Infon("Loading snapshot file", logger.NewStringField("filename", snapshotFile))
+				filesLoading.Add(1)
+				s.logger.Infon("Loading snapshot file",
+					logger.NewStringField("filename", snapshotFile),
+					logger.NewIntField("totalFiles", totalFiles),
+					logger.NewFloatField("percentage", float64(filesLoading.Load())/float64(totalFiles)),
+				)
 
 				buf := aws.NewWriteAtBuffer([]byte{})
 				err := s.storage.Download(gCtx, buf, snapshotFile)
@@ -434,6 +449,7 @@ func (s *Service) initCaches(ctx context.Context, download bool, selectedHashRan
 	if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
 		return fmt.Errorf("failed to load snapshots: %w", err)
 	}
+	s.logger.Infon("Caches initialized successfully")
 	return nil
 }
 
@@ -619,7 +635,7 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	s.config.Addresses = req.NodesAddresses
 
 	// Reinitialize caches for the new cluster size
-	if err := s.initCaches(ctx, false); err != nil { // Revert to previous cluster size on error
+	if err := s.initCaches(ctx, false, 0); err != nil { // Revert to previous cluster size on error
 		log.Errorn("Failed to initialize caches", obskit.Error(err))
 		s.config.ClusterSize = previousClusterSize
 		s.scaling = false
@@ -667,7 +683,7 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 	s.logger.Infon("Load snapshots request received")
 
 	// Load snapshots for all hash ranges this node handles
-	if err := s.initCaches(ctx, true, req.HashRange...); err != nil {
+	if err := s.initCaches(ctx, true, req.MaxConcurrency, req.HashRange...); err != nil {
 		s.logger.Errorn("Failed to load snapshots", obskit.Error(err))
 		return &pb.LoadSnapshotsResponse{
 			Success:      false,
@@ -694,7 +710,7 @@ func (s *Service) CreateSnapshots(
 	s.logger.Infon("Create snapshots request received")
 
 	if s.scaling {
-		s.logger.Warnn("Skipping snapshot while scaling")
+		s.logger.Warnn("Skipping snapshots while scaling")
 		return &pb.CreateSnapshotsResponse{
 			Success:      false,
 			ErrorMessage: "scaling operation in progress",
@@ -788,13 +804,13 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 
 	filesToBeDeletedByHashRange := make(map[uint32][]string)
 	if fullSync {
-		log.Infon("Getting list of existing snapshot files")
-
 		list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
 		files, err := list.Next()
 		if err != nil {
 			return fmt.Errorf("failed to list snapshot files: %w", err)
 		}
+
+		log.Infon("Got list of existing snapshot files", logger.NewIntField("numFiles", int64(len(files))))
 
 		for _, file := range files {
 			matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
@@ -848,18 +864,28 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 
 		s.since[hashRange] = newSince
 
-		if fullSync && len(filesToBeDeletedByHashRange[hashRange]) > 0 {
-			// Clearing up old files that are incremental updates.
-			// Since we've done a "full sync" they are not needed anymore and shouldn't be loaded next time.
-			filesToBeDeleted := filesToBeDeletedByHashRange[hashRange]
-			filesToBeDeletedLogField := logger.NewStringField("filenames", strings.Join(filesToBeDeleted, ","))
+		if fullSync {
+			if len(filesToBeDeletedByHashRange[hashRange]) > 0 {
+				// Clearing up old files that are incremental updates.
+				// Since we've done a "full sync" they are not needed anymore and shouldn't be loaded next time.
+				filesToBeDeleted := filesToBeDeletedByHashRange[hashRange]
+				filesToBeDeletedLogField := logger.NewStringField("filenames", strings.Join(filesToBeDeleted, ","))
 
-			log.Infon("Deleting old snapshot files", filesToBeDeletedLogField)
+				log.Infon("Deleting old snapshot files",
+					filesToBeDeletedLogField, logger.NewIntField("hashRange", int64(hashRange)),
+				)
 
-			err = s.storage.Delete(ctx, filesToBeDeleted)
-			if err != nil {
-				log.Errorn("Failed to delete old snapshot files", filesToBeDeletedLogField, obskit.Error(err))
-				return fmt.Errorf("failed to delete old snapshot files: %w", err)
+				err = s.storage.Delete(ctx, filesToBeDeleted)
+				if err != nil {
+					log.Errorn("Failed to delete old snapshot files",
+						filesToBeDeletedLogField, logger.NewIntField("hashRange", int64(hashRange)), obskit.Error(err),
+					)
+					return fmt.Errorf("failed to delete old snapshot files: %w", err)
+				}
+			} else {
+				log.Infon("No old snapshots files to be deleted",
+					logger.NewIntField("hashRange", int64(hashRange)),
+				)
 			}
 		}
 	}

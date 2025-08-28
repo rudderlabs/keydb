@@ -20,9 +20,12 @@ resources:
     cpu: 100m
     memory: 128Mi
 
-nodeSelector: {}
-
-tolerations: []
+nodeSelector:
+  karpenter.sh/nodepool: critical
+tolerations:
+  - effect: NoSchedule
+    key: type
+    value: critical
 
 affinity: {}
 
