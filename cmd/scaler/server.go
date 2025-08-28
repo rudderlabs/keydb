@@ -379,7 +379,7 @@ func (s *httpServer) handleScaleUp(
 
 	start := time.Now()
 	defer func() {
-		s.logger.Infon("Scale up completed",
+		log.Infon("Scale up completed",
 			logger.NewStringField("duration", time.Since(start).String()),
 		)
 	}()
@@ -398,7 +398,7 @@ func (s *httpServer) handleScaleUp(
 			return err
 		}
 
-		s.logger.Infon("Cluster data updated",
+		log.Infon("Cluster data updated",
 			logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
 		)
 
@@ -409,6 +409,10 @@ func (s *httpServer) handleScaleUp(
 
 		// Step 3: Create snapshots from source nodes for hash ranges that will be moved
 		if !skipCreateSnapshots {
+			log.Infon("Scale up to start creating snapshots",
+				logger.NewIntField("totalNodesAffected", int64(len(sourceNodeMovements))),
+			)
+
 			start := time.Now()
 			group, gCtx := errgroup.WithContext(ctx)
 			for sourceNodeID, hashRanges := range sourceNodeMovements {
@@ -424,7 +428,7 @@ func (s *httpServer) handleScaleUp(
 								sourceNodeID, hashRanges, err,
 							)
 						}
-						s.logger.Infon("Node snapshots created",
+						log.Infon("Node snapshots created",
 							logger.NewIntField("nodeId", int64(sourceNodeID)),
 							logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 							logger.NewStringField("duration", time.Since(start).String()),
@@ -438,12 +442,16 @@ func (s *httpServer) handleScaleUp(
 			if err := group.Wait(); err != nil {
 				return err
 			}
-			s.logger.Infon("All snapshots created", logger.NewStringField("duration", time.Since(start).String()))
+			log.Infon("All snapshots created", logger.NewStringField("duration", time.Since(start).String()))
 		} else {
 			log.Infon("Skipping snapshots creation")
 		}
 
 		// Step 4: Load snapshots to destination nodes
+		log.Infon("Scale up to start loading snapshots",
+			logger.NewIntField("totalNodesAffected", int64(len(destinationNodeMovements))),
+		)
+
 		start := time.Now()
 		group, gCtx := errgroup.WithContext(ctx)
 		for nodeID, hashRanges := range destinationNodeMovements {
@@ -459,7 +467,7 @@ func (s *httpServer) handleScaleUp(
 							nodeID, hashRanges, err,
 						)
 					}
-					s.logger.Infon("Node snapshots loaded",
+					log.Infon("Node snapshots loaded",
 						logger.NewIntField("nodeId", int64(nodeID)),
 						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 						logger.NewStringField("duration", time.Since(start).String()),
@@ -473,7 +481,7 @@ func (s *httpServer) handleScaleUp(
 		if err := group.Wait(); err != nil {
 			return fmt.Errorf("waiting for snapshot loading: %w", err)
 		}
-		s.logger.Infon("All snapshots loaded", logger.NewStringField("duration", time.Since(start).String()))
+		log.Infon("All snapshots loaded", logger.NewStringField("duration", time.Since(start).String()))
 
 		// Step 5: Scale all nodes
 		return s.completeScaleOperation(ctx, newClusterSize, retryPolicy)
@@ -496,7 +504,7 @@ func (s *httpServer) handleScaleDown(
 
 	start := time.Now()
 	defer func() {
-		s.logger.Infon("Scale down completed",
+		log.Infon("Scale down completed",
 			logger.NewStringField("duration", time.Since(start).String()),
 		)
 	}()
@@ -508,6 +516,10 @@ func (s *httpServer) handleScaleDown(
 
 		// Step 1: Create snapshots from source nodes for hash ranges that will be moved
 		if !skipCreateSnapshots {
+			log.Infon("Scale down to start creating snapshots",
+				logger.NewIntField("totalNodesAffected", int64(len(sourceNodeMovements))),
+			)
+
 			start := time.Now()
 			group, gCtx := errgroup.WithContext(ctx)
 			for sourceNodeID, hashRanges := range sourceNodeMovements {
@@ -522,7 +534,7 @@ func (s *httpServer) handleScaleDown(
 								sourceNodeID, hashRanges, err,
 							)
 						}
-						s.logger.Infon("Node snapshots created",
+						log.Infon("Node snapshots created",
 							logger.NewIntField("nodeId", int64(sourceNodeID)),
 							logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 							logger.NewStringField("duration", time.Since(start).String()),
@@ -536,12 +548,16 @@ func (s *httpServer) handleScaleDown(
 			if err := group.Wait(); err != nil {
 				return fmt.Errorf("waiting for snapshot creation: %w", err)
 			}
-			s.logger.Infon("All snapshots created", logger.NewStringField("duration", time.Since(start).String()))
+			log.Infon("All snapshots created", logger.NewStringField("duration", time.Since(start).String()))
 		} else {
 			log.Infon("Skipping snapshots creation")
 		}
 
 		// Step 2: Load snapshots to destination nodes
+		log.Infon("Scale down to start loading snapshots",
+			logger.NewIntField("totalNodesAffected", int64(len(destinationNodeMovements))),
+		)
+
 		start := time.Now()
 		group, gCtx := errgroup.WithContext(ctx)
 		for nodeID, hashRanges := range destinationNodeMovements {
@@ -557,7 +573,7 @@ func (s *httpServer) handleScaleDown(
 							nodeID, hashRanges, err,
 						)
 					}
-					s.logger.Infon("Node snapshots loaded",
+					log.Infon("Node snapshots loaded",
 						logger.NewIntField("nodeId", int64(nodeID)),
 						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 						logger.NewStringField("duration", time.Since(start).String()),
@@ -571,7 +587,7 @@ func (s *httpServer) handleScaleDown(
 		if err := group.Wait(); err != nil {
 			return fmt.Errorf("waiting for snapshot loading: %w", err)
 		}
-		s.logger.Infon("All snapshots loaded", logger.NewStringField("duration", time.Since(start).String()))
+		log.Infon("All snapshots loaded", logger.NewStringField("duration", time.Since(start).String()))
 
 		// Step 3: Update cluster data with new addresses
 		err := s.retryViaPolicy(ctx, retryPolicy, func() error {
@@ -586,7 +602,7 @@ func (s *httpServer) handleScaleDown(
 			return err
 		}
 
-		s.logger.Infon("Cluster data updated",
+		log.Infon("Cluster data updated",
 			logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
 		)
 
@@ -789,6 +805,10 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 
 	// If upload=true, send CreateSnapshots requests to old nodes that are losing hash ranges
 	if req.Upload {
+		log.Infon("Upload of hash ranges is enabled",
+			logger.NewIntField("totalHashRanges", int64(req.TotalHashRanges)),
+		)
+
 		ctx := r.Context()
 		group, gCtx := errgroup.WithContext(ctx)
 		for sourceNodeID, hashRanges := range sourceNodeMovements {
@@ -818,10 +838,15 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		log.Infon("All snapshots created")
 	}
 
 	if req.Download {
+		log.Infon("Download of hash ranges is enabled",
+			logger.NewIntField("totalHashRanges", int64(req.TotalHashRanges)),
+		)
+
 		ctx := r.Context()
 		group, gCtx := errgroup.WithContext(ctx)
 		for destinationNodeID, hashRanges := range destinationNodeMovements {
@@ -849,6 +874,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		log.Infon("All snapshots loaded")
 	}
 
