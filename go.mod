@@ -4,7 +4,7 @@ go 1.24.6
 
 require (
 	github.com/DataDog/zstd v1.5.7
-	github.com/aws/aws-sdk-go v1.55.8
+	github.com/aws/aws-sdk-go v1.55.7
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/dgraph-io/badger/v4 v4.8.0
 	github.com/dgraph-io/ristretto/v2 v2.3.0
