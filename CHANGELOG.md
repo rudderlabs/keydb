@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.1-alpha](https://github.com/rudderlabs/keydb/compare/v0.4.0-alpha...v0.4.1-alpha) (2025-08-28)
+
+
+### Bug Fixes
+
+* handle context cancellation in snapshot creation ([#39](https://github.com/rudderlabs/keydb/issues/39)) ([9cd22ab](https://github.com/rudderlabs/keydb/commit/9cd22abe3d946e9f049505dc9da701292b31f3da))
+
+
+### Miscellaneous
+
+* fixes and log verbosity ([#37](https://github.com/rudderlabs/keydb/issues/37)) ([3590961](https://github.com/rudderlabs/keydb/commit/3590961dea017d4e5ab68d16bff8d4fd44768db2))
+* rename operator to scaler ([#35](https://github.com/rudderlabs/keydb/issues/35)) ([a7fe9f4](https://github.com/rudderlabs/keydb/commit/a7fe9f495b773a540ad6d3f71a2cc6a5418dddea))
+
 ## [0.4.0-alpha](https://github.com/rudderlabs/keydb/compare/v0.3.1-alpha...v0.4.0-alpha) (2025-08-26)
 
 
