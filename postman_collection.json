@@ -1,0 +1,219 @@
+{
+	"info": {
+		"_postman_id": "985854b7-3b3e-4547-a9be-446248a97616",
+		"name": "keyDB",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "300470"
+	},
+	"item": [
+		{
+			"name": "Info Node 0",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "localhost:8080/info?nodeID=0",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"info"
+					],
+					"query": [
+						{
+							"key": "nodeID",
+							"value": "0"
+						}
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Get Keys",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "localhost:8080/get?keys=key1&keys=key2&keys=key3",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"get"
+					],
+					"query": [
+						{
+							"key": "keys",
+							"value": "key1"
+						},
+						{
+							"key": "keys",
+							"value": "key2"
+						},
+						{
+							"key": "keys",
+							"value": "key3"
+						}
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Put Keys",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"keys\": [\"key1\",\"key2\"],\n    \"ttl\": \"10s\"\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "localhost:8080/put",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"put"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Create Snapshot",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"url": {
+					"raw": "localhost:8080/createSnapshots",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"createSnapshots"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Hash Range Movements",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"old_cluster_size\": 8,\n    \"new_cluster_size\": 4,\n    \"total_hash_ranges\": 128,\n    \"upload\": false,\n    \"full_sync\": true,\n    \"split_uploads\": false\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "localhost:8080/hashRangeMovements",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"hashRangeMovements"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Update Cluster Data",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"addresses\": [\n        \"keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-3.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-4.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-5.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-6.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-7.keydb-headless.loveholidays.svc.cluster.local:50051\"\n    ]\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "localhost:8080/updateClusterData",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"updateClusterData"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Scale up",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"old_nodes_addresses\": [\n        \"keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051\"\n    ],\n    \"new_nodes_addresses\": [\n        \"keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-3.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-4.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-5.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-6.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-7.keydb-headless.loveholidays.svc.cluster.local:50051\"\n    ],\n    \"full_sync\": false,\n    \"skip_create_snapshots\": true,\n    \"load_snapshots_max_concurrency\": 2\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "localhost:8080/autoScale",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"autoScale"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Scale down",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"old_nodes_addresses\": [\n        \"keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-3.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-4.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-5.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-6.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-7.keydb-headless.loveholidays.svc.cluster.local:50051\"\n    ],\n    \"new_nodes_addresses\": [\n        \"keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051\",\n        \"keydb-3.keydb-headless.loveholidays.svc.cluster.local:50051\"\n    ],\n    \"full_sync\": true,\n    \"skip_create_snapshots\": false,\n    \"load_snapshots_max_concurrency\": 3\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "localhost:8080/autoScale",
+					"host": [
+						"localhost"
+					],
+					"port": "8080",
+					"path": [
+						"autoScale"
+					]
+				}
+			},
+			"response": []
+		}
+	]
+}

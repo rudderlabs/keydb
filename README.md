@@ -19,8 +19,8 @@ KeyDB is a distributed system that allows you to:
 - **Scalability**: Dynamically scale the cluster by adding or removing nodes
 - **Eventual Consistency**: Changes propagate through the system over time
 - **TTL Support**: Keys automatically expire after their time-to-live
-- **Persistence**: Snapshots are stored in cloud storage for scaling the system without needing nodes to communicate
-  with each other
+- **Persistence**: Snapshots can be stored in cloud storage for scaling the system or backing up the data without 
+  needing nodes to communicate with each other
 
 ## Client
 
@@ -35,6 +35,12 @@ import "github.com/rudderlabs/keydb/client"
 ### Creating a Client
 
 ```go
+import (
+    "github.com/rudderlabs/keydb/client"
+    "github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
+)
+
 config := client.Config{
     Addresses:       []string{"localhost:50051", "localhost:50052"}, // List of node addresses
     TotalHashRanges: 128,                                           // Optional, defaults to 128
@@ -42,7 +48,11 @@ config := client.Config{
     RetryDelay:      100 * time.Millisecond,                        // Optional, defaults to 100ms
 }
 
-keydbClient, err := client.NewClient(config)
+// Logger is required
+logFactory := logger.NewFactory(conf)
+log := logFactory.NewLogger()
+
+keydbClient, err := client.NewClient(config, log, client.WithStats(stats.NOP))
 if err != nil {
     // Handle error
 }
@@ -94,13 +104,11 @@ for i, key := range keys {
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
 
-## Scaler
-
-The Scaler is responsible for managing the KeyDB cluster, including scaling operations.
+## Node Configuration
 
 ### Starting a Node
 
-To start a KeyDB node:
+To start a KeyDB node, configure it with environment variables (all prefixed with `KEYDB_`):
 
 ```bash
 # Configure node with environment variables
@@ -121,84 +129,129 @@ export KEYDB_STORAGE_ACCESSKEY="your-secret-access-key"
 go run cmd/node/main.go
 ```
 
-### Scaling the Cluster
+## Scaling the Cluster
 
-To scale the KeyDB cluster, use the client's `CreateSnapshots`, `Scale` and `ScaleComplete` methods:
-Before scaling the cluster you should call `/createSnapshots` on the Scaler HTTP API to force all nodes to create
-snapshots of the hash ranges that need moving.
+To scale the KeyDB cluster, you can leverage the `Scaler` HTTP API.
 
-If the `CreateSnapshots` operation is skipped, new nodes added to the cluster during a scale operation, won't be
-able to get the data for the hash ranges that they are going to serve, leading to missing data.
+Internally the `Scaler` API uses the `internal/scaler` gRPC client to manage the cluster.
 
-```go
-// Create a client for scaler operations
-existingNodes := []string{
-    "localhost:50051",
-    "localhost:50052",
-    "localhost:50053",
-}
-scalerClient, err := client.NewClient(client.Config{
-    Addresses: existingNodes, // Connect to any existing node
-})
-if err != nil {
-    // Handle error
-}
-defer scalerClient.Close()
+### Scaling via HTTP API
 
-// Let's force a snapshot creation on the old nodes first
-err = scalerClient.CreateSnapshots(context.Background())
-if err != nil {
-    // Handle error
-}
+Here is an example of how to scale the cluster via the HTTP API:
+1. Use the `/hashRangeMovements` to preview a scaling operation
+   * see [Previewing a Scaling Operation](#previewing-a-scaling-operation) for more details
+2. If necessary merge a `rudder-devops` PR to increase the CPU and memory of the nodes prior to the scaling operation
+   * This might be useful since creating and loading snapshots can have a significant impact on CPU and memory
+3. If necessary call `/hashRangeMovements` again with `upload=true,full_sync=true` to start uploading the snapshots to
+   the cloud storage
+   * What `fullSync=true` does is to create a snapshot from scratch, deleting old snapshot files for the selected
+     hash ranges. It will make the loading process faster since the nodes won't have to download expired data.
+4. Call `/autoScale`
+   * You can call it with `skip_create_snapshots=true` if you already created the snapshots in the previous operation
+5. Merge a `rudder-devops` PR to trigger the scaling operation to add/remove the nodes as per the desired cluster size
+   * The PR will also update the nodes configuration in a way that would survive a node restart (e.g. `config.yaml`)
+   * If necessary you should reduce the CPU and memory if you ended up increasing them in point 2
 
-// New node address
-newNode := "localhost:50054", // New node
-existingNodes = append(existingNodes, newNode)
+### Previewing a Scaling Operation
 
-// Scale the cluster
-err = scalerClient.Scale(context.Background(), existingNodes...)
-if err != nil {
-    // Handle error
-}
+Why previewing a scaling operation?
+* It helps you understand the impact of the scaling operation on the cluster
+* It will help decrease the length of the `/autoScale` operation in case you called `/hashRangeMovements` 
+  with `upload=true`
+* It will help you consider the impact of snapshots creation before actually scaling the cluster
 
-// Notify all nodes that scaling is complete
-err = scalerClient.ScaleComplete(context.Background())
-if err != nil {
-    // Handle error
+To preview a scaling operation you can call `/hashRangeMovements` like in the example below:
+
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 4,
+    "new_cluster_size": 5,
+    "total_hash_ranges": 128
+}'
+```
+
+In the above example we are previewing a scaling operation from 4 to 5 nodes (i.e. scale-up).
+We're not going to tell the nodes to do a pre-upload of the snapshots (i.e. `upload != true`).
+
+What the `scaler` might tell us in that case specifically is that 100 hash ranges will have to be moved:
+
+```json
+{
+    "total": 100,
+    "movements": [
+        {
+            "hash_range": 5,
+            "from": 1,
+            "to": 0
+        },
+        {
+            "hash_range": 9,
+            "from": 1,
+            "to": 4
+        },
+        ...
+    ]
 }
 ```
 
-### Monitoring
+You can try different combinations, but usually when you double (or split by half) the cluster size, the number of 
+hash ranges that will be moved will be lower. Keep that in mind for customers with large amounts of data.
+Having more nodes might mean more disks but CPU and memory can be tuned accordingly to use the same total amount, so
+the increased infra cost for having 1-2 more disks might be negligible. 
 
-To get information about a specific node:
+| op         | old_cluster_size | new_cluster_size | total_hash_ranges | result |
+|------------|------------------|------------------|-------------------|--------|
+| scale_up   | 1                | 2                | 128               | 64     |
+| scale_up   | 1                | 3                | 128               | 85     |
+| scale_up   | 1                | 4                | 128               | 96     |
+| scale_down | 2                | 1                | 128               | 64     |
+| scale_up   | 4                | 8                | 128               | 64     |
+| scale_up   | 3                | 8                | 128               | 110    |
+
+Supported options:
 
 ```go
-nodeInfo, err := scalerClient.GetNodeInfo(context.Background(), 0) // Node ID 0
-if err != nil {
-    // Handle error
+type HashRangeMovementsRequest struct {
+	OldClusterSize              uint32      `json:"old_cluster_size"`
+	NewClusterSize              uint32      `json:"new_cluster_size"`
+	TotalHashRanges             uint32      `json:"total_hash_ranges"`
+	Upload                      bool        `json:"upload,omitempty"`
+	Download                    bool        `json:"download,omitempty"`
+	FullSync                    bool        `json:"full_sync,omitempty"`
+	RetryPolicy                 RetryPolicy `json:"retry_policy,omitempty"`
+	LoadSnapshotsMaxConcurrency uint32      `json:"load_snapshots_max_concurrency,omitempty"`
 }
-
-fmt.Printf("Node ID: %d\n", nodeInfo.NodeId)
-fmt.Printf("Cluster Size: %d\n", nodeInfo.ClusterSize)
-fmt.Printf("Keys Count: %d\n", nodeInfo.KeysCount)
-fmt.Printf("Last Snapshot: %s\n", time.Unix(int64(nodeInfo.LastSnapshotTimestamp), 0))
 ```
 
-### Scaling Best Practices
+Consider using `LoadSnapshotsMaxConcurrency` if a node has to load a large number of big snapshots to avoid OOM kills.
+Alternatively you can give the nodes more memory, although a balance of the two is usually a good idea.
 
-1. **Prepare New Nodes**: Ensure new nodes are running before scaling
-2. **Gradual Scaling**: Scale by small increments for large clusters
-3. **Monitor During Scaling**: Watch for errors and performance during scaling
-4. **Complete the Scaling**: Always call ScaleComplete after scaling
-5. **Create Snapshots**: Create snapshots before and after scaling operations
+### Alternative Scaling Methods
+* You can simply merge a devops PR with the desired cluster size and restart the nodes
+  * In this case data won't be moved between nodes so it will lead to data loss
+  * If you don't want to restart the nodes you can use `/autoScale` in auto-healing mode (i.e. with `old_cluster_size`
+    equal to `new_cluster_size`)
+* You can do everything manually by calling the single endpoints yourself, although it might be burdensome with a lot
+  of hash ranges to move, so this would mean calling `/createSnapshots`, `/loadSnapshots`, `/scale` and `/scaleComplete`
+  manually (which is what the `/autoScale` endpoint does under the hood)
+ 
+### Postman collection
 
-# Known issues
+[Here](./postman_collection.json) you can access the Postman collection for the `Scaler` HTTP API.
 
-* Scaling operations have not been tested during failures (e.g. scaler crash, nodes crash, etc...)
-* New nodes are to be created first before scaling
-* Creating and uploading snapshots isn't optimal at the moment
-* Compaction is creating latencies at times
-* Missing metrics and logs (observability is poor)
-* Missing Kubernetes health probes
-* Missing linters
-* Missing Continuos Integration
+### Available HTTP Endpoints
+
+- `POST /get` - Check key existence
+- `POST /put` - Add keys with TTL
+- `POST /info` - Get node information (e.g. node ID, cluster size, addresses, hash ranges managed by that node, etc...)
+- `POST /createSnapshots` - Create snapshots and upload them to cloud storage 
+- `POST /loadSnapshots` - Downloads snapshots from cloud storage and loads them into BadgerDB
+- `POST /scale` - Scale the cluster
+- `POST /scaleComplete` - Complete scaling operation
+- `POST /updateClusterData` - Update the scaler internal information with the addresses of all the nodes that comprise 
+  the cluster
+- `POST /autoScale` - Automatic scaling with retry and rollback logic
+- `POST /hashRangeMovements` - Get hash range movement information (supports snapshot creation and loading)
+- `GET /lastOperation` - Get last scaling operation status
