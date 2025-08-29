@@ -17,7 +17,6 @@ KeyDB is a distributed system that allows you to:
 
 - **Distributed Architecture**: Supports multiple nodes with automatic key distribution
 - **Scalability**: Dynamically scale the cluster by adding or removing nodes
-- **Eventual Consistency**: Changes propagate through the system over time
 - **TTL Support**: Keys automatically expire after their time-to-live
 - **Persistence**: Snapshots can be stored in cloud storage for scaling the system or backing up the data without 
   needing nodes to communicate with each other
