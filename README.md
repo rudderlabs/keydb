@@ -149,7 +149,8 @@ Here is an example of how to scale the cluster via the HTTP API:
      * To do a full sync before scaling (full syncs delete old data that might be expired from S3 so that then nodes
        won't have to download expired data, making the scaling process faster later)
      * You can still create snapshots during `/autoScale` but then they won't have to be full sync snapshots, meaning
-       they can just be small files that contain only the most recent data (see `since` in `node/node.go`)
+       they can just be small files that contain only the most recent data (see `since` in 
+       [node/node.go](./node/node.go))
 4. Call `/autoScale`
    * You can call it with `skip_create_snapshots=true` if you already created the snapshots in the previous operation
 5. Merge a `rudder-devops` PR to trigger the scaling operation to add/remove the nodes as per the desired cluster size
