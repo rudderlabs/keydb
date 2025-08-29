@@ -26,6 +26,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
+	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
@@ -405,15 +406,11 @@ func (s *Service) initCaches(
 	}
 
 	var (
-		guard         = make(chan struct{}, maxConcurrency)
-		errChan       = make(chan error, totalFiles)
-		waitGroup     = new(sync.WaitGroup)
-		gCtx, gCancel = context.WithCancel(ctx)
-		buffers       = make([]io.Reader, 0, len(filesByHashRange))
-		buffersMu     sync.Mutex
-		filesLoaded   atomic.Int64
+		group, gCtx = kitsync.NewEagerGroup(ctx, int(maxConcurrency))
+		buffers     = make([]io.Reader, 0, len(filesByHashRange))
+		buffersMu   sync.Mutex
+		filesLoaded atomic.Int64
 	)
-	defer gCancel() // to avoid leaks
 	for r := range filesByHashRange {
 		snapshotFiles := filesByHashRange[r]
 		if len(snapshotFiles) == 0 {
@@ -422,16 +419,7 @@ func (s *Service) initCaches(
 		}
 
 		for _, snapshotFile := range snapshotFiles {
-			waitGroup.Add(1)
-			go func(snapshotFile string) {
-				defer waitGroup.Done()
-				select {
-				case <-gCtx.Done():
-					return
-				case guard <- struct{}{}:
-				}
-				defer func() { <-guard }()
-
+			group.Go(func() error {
 				s.logger.Infon("Starting download of snapshot file from cloud storage",
 					logger.NewStringField("filename", snapshotFile),
 				)
@@ -441,17 +429,15 @@ func (s *Service) initCaches(
 				if err != nil {
 					if errors.Is(err, filemanager.ErrKeyNotFound) {
 						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
-						return
+						return nil
 					}
-					errChan <- fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
-					gCancel()
-					return
+					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
 				}
 
 				buffersMu.Lock()
 				defer buffersMu.Unlock()
-				if maxConcurrency > 0 && len(buffers) >= int(maxConcurrency) {
-					s.logger.Infon("Reading downloaded snapshots",
+				if len(buffers) >= int(maxConcurrency) {
+					s.logger.Infon("Loading downloaded snapshots",
 						logger.NewIntField("bufferSize", int64(len(buffers))),
 						logger.NewIntField("totalFiles", totalFiles),
 						logger.NewFloatField("loadingPercentage",
@@ -460,33 +446,23 @@ func (s *Service) initCaches(
 					)
 					err = s.cache.LoadSnapshots(gCtx, buffers...)
 					if err != nil {
-						errChan <- fmt.Errorf("failed to load snapshots: %w", err)
-						gCancel()
-						return
+						return fmt.Errorf("failed to load snapshots: %w", err)
 					} else {
 						filesLoaded.Add(int64(len(buffers)))
 						buffers = buffers[:0]
 					}
 				}
 				buffers = append(buffers, bytes.NewReader(buf.Bytes()))
-			}(snapshotFile)
+				return nil
+			})
 		}
 	}
-
-	waitGroup.Wait() // no need to use the ctx here, the routines should honour it
-	close(errChan)
-	close(guard)
-
-	var loadingErr error
-	for err := range errChan { // drain channel
-		loadingErr = err
-	}
-	if loadingErr != nil {
-		return loadingErr
+	if err = group.Wait(); err != nil {
+		return err
 	}
 
 	if len(buffers) > 0 {
-		s.logger.Infon("Reading downloaded snapshots",
+		s.logger.Infon("Loading downloaded snapshots",
 			logger.NewIntField("bufferSize", int64(len(buffers))),
 			logger.NewIntField("totalFiles", totalFiles),
 			logger.NewFloatField("loadingPercentage",
