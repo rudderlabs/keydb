@@ -102,6 +102,13 @@ for i, key := range keys {
 - **Cluster Awareness**: Automatically adapts to cluster size changes
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
+- **Automatic retries**: Automatically retries requests that fail for a configured number of times
+  - The client tries again if the cluster size was changed and it hits a node not managing a requested key,
+    although before trying again it will update its internal metadata with the new cluster node addresses first
+    - Cluster changes trigger retries via recursion so there is no limit on the retries here
+    - The client will retry as soon as possible right after trying to establish connections to new nodes (if any)
+  - Normal errors trigger retries with a linear backoff configured with a `RetryCount` and a `RetryDelay`
+  - For the retries client configuration please refer to the client [Config](./client/client.go) `struct`
 
 ## Node Configuration
 
