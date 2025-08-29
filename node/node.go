@@ -111,7 +111,8 @@ type Service struct {
 		putInCacheSuccessDuration   stats.Timer
 		putInCacheFailDuration      stats.Timer
 		downloadSnapshotDuration    stats.Timer
-		loadSnapshotDuration        stats.Timer
+		loadSnapshotToDiskDuration  stats.Timer
+		uploadSnapshotDuration      stats.Timer
 		createSnapshotDuration      stats.Timer
 	}
 }
@@ -222,7 +223,10 @@ func NewService(
 	service.metrics.putInCacheFailDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds",
 		stats.TimerType, stats.Tags{"success": "false"})
 	service.metrics.downloadSnapshotDuration = stat.NewStat("keydb_download_snapshot_duration_seconds", stats.TimerType)
-	service.metrics.loadSnapshotDuration = stat.NewStat("keydb_load_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.loadSnapshotToDiskDuration = stat.NewStat(
+		"keydb_load_snapshot_to_disk_duration_seconds", stats.TimerType,
+	)
+	service.metrics.uploadSnapshotDuration = stat.NewStat("keydb_upload_snapshot_duration_seconds", stats.TimerType)
 	service.metrics.createSnapshotDuration = stat.NewStat("keydb_create_snapshot_duration_seconds", stats.TimerType)
 
 	// Initialize caches for all hash ranges this node handles
@@ -460,7 +464,7 @@ func (s *Service) initCaches(
 					meanLoadDuration := time.Since(loadStart) / time.Duration(len(buffers))
 					filesLoaded.Add(int64(len(buffers)))
 					for range buffers {
-						s.metrics.loadSnapshotDuration.SendTiming(meanLoadDuration)
+						s.metrics.loadSnapshotToDiskDuration.SendTiming(meanLoadDuration)
 					}
 					buffers = buffers[:0]
 				}
@@ -488,7 +492,7 @@ func (s *Service) initCaches(
 		meanLoadDuration := time.Since(loadStart) / time.Duration(len(buffers))
 		filesLoaded.Add(int64(len(buffers)))
 		for range buffers {
-			s.metrics.loadSnapshotDuration.SendTiming(meanLoadDuration)
+			s.metrics.loadSnapshotToDiskDuration.SendTiming(meanLoadDuration)
 		}
 	}
 
@@ -910,10 +914,12 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			logger.NewStringField("filename", filename),
 		)
 
+		startUpload := time.Now()
 		_, err = s.storage.UploadReader(ctx, filename, buf)
 		if err != nil {
 			return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
 		}
+		s.metrics.uploadSnapshotDuration.Since(startUpload)
 
 		s.since[hashRange] = newSince
 
