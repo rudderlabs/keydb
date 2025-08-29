@@ -137,14 +137,19 @@ Internally the `Scaler` API uses the `internal/scaler` gRPC client to manage the
 ### Scaling via HTTP API
 
 Here is an example of how to scale the cluster via the HTTP API:
-1. Use the `/hashRangeMovements` to preview a scaling operation
+1. Use the `/hashRangeMovements` to preview the number of hash ranges that will be moved when scaling
    * see [Previewing a Scaling Operation](#previewing-a-scaling-operation) for more details
 2. If necessary merge a `rudder-devops` PR to increase the CPU and memory of the nodes prior to the scaling operation
-   * This might be useful since creating and loading snapshots can have a significant impact on CPU and memory
+   * This might be useful since creating and loading snapshots can have a significant impact on CPU and memory, 
+     especially when we have to load big snapshots (which can also be compressed) from S3
 3. If necessary call `/hashRangeMovements` again with `upload=true,full_sync=true` to start uploading the snapshots to
    the cloud storage
-   * What `fullSync=true` does is to create a snapshot from scratch, deleting old snapshot files for the selected
-     hash ranges. It will make the loading process faster since the nodes won't have to download expired data.
+   * Pre-uploads and pre-download can be useful for several reasons:
+     * To measure how long snapshots creation and loading might take without actually having to scale the cluster
+     * To do a full sync before scaling (full syncs delete old data that might be expired from S3 so that then nodes
+       won't have to download expired data, making the scaling process faster later)
+     * You can still create snapshots during `/autoScale` but then they won't have to be full sync snapshots, meaning
+       they can just be small files that contain only the most recent data (see `since` in `node/node.go`)
 4. Call `/autoScale`
    * You can call it with `skip_create_snapshots=true` if you already created the snapshots in the previous operation
 5. Merge a `rudder-devops` PR to trigger the scaling operation to add/remove the nodes as per the desired cluster size
@@ -200,14 +205,14 @@ hash ranges that will be moved will be lower. Keep that in mind for customers wi
 Having more nodes might mean more disks but CPU and memory can be tuned accordingly to use the same total amount, so
 the increased infra cost for having 1-2 more disks might be negligible. 
 
-| op         | old_cluster_size | new_cluster_size | total_hash_ranges | result |
-|------------|------------------|------------------|-------------------|--------|
-| scale_up   | 1                | 2                | 128               | 64     |
-| scale_up   | 1                | 3                | 128               | 85     |
-| scale_up   | 1                | 4                | 128               | 96     |
-| scale_down | 2                | 1                | 128               | 64     |
-| scale_up   | 4                | 8                | 128               | 64     |
-| scale_up   | 3                | 8                | 128               | 110    |
+| op         | old_cluster_size | new_cluster_size | total_hash_ranges | no_of_moved_hash_ranges |
+|------------|------------------|------------------|-------------------|-------------------------|
+| scale_up   | 1                | 2                | 128               | 64                      |
+| scale_up   | 1                | 3                | 128               | 85                      |
+| scale_up   | 1                | 4                | 128               | 96                      |
+| scale_down | 2                | 1                | 128               | 64                      |
+| scale_up   | 4                | 8                | 128               | 64                      |
+| scale_up   | 3                | 8                | 128               | 110                     |
 
 Supported options:
 
@@ -226,6 +231,8 @@ type HashRangeMovementsRequest struct {
 
 Consider using `LoadSnapshotsMaxConcurrency` if a node has to load a large number of big snapshots to avoid OOM kills.
 Alternatively you can give the nodes more memory, although a balance of the two is usually a good idea.
+This could happen because snapshots are usually compressed and uploaded to S3, so the download and uncompression
+of big snapshots could take a big portion of memory.
 
 ### Alternative Scaling Methods
 * You can simply merge a devops PR with the desired cluster size and restart the nodes
