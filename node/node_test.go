@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"regexp"
 	"strconv"
@@ -94,6 +95,103 @@ func TestSimple(t *testing.T) {
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		cancel()
+		node0.Close()
+	}
+
+	t.Run("badger", func(t *testing.T) {
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", false)
+			return conf
+		})
+	})
+
+	t.Run("badger compressed", func(t *testing.T) {
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", true)
+			return conf
+		})
+	})
+}
+
+func TestLoadSnapshotsMaxConcurrency(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, newConf func() *config.Config) {
+		t.Parallel()
+
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Create the node service
+		totalHashRanges := uint32(128)
+		node0Conf := newConf()
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, node0Conf)
+		c := getClient(t, totalHashRanges, node0Address)
+		op := getScaler(t, totalHashRanges, node0Address)
+
+		// Test Put
+		keys := make([]string, 1000)
+		for i := 0; i < len(keys); i++ {
+			keys[i] = fmt.Sprintf("key%d", i)
+		}
+		require.NoError(t, c.Put(ctx, keys, testTTL))
+
+		exists, err := c.Get(ctx, keys)
+		require.NoError(t, err)
+		require.Len(t, exists, len(keys))
+		for i, res := range exists {
+			require.Truef(t, res, "Key %s should exist", keys[i])
+		}
+
+		err = op.CreateSnapshots(ctx, 0, false)
+		require.NoError(t, err)
+
+		files, err := minioContainer.Contents(ctx, defaultBackupFolderName+"/hr_")
+		require.NoError(t, err)
+		require.Len(t, files, int(totalHashRanges), "All hash ranges should contain at least one key")
+
+		cancel()
+		node0.Close()
+
+		// Let's start again from scratch to see if the data is properly loaded from the snapshots
+		ctx, cancel = context.WithCancel(context.Background())
+		defer cancel()
+		node0Conf = newConf()
+		node0, node0Address = getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, node0Conf)
+		c = getClient(t, totalHashRanges, node0Address)
+		require.NoError(t, op.UpdateClusterData(node0Address))
+		maxConcurrency := uint32(2)
+		require.NoError(t, op.LoadSnapshots(ctx, 0, maxConcurrency))
+
+		exists, err = c.Get(ctx, keys)
+		require.NoError(t, err)
+		require.Len(t, exists, len(keys))
+		for i, res := range exists {
+			require.Truef(t, res, "Key %s should exist", keys[i])
+		}
 
 		cancel()
 		node0.Close()
