@@ -110,6 +110,8 @@ type Service struct {
 		putKeysHashingDuration      stats.Timer
 		putInCacheSuccessDuration   stats.Timer
 		putInCacheFailDuration      stats.Timer
+		downloadSnapshotDuration    stats.Timer
+		loadSnapshotDuration        stats.Timer
 	}
 }
 
@@ -218,6 +220,8 @@ func NewService(
 		stats.TimerType, stats.Tags{"success": "true"})
 	service.metrics.putInCacheFailDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds",
 		stats.TimerType, stats.Tags{"success": "false"})
+	service.metrics.downloadSnapshotDuration = stat.NewStat("keydb_download_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.loadSnapshotDuration = stat.NewStat("keydb_load_snapshot_duration_seconds", stats.TimerType)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
@@ -424,6 +428,7 @@ func (s *Service) initCaches(
 					logger.NewStringField("filename", snapshotFile),
 				)
 
+				startDownload := time.Now()
 				buf := aws.NewWriteAtBuffer([]byte{})
 				err := s.storage.Download(gCtx, buf, snapshotFile)
 				if err != nil {
@@ -433,6 +438,7 @@ func (s *Service) initCaches(
 					}
 					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
 				}
+				s.metrics.downloadSnapshotDuration.Since(startDownload)
 
 				buffersMu.Lock()
 				defer buffersMu.Unlock()
@@ -444,13 +450,17 @@ func (s *Service) initCaches(
 							float64(filesLoaded.Load())*100/float64(totalFiles),
 						),
 					)
+					loadStart := time.Now()
 					err = s.cache.LoadSnapshots(gCtx, buffers...)
 					if err != nil {
 						return fmt.Errorf("failed to load snapshots: %w", err)
-					} else {
-						filesLoaded.Add(int64(len(buffers)))
-						buffers = buffers[:0]
 					}
+					meanLoadDuration := time.Since(loadStart) / time.Duration(len(buffers))
+					filesLoaded.Add(int64(len(buffers)))
+					for range buffers {
+						s.metrics.loadSnapshotDuration.SendTiming(meanLoadDuration)
+					}
+					buffers = buffers[:0]
 				}
 				buffers = append(buffers, bytes.NewReader(buf.Bytes()))
 				return nil
@@ -469,12 +479,22 @@ func (s *Service) initCaches(
 				float64(filesLoaded.Load())*100/float64(totalFiles),
 			),
 		)
+		loadStart := time.Now()
 		if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
 			return fmt.Errorf("failed to load snapshots: %w", err)
 		}
+		meanLoadDuration := time.Since(loadStart) / time.Duration(len(buffers))
+		filesLoaded.Add(int64(len(buffers)))
+		for range buffers {
+			s.metrics.loadSnapshotDuration.SendTiming(meanLoadDuration)
+		}
 	}
 
-	s.logger.Infon("Caches initialized successfully", logger.NewFloatField("loadingPercentage", 100))
+	s.logger.Infon("Caches initialized successfully",
+		logger.NewFloatField("loadingPercentage",
+			float64(filesLoaded.Load())*100/float64(totalFiles),
+		),
+	)
 
 	return nil
 }
