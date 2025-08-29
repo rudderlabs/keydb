@@ -242,6 +242,52 @@ Alternatively you can give the nodes more memory, although a balance of the two 
 This could happen because snapshots are usually compressed and uploaded to S3, so the download and uncompression
 of big snapshots could take a big portion of memory.
 
+### AutoScale
+
+The `AutoScale` scaler procedure can be used by sending an HTTP POST request to `/autoScale` with a JSON payload that
+follows this schema:
+
+```json
+{
+    "old_nodes_addresses": [
+        "keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051",
+        "keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051"
+    ],
+    "new_nodes_addresses": [
+        "keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051",
+        "keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051",
+        "keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051",
+        "keydb-3.keydb-headless.loveholidays.svc.cluster.local:50051"
+    ],
+    "full_sync": false,
+    "skip_create_snapshots": false,
+    "load_snapshots_max_concurrency": 3,
+    "retry_policy": {
+        "disabled": false,
+        "initial_interval": "3s",
+        "multiplier": 1.5,
+        "max_interval": "1m",
+        "max_elapsed_time": "15m"
+    }
+}
+```
+
+Usage:
+* if `old_nodes_addresses` length < `new_nodes_addresses` length → triggers **SCALE UP**
+* if `old_nodes_addresses` length > `new_nodes_addresses` length → triggers **SCALE DOWN**
+* if `old_nodes_addresses` length == `new_nodes_addresses` length → triggers **AUTO-HEALING**
+  * it updates the scaler internal addresses of all the nodes and tells the nodes what is the desired cluster size
+    without creating nor loading any snapshot
+* if `full_sync` == `true` → triggers a full sync, deleting all the old files on S3 for the selected hash ranges
+  * useful to avoid having nodes download data from S3 that might be too old (thus containing expired data)
+* if `skip_create_snapshots` == `true` → it does not ask nodes to create snapshots
+  * useful if you did a pre-upload via `/hashRangeMovements`
+* if `load_snapshots_max_concurrency` > 0 → it limits how many snapshots can be loaded concurrently from S3
+* if `retry_policy.disabled` == `false` → it uses an exponential backoff with the provided parameters
+  * if a parameter is `0` then the default applies
+  * if the operation does not succeed after all the retries, then a rollback to the "last operation" is triggered
+  * to see what was the "last recorded operation" you can call `/lastOperation`
+
 ### Alternative Scaling Methods
 * You can simply merge a devops PR with the desired cluster size and restart the nodes
   * In this case data won't be moved between nodes so it will lead to data loss
