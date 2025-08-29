@@ -112,6 +112,7 @@ type Service struct {
 		putInCacheFailDuration      stats.Timer
 		downloadSnapshotDuration    stats.Timer
 		loadSnapshotDuration        stats.Timer
+		createSnapshotDuration      stats.Timer
 	}
 }
 
@@ -222,6 +223,7 @@ func NewService(
 		stats.TimerType, stats.Tags{"success": "false"})
 	service.metrics.downloadSnapshotDuration = stat.NewStat("keydb_download_snapshot_duration_seconds", stats.TimerType)
 	service.metrics.loadSnapshotDuration = stat.NewStat("keydb_load_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.createSnapshotDuration = stat.NewStat("keydb_create_snapshot_duration_seconds", stats.TimerType)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
@@ -841,9 +843,14 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 		logger.NewStringField("since", sinceLog.String()))
 	log.Infon("Creating snapshots")
 
+	start := time.Now()
 	newSince, hasData, err := s.cache.CreateSnapshots(ctx, writers, since)
+	meanDuration := time.Since(start) / time.Duration(len(writers))
 	if err != nil {
 		return fmt.Errorf("failed to create snapshots: %w", err)
+	}
+	for range writers {
+		s.metrics.createSnapshotDuration.SendTiming(meanDuration)
 	}
 
 	log = log.Withn(logger.NewIntField("newSince", int64(newSince)))
