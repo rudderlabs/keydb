@@ -26,7 +26,6 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
-	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
@@ -406,11 +405,15 @@ func (s *Service) initCaches(
 	}
 
 	var (
-		group, gCtx  = kitsync.NewEagerGroup(ctx, int(maxConcurrency))
-		buffers      = make([]io.Reader, 0, len(filesByHashRange))
-		buffersMu    sync.Mutex
-		filesLoading atomic.Int64
+		guard         = make(chan struct{}, maxConcurrency)
+		errChan       = make(chan error, totalFiles)
+		waitGroup     = new(sync.WaitGroup)
+		gCtx, gCancel = context.WithCancel(ctx)
+		buffers       = make([]io.Reader, 0, len(filesByHashRange))
+		buffersMu     sync.Mutex
+		filesLoaded   atomic.Int64
 	)
+	defer gCancel() // to avoid leaks
 	for r := range filesByHashRange {
 		snapshotFiles := filesByHashRange[r]
 		if len(snapshotFiles) == 0 {
@@ -418,13 +421,19 @@ func (s *Service) initCaches(
 			continue
 		}
 
-		group.Go(func() error { // Try to load snapshot for this range
-			for _, snapshotFile := range snapshotFiles {
-				filesLoading.Add(1)
-				s.logger.Infon("Loading snapshot file",
+		for _, snapshotFile := range snapshotFiles {
+			waitGroup.Add(1)
+			go func(snapshotFile string) {
+				defer waitGroup.Done()
+				select {
+				case <-gCtx.Done():
+					return
+				case guard <- struct{}{}:
+				}
+				defer func() { <-guard }()
+
+				s.logger.Infon("Starting download of snapshot file from cloud storage",
 					logger.NewStringField("filename", snapshotFile),
-					logger.NewIntField("totalFiles", totalFiles),
-					logger.NewFloatField("percentage", float64(filesLoading.Load())/float64(totalFiles)),
 				)
 
 				buf := aws.NewWriteAtBuffer([]byte{})
@@ -432,24 +441,65 @@ func (s *Service) initCaches(
 				if err != nil {
 					if errors.Is(err, filemanager.ErrKeyNotFound) {
 						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
-						return nil
+						return
 					}
-					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
+					errChan <- fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
+					gCancel()
+					return
 				}
+
 				buffersMu.Lock()
+				defer buffersMu.Unlock()
+				if maxConcurrency > 0 && len(buffers) >= int(maxConcurrency) {
+					s.logger.Infon("Reading downloaded snapshots",
+						logger.NewIntField("bufferSize", int64(len(buffers))),
+						logger.NewIntField("totalFiles", totalFiles),
+						logger.NewFloatField("loadingPercentage",
+							float64(filesLoaded.Load())*100/float64(totalFiles),
+						),
+					)
+					err = s.cache.LoadSnapshots(gCtx, buffers...)
+					if err != nil {
+						errChan <- fmt.Errorf("failed to load snapshots: %w", err)
+						gCancel()
+						return
+					} else {
+						filesLoaded.Add(int64(len(buffers)))
+						buffers = buffers[:0]
+					}
+				}
 				buffers = append(buffers, bytes.NewReader(buf.Bytes()))
-				buffersMu.Unlock()
-			}
-			return nil
-		})
+			}(snapshotFile)
+		}
 	}
-	if err = group.Wait(); err != nil {
-		return fmt.Errorf("failed to initialize caches: %w", err)
+
+	waitGroup.Wait() // no need to use the ctx here, the routines should honour it
+	close(errChan)
+	close(guard)
+
+	var loadingErr error
+	for err := range errChan { // drain channel
+		loadingErr = err
 	}
-	if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
-		return fmt.Errorf("failed to load snapshots: %w", err)
+	if loadingErr != nil {
+		return loadingErr
 	}
-	s.logger.Infon("Caches initialized successfully")
+
+	if len(buffers) > 0 {
+		s.logger.Infon("Reading downloaded snapshots",
+			logger.NewIntField("bufferSize", int64(len(buffers))),
+			logger.NewIntField("totalFiles", totalFiles),
+			logger.NewFloatField("loadingPercentage",
+				float64(filesLoaded.Load())*100/float64(totalFiles),
+			),
+		)
+		if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
+			return fmt.Errorf("failed to load snapshots: %w", err)
+		}
+	}
+
+	s.logger.Infon("Caches initialized successfully", logger.NewFloatField("loadingPercentage", 100))
+
 	return nil
 }
 
