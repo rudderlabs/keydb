@@ -362,3 +362,24 @@ For a comprehensive list of available settings you can refer to the constructor 
   * During compaction, the compactor repeatedly queries SSTable indexes to decide which keys to merge or drop
   * If index cache is too small, index blocks and bloom filters are constantly evicted
   * Each lookup during compaction requires re-reading index blocks from disk
+
+## Issues with Horizontal Scalability
+
+* Creating and loading snapshots can take a lot of time for customers like `loveholidays`
+  * For this reason we can do pre-uploads with `/hashRangeMovements` but it is a manual step that requires some
+    understanding of the internal workings of `keydb` and the `scaler`
+  * We could take automatic daily snapshots, but they would quite probably create spikes in CPU with a consequent 
+    increase in latencies
+* Pre-downloads are not supported yet
+  * We might need to create a `checkpoints` table to store what snapshots file a node has already loaded, so that we can
+    skip them during a scaling operation
+* Scaling can take extra resources, so before scaling we might need to increase the resources on the nodes
+  * Increasing resources on the nodes would cause a restart, same as VPA
+* Scaling, like scaling-up for example, is done by merging a devops PR which will add more nodes. The old nodes will
+  still serve traffic by using the old cluster size until the scale is complete. However, if one of the old nodes were
+  to crash or to be restarted accidentally, it would serve traffic based on the new cluster size.
+  * To avoid this we could introduce a `degraded` mode and merge 2 devops PR incrementally:
+    1. First devops PR adds new nodes in `degraded` mode and does not change the `config.yaml` of the old nodes
+    2. Scaler to do an `/autoScale` operation which should remove the `degraded` mode and update all configs in memory
+    3. Merge another devops PR to remove the `degraded` mode for good, and update the `config.yaml` of the old nodes,
+       so that upon restarts the nodes won't pick up old configurations
