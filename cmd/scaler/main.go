@@ -43,8 +43,12 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 	clientConfig := client.Config{
 		Addresses:       strings.Split(nodeAddresses, ","),
 		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
-		RetryCount:      conf.GetInt("retryCount", client.DefaultRetryCount),
-		RetryDelay:      conf.GetDuration("retryDelay", 0, time.Second), // client.DefaultRetryDelay will be used
+		RetryPolicy: client.RetryPolicy{
+			Disabled:        conf.GetBool("retryPolicy.disabled", false),
+			InitialInterval: conf.GetDuration("retryPolicy.initialInterval", 0, time.Second),
+			Multiplier:      conf.GetFloat64("retryPolicy.multiplier", 0),
+			MaxInterval:     conf.GetDuration("retryPolicy.maxInterval", 0, time.Second),
+		},
 	}
 	c, err := client.NewClient(clientConfig, log.Child("client"))
 	if err != nil {
@@ -55,12 +59,15 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 			log.Warnn("Failed to close client", obskit.Error(err))
 		}
 	}()
-	scRetryDelay := conf.GetDuration("scalerRetryDelay", int64(client.DefaultRetryDelay), time.Second)
 	op, err := scaler.NewClient(scaler.Config{
 		Addresses:       strings.Split(nodeAddresses, ","),
 		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
-		RetryCount:      conf.GetInt("scalerRetryCount", client.DefaultRetryCount),
-		RetryDelay:      scRetryDelay,
+		RetryPolicy: scaler.RetryPolicy{
+			Disabled:        conf.GetBool("scalerRetryPolicy.disabled", false),
+			InitialInterval: conf.GetDuration("scalerRetryPolicy.initialInterval", 0, time.Second),
+			Multiplier:      conf.GetFloat64("scalerRetryPolicy.multiplier", 0),
+			MaxInterval:     conf.GetDuration("scalerRetryPolicy.maxInterval", 0, time.Second),
+		},
 	}, log.Child("scaler"))
 	if err != nil {
 		return fmt.Errorf("failed to create scaler: %w", err)
@@ -73,8 +80,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 
 	log.Infon("Starting scaler",
 		logger.NewIntField("totalHashRanges", int64(clientConfig.TotalHashRanges)),
-		logger.NewIntField("retryCount", int64(clientConfig.RetryCount)),
-		logger.NewDurationField("retryDelay", clientConfig.RetryDelay),
+		logger.NewBoolField("retryPolicyDisabled", clientConfig.RetryPolicy.Disabled),
+		logger.NewDurationField("retryPolicyInitialInterval", clientConfig.RetryPolicy.InitialInterval),
+		logger.NewFloatField("retryPolicyMultiplier", clientConfig.RetryPolicy.Multiplier),
+		logger.NewDurationField("retryPolicyMaxInterval", clientConfig.RetryPolicy.MaxInterval),
 		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", clientConfig.Addresses)),
 		logger.NewIntField("noOfAddresses", int64(len(clientConfig.Addresses))),
 	)

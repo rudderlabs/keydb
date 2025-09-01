@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -19,10 +20,11 @@ import (
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
-var (
-	DefaultRetryCount             = 3
-	DefaultRetryDelay             = 1 * time.Second
-	DefaultTotalHashRanges uint32 = 128
+const (
+	DefaultRetryPolicyInitialInterval        = 1 * time.Second
+	DefaultRetryPolicyMultiplier             = 1.5
+	DefaultRetryPolicyMaxInterval            = 30 * time.Second
+	DefaultTotalHashRanges            uint32 = 128
 )
 
 type errClusterSizeChanged struct {
@@ -30,6 +32,14 @@ type errClusterSizeChanged struct {
 }
 
 func (e *errClusterSizeChanged) Error() string { return "cluster size changed" }
+
+// RetryPolicy defines the retry policy configuration
+type RetryPolicy struct {
+	Disabled        bool          `json:"disabled"`
+	InitialInterval time.Duration `json:"initial_interval"`
+	Multiplier      float64       `json:"multiplier"`
+	MaxInterval     time.Duration `json:"max_interval"`
+}
 
 // Config holds the configuration for a client
 type Config struct {
@@ -39,11 +49,8 @@ type Config struct {
 	// TotalHashRanges is the total number of hash ranges
 	TotalHashRanges uint32
 
-	// RetryCount is the number of times to retry a request
-	RetryCount int
-
-	// RetryDelay is the delay between retries
-	RetryDelay time.Duration
+	// RetryPolicy defines the retry behavior for failed requests
+	RetryPolicy RetryPolicy
 }
 
 // Client is a client for the KeyDB service
@@ -99,12 +106,14 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		config.TotalHashRanges = DefaultTotalHashRanges
 	}
 
-	if config.RetryCount == 0 {
-		config.RetryCount = DefaultRetryCount
+	if config.RetryPolicy.InitialInterval == 0 {
+		config.RetryPolicy.InitialInterval = DefaultRetryPolicyInitialInterval
 	}
-
-	if config.RetryDelay == 0 {
-		config.RetryDelay = DefaultRetryDelay
+	if config.RetryPolicy.Multiplier == 0 {
+		config.RetryPolicy.Multiplier = DefaultRetryPolicyMultiplier
+	}
+	if config.RetryPolicy.MaxInterval == 0 {
+		config.RetryPolicy.MaxInterval = DefaultRetryPolicyMaxInterval
 	}
 
 	client := &Client{
@@ -258,10 +267,12 @@ func (c *Client) get(
 			req := &pb.GetRequest{Keys: nodeKeys}
 
 			// Send the request with retries
-			var err error
-			var resp *pb.GetResponse
-
-			for i := 0; i <= c.config.RetryCount; i++ {
+			var (
+				err         error
+				resp        *pb.GetResponse
+				nextBackoff = c.getNextBackoffFunc()
+			)
+			for i := 0; ; i++ {
 				// Increment retry counter (except for the first attempt)
 				if i > 0 {
 					c.metrics.getReqRetries.Increment()
@@ -284,31 +295,23 @@ func (c *Client) get(
 						logger.NewIntField("nodeId", int64(nodeID)),
 						logger.NewIntField("attempt", int64(i+1)),
 						obskit.Error(err))
-				}
-
-				// If this is the last retry, return the error
-				if i == c.config.RetryCount {
+				} else if resp != nil {
+					c.logger.Warnn("get keys from node",
+						logger.NewIntField("nodeId", int64(nodeID)),
+						logger.NewIntField("attempt", int64(i+1)),
+						logger.NewIntField("errorCode", int64(resp.ErrorCode)),
+						logger.NewStringField("errorCodeString", resp.ErrorCode.String()))
+				} else {
 					cancel()
-					if err != nil {
-						return fmt.Errorf(
-							"failed to get keys from node %d: no retries left, err: %w", nodeID, err)
-					}
-					if resp != nil {
-						return fmt.Errorf(
-							"failed to get keys from node %d, errCode %s: no retries left",
-							nodeID, resp.ErrorCode.String())
-					}
-					return fmt.Errorf(
-						"critical: failed to get keys from node %d: "+
-							"no retries left while both error and response are nil", nodeID,
-					)
+					return fmt.Errorf("critical: failed to get keys from node %d: "+
+						"both error and response are nil", nodeID)
 				}
 
 				// Wait before retrying
 				select {
 				case <-gCtx.Done():
 					return gCtx.Err()
-				case <-time.After(c.config.RetryDelay):
+				case <-time.After(nextBackoff()):
 				}
 			}
 
@@ -399,9 +402,12 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: uint64(ttl.Seconds())}
 
 			// Send the request with retries
-			var err error
-			var resp *pb.PutResponse
-			for i := 0; i <= c.config.RetryCount; i++ {
+			var (
+				err         error
+				resp        *pb.PutResponse
+				nextBackoff = c.getNextBackoffFunc()
+			)
+			for i := 0; ; i++ {
 				// Increment retry counter (except for the first attempt)
 				if i > 0 {
 					c.metrics.putReqRetries.Increment()
@@ -423,29 +429,23 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 					c.logger.Errorn("put keys in node",
 						logger.NewIntField("nodeID", int64(nodeID)),
 						logger.NewIntField("attempt", int64(i+1)), obskit.Error(err))
-				}
-
-				// If this is the last retry, return the error
-				if i == c.config.RetryCount {
+				} else if resp != nil {
+					c.logger.Warnn("put keys in node",
+						logger.NewIntField("nodeID", int64(nodeID)),
+						logger.NewIntField("attempt", int64(i+1)),
+						logger.NewIntField("errorCode", int64(resp.ErrorCode)),
+						logger.NewStringField("errorCodeString", resp.ErrorCode.String()))
+				} else {
 					cancel()
-					if err != nil {
-						return fmt.Errorf("failed to put keys from node %d: no retries left, err: %w", nodeID, err)
-					}
-					if resp != nil {
-						return fmt.Errorf("failed to put keys from node %d, errCode %s: no retries left",
-							nodeID, resp.ErrorCode.String())
-					}
-					return fmt.Errorf(
-						"critical: failed to put keys from node %d: "+
-							"no retries left while both error and response are nil", nodeID,
-					)
+					return fmt.Errorf("critical: failed to put keys from node %d: "+
+						"both error and response are nil", nodeID)
 				}
 
 				// Wait before retrying
 				select {
 				case <-gCtx.Done():
 					return gCtx.Err()
-				case <-time.After(c.config.RetryDelay):
+				case <-time.After(nextBackoff()):
 				}
 			}
 
@@ -534,4 +534,15 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 	}
 
 	return nil
+}
+
+func (c *Client) getNextBackoffFunc() func() time.Duration {
+	bo := backoff.NewExponentialBackOff()
+	bo.Multiplier = c.config.RetryPolicy.Multiplier
+	bo.InitialInterval = c.config.RetryPolicy.InitialInterval
+	bo.MaxInterval = c.config.RetryPolicy.MaxInterval
+
+	return func() time.Duration {
+		return bo.NextBackOff()
+	}
 }

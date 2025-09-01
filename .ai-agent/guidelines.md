@@ -1,3 +1,7 @@
+# AI Agent Guidelines
+
+All the rules below are not optional and must be followed to the letter.
+
 # Go Rules
 
 ## rudder-go-kit

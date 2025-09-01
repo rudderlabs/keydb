@@ -286,8 +286,11 @@ func createTestClientWithServers(t *testing.T, addresses []string) (*Client, fun
 	client, err := NewClient(Config{
 		Addresses:       addresses,
 		TotalHashRanges: 128,
-		RetryCount:      1,
-		RetryDelay:      time.Millisecond,
+		RetryPolicy: RetryPolicy{
+			InitialInterval: time.Millisecond,
+			Multiplier:      1.0,
+			MaxInterval:     time.Millisecond,
+		},
 	}, logger.NOP, WithStats(stats.NOP))
 
 	require.NoError(t, err)
