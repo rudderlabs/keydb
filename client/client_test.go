@@ -7,15 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rudderlabs/rudder-go-kit/stats"
-	"github.com/rudderlabs/rudder-go-kit/testhelper"
-
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
+	"github.com/rudderlabs/rudder-go-kit/testhelper"
 )
 
 func TestClient_Get(t *testing.T) {
@@ -286,11 +285,7 @@ func createTestClientWithServers(t *testing.T, addresses []string) (*Client, fun
 	client, err := NewClient(Config{
 		Addresses:       addresses,
 		TotalHashRanges: 128,
-		RetryPolicy: RetryPolicy{
-			InitialInterval: time.Millisecond,
-			Multiplier:      1.0,
-			MaxInterval:     time.Millisecond,
-		},
+		RetryPolicy:     RetryPolicy{Disabled: true},
 	}, logger.NOP, WithStats(stats.NOP))
 
 	require.NoError(t, err)

@@ -75,8 +75,6 @@ func BenchmarkSingleNode(b *testing.B) {
 	clientConfig := client.Config{
 		Addresses:       nodeConfig.Addresses,
 		TotalHashRanges: totalHashRanges,
-		RetryCount:      3,
-		RetryDelay:      100 * time.Millisecond,
 	}
 
 	c, err := client.NewClient(clientConfig, logger.NOP)

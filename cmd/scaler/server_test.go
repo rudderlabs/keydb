@@ -1536,8 +1536,6 @@ func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...st
 	op, err := scaler.NewClient(scaler.Config{
 		Addresses:       addresses,
 		TotalHashRanges: totalHashRanges,
-		RetryCount:      3,
-		RetryDelay:      time.Second,
 	}, log)
 	require.NoError(t, err)
 

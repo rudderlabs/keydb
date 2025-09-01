@@ -695,8 +695,6 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 	clientConfig := client.Config{
 		Addresses:       addresses,
 		TotalHashRanges: totalHashRanges,
-		RetryCount:      3,
-		RetryDelay:      100 * time.Millisecond,
 	}
 
 	c, err := client.NewClient(clientConfig, logger.NOP)
@@ -712,8 +710,6 @@ func getScaler(t testing.TB, totalHashRanges uint32, addresses ...string) *scale
 	opConfig := scaler.Config{
 		Addresses:       addresses,
 		TotalHashRanges: totalHashRanges,
-		RetryCount:      3,
-		RetryDelay:      100 * time.Millisecond,
 	}
 
 	op, err := scaler.NewClient(opConfig, logger.NOP)
