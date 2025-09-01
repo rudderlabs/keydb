@@ -290,6 +290,20 @@ func (c *Client) get(
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
 
+				// If retry is disabled, return immediately after first attempt
+				if c.config.RetryPolicy.Disabled {
+					if err != nil {
+						return fmt.Errorf("failed to get keys from node %d: %w",
+							nodeID, err)
+					}
+					if resp != nil {
+						return fmt.Errorf("failed to get keys from node %d with error code %s",
+							nodeID, resp.ErrorCode.String())
+					}
+					return fmt.Errorf("critical: failed to get keys from node %d: "+
+						"both error and response are nil", nodeID)
+				}
+
 				if err != nil {
 					c.logger.Errorn("get keys from node",
 						logger.NewIntField("nodeId", int64(nodeID)),
@@ -423,6 +437,20 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
+				}
+
+				// If retry is disabled, return immediately after first attempt
+				if c.config.RetryPolicy.Disabled {
+					if err != nil {
+						return fmt.Errorf("failed to put keys from node %d: %w",
+							nodeID, err)
+					}
+					if resp != nil {
+						return fmt.Errorf("failed to put keys from node %d with error code %s",
+							nodeID, resp.ErrorCode.String())
+					}
+					return fmt.Errorf("critical: failed to put keys from node %d: "+
+						"both error and response are nil", nodeID)
 				}
 
 				if err != nil {
