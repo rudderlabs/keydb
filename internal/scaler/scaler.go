@@ -699,13 +699,9 @@ func (c *Client) getNextBackoffFunc() func() time.Duration {
 
 	start := time.Now()
 	return func() time.Duration {
-		next := bo.NextBackOff()
-		if next == backoff.Stop {
-			return backoff.Stop
-		}
 		if c.config.RetryPolicy.MaxElapsedTime > 0 && time.Since(start) > c.config.RetryPolicy.MaxElapsedTime {
 			return backoff.Stop
 		}
-		return next
+		return bo.NextBackOff()
 	}
 }

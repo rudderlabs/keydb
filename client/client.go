@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -272,9 +273,9 @@ func (c *Client) get(
 				resp        *pb.GetResponse
 				nextBackoff = c.getNextBackoffFunc()
 			)
-			for i := 0; ; i++ {
+			for attempt := int64(1); ; attempt++ {
 				// Increment retry counter (except for the first attempt)
-				if i > 0 {
+				if attempt > 1 {
 					c.metrics.getReqRetries.Increment()
 				}
 				resp, err = client.Get(gCtx, req)
@@ -304,17 +305,20 @@ func (c *Client) get(
 						"both error and response are nil", nodeID)
 				}
 
+				retryDelay := nextBackoff()
+
 				if err != nil {
 					c.logger.Errorn("get keys from node",
 						logger.NewIntField("nodeId", int64(nodeID)),
-						logger.NewIntField("attempt", int64(i+1)),
+						logger.NewIntField("attempt", attempt),
+						logger.NewDurationField("retryDelay", retryDelay),
 						obskit.Error(err))
 				} else if resp != nil {
 					c.logger.Warnn("get keys from node",
 						logger.NewIntField("nodeId", int64(nodeID)),
-						logger.NewIntField("attempt", int64(i+1)),
-						logger.NewIntField("errorCode", int64(resp.ErrorCode)),
-						logger.NewStringField("errorCodeString", resp.ErrorCode.String()))
+						logger.NewIntField("attempt", attempt),
+						logger.NewDurationField("retryDelay", retryDelay),
+						obskit.Error(errors.New(resp.ErrorCode.String())))
 				} else {
 					cancel()
 					return fmt.Errorf("critical: failed to get keys from node %d: "+
@@ -325,7 +329,7 @@ func (c *Client) get(
 				select {
 				case <-gCtx.Done():
 					return gCtx.Err()
-				case <-time.After(nextBackoff()):
+				case <-time.After(retryDelay):
 				}
 			}
 
@@ -421,9 +425,9 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 				resp        *pb.PutResponse
 				nextBackoff = c.getNextBackoffFunc()
 			)
-			for i := 0; ; i++ {
+			for attempt := int64(1); ; attempt++ {
 				// Increment retry counter (except for the first attempt)
-				if i > 0 {
+				if attempt > 1 {
 					c.metrics.putReqRetries.Increment()
 				}
 				resp, err = client.Put(gCtx, req)
@@ -453,16 +457,20 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 						"both error and response are nil", nodeID)
 				}
 
+				retryDelay := nextBackoff()
+
 				if err != nil {
 					c.logger.Errorn("put keys in node",
 						logger.NewIntField("nodeID", int64(nodeID)),
-						logger.NewIntField("attempt", int64(i+1)), obskit.Error(err))
+						logger.NewIntField("attempt", attempt),
+						logger.NewDurationField("retryDelay", retryDelay),
+						obskit.Error(err))
 				} else if resp != nil {
 					c.logger.Warnn("put keys in node",
 						logger.NewIntField("nodeID", int64(nodeID)),
-						logger.NewIntField("attempt", int64(i+1)),
-						logger.NewIntField("errorCode", int64(resp.ErrorCode)),
-						logger.NewStringField("errorCodeString", resp.ErrorCode.String()))
+						logger.NewIntField("attempt", attempt),
+						logger.NewDurationField("retryDelay", retryDelay),
+						obskit.Error(errors.New(resp.ErrorCode.String())))
 				} else {
 					cancel()
 					return fmt.Errorf("critical: failed to put keys from node %d: "+
@@ -473,7 +481,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 				select {
 				case <-gCtx.Done():
 					return gCtx.Err()
-				case <-time.After(nextBackoff()):
+				case <-time.After(retryDelay):
 				}
 			}
 
