@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -111,7 +110,7 @@ type Service struct {
 		putInCacheSuccessDuration   stats.Timer
 		putInCacheFailDuration      stats.Timer
 		downloadSnapshotDuration    stats.Timer
-		loadSnapshotsToDiskDuration stats.Timer
+		loadSnapshotToDiskDuration  stats.Timer
 		uploadSnapshotDuration      stats.Timer
 		createSnapshotsDuration     stats.Timer
 	}
@@ -226,8 +225,8 @@ func NewService(
 	// it tracks an operation that handles a single snapshot. if plural (i.e. snapshots instead of snapshot) then it
 	// tracks an operation that handles multiple snapshots (e.g. CreateSnapshots).
 	service.metrics.downloadSnapshotDuration = stat.NewStat("keydb_download_snapshot_duration_seconds", stats.TimerType)
-	service.metrics.loadSnapshotsToDiskDuration = stat.NewStat(
-		"keydb_load_snapshots_to_disk_duration_seconds", stats.TimerType,
+	service.metrics.loadSnapshotToDiskDuration = stat.NewStat(
+		"keydb_load_snapshot_to_disk_duration_seconds", stats.TimerType,
 	)
 	service.metrics.uploadSnapshotDuration = stat.NewStat("keydb_upload_snapshot_duration_seconds", stats.TimerType)
 	service.metrics.createSnapshotsDuration = stat.NewStat("keydb_create_snapshots_duration_seconds", stats.TimerType)
@@ -419,11 +418,31 @@ func (s *Service) initCaches(
 	}
 
 	var (
-		group, gCtx = kitsync.NewEagerGroup(ctx, int(maxConcurrency))
-		buffers     = make([]io.Reader, 0, len(filesByHashRange))
-		buffersMu   sync.Mutex
-		filesLoaded atomic.Int64
+		loadCtx, loadCancel = context.WithCancel(ctx)
+		loadDone            = make(chan error, 1)
+		filesLoaded         int64
+		group, gCtx         = kitsync.NewEagerGroup(ctx, 0)
+		readers             = make(chan io.Reader, maxConcurrency)
 	)
+	defer loadCancel()
+	go func() {
+		defer close(loadDone)
+		for r := range readers {
+			s.logger.Infon("Loading downloaded snapshots",
+				logger.NewIntField("totalFiles", totalFiles),
+				logger.NewFloatField("loadingPercentage",
+					float64(filesLoaded)*100/float64(totalFiles),
+				),
+			)
+			loadStart := time.Now()
+			if err := s.cache.LoadSnapshots(loadCtx, r); err != nil {
+				loadDone <- fmt.Errorf("failed to load snapshots: %w", err)
+				return
+			}
+			s.metrics.loadSnapshotToDiskDuration.Since(loadStart)
+			filesLoaded++
+		}
+	}()
 	for r := range filesByHashRange {
 		snapshotFiles := filesByHashRange[r]
 		if len(snapshotFiles) == 0 {
@@ -449,53 +468,36 @@ func (s *Service) initCaches(
 				}
 				s.metrics.downloadSnapshotDuration.Since(startDownload)
 
-				buffersMu.Lock()
-				defer buffersMu.Unlock()
-				if len(buffers) >= int(maxConcurrency) {
-					s.logger.Infon("Loading downloaded snapshots",
-						logger.NewIntField("bufferSize", int64(len(buffers))),
-						logger.NewIntField("totalFiles", totalFiles),
-						logger.NewFloatField("loadingPercentage",
-							float64(filesLoaded.Load())*100/float64(totalFiles),
-						),
-					)
-					loadStart := time.Now()
-					err = s.cache.LoadSnapshots(gCtx, buffers...)
-					if err != nil {
-						return fmt.Errorf("failed to load snapshots: %w", err)
-					}
-					filesLoaded.Add(int64(len(buffers)))
-					s.metrics.loadSnapshotsToDiskDuration.Since(loadStart)
-					buffers = buffers[:0]
+				select {
+				case <-gCtx.Done():
+					return gCtx.Err()
+				case readers <- bytes.NewReader(buf.Bytes()):
 				}
-				buffers = append(buffers, bytes.NewReader(buf.Bytes()))
 				return nil
 			})
 		}
 	}
 	if err = group.Wait(); err != nil {
+		close(readers)
+		loadCancel()
+		_ = <-loadDone // ignoring this error, even if the load failed we want to report the error from the group
 		return err
 	}
 
-	if len(buffers) > 0 {
-		s.logger.Infon("Loading downloaded snapshots",
-			logger.NewIntField("bufferSize", int64(len(buffers))),
-			logger.NewIntField("totalFiles", totalFiles),
-			logger.NewFloatField("loadingPercentage",
-				float64(filesLoaded.Load())*100/float64(totalFiles),
-			),
-		)
-		loadStart := time.Now()
-		if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
-			return fmt.Errorf("failed to load snapshots: %w", err)
+	close(readers)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-loadDone:
+		if err != nil {
+			return err
 		}
-		filesLoaded.Add(int64(len(buffers)))
-		s.metrics.loadSnapshotsToDiskDuration.Since(loadStart)
 	}
 
 	s.logger.Infon("Caches initialized successfully",
 		logger.NewFloatField("loadingPercentage",
-			float64(filesLoaded.Load())*100/float64(totalFiles),
+			float64(filesLoaded)*100/float64(totalFiles),
 		),
 	)
 

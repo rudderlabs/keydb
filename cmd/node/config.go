@@ -46,7 +46,7 @@ var customBuckets = map[string][]float64{
 		// 250ms, 500ms, 1s, 5s, 10s, 30s, 60s, 120s, 300s, 600s,
 		0.25, 0.5, 1, 5, 10, 30, 60, 120, 300, 600,
 	},
-	"keydb_create_snapshot_duration_seconds": {
+	"keydb_create_snapshots_duration_seconds": {
 		// 100ms, 250ms, 500ms, 1s, 5s, 10s, 30s, 60s, 120s, 300s, 600s, 900s, 1200s, 1800s,
 		0.1, 0.25, 0.5, 1, 5, 10, 30, 60, 120, 300, 600, 900, 1200, 1800,
 	},
