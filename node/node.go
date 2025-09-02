@@ -480,7 +480,7 @@ func (s *Service) initCaches(
 	if err = group.Wait(); err != nil {
 		close(readers)
 		loadCancel()
-		_ = <-loadDone // ignoring this error, even if the load failed we want to report the error from the group
+		<-loadDone // ignoring this error, even if the load failed we want to report the error from the group
 		return err
 	}
 
