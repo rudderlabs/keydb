@@ -20,13 +20,6 @@ import (
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
-const (
-	defaultRetryPolicyInitialInterval = 3 * time.Second
-	defaultRetryPolicyMultiplier      = 1.5
-	defaultRetryPolicyMaxInterval     = 1 * time.Minute
-	defaultRetryPolicyMaxElapsedTime  = 3 * time.Minute
-)
-
 type scalerClient interface {
 	Scale(ctx context.Context, nodeIDs []uint32) error
 	ScaleComplete(ctx context.Context, nodeIDs []uint32) error
