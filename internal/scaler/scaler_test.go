@@ -115,6 +115,7 @@ func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
 			InitialInterval: time.Millisecond,
 			Multiplier:      1.0,
 			MaxInterval:     time.Millisecond,
+			MaxElapsedTime:  250 * time.Millisecond,
 		},
 	}, logger.NOP)
 	require.NoError(t, err)

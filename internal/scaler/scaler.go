@@ -697,8 +697,6 @@ func (c *Client) getNextBackoffFunc() func() time.Duration {
 	bo.InitialInterval = c.config.RetryPolicy.InitialInterval
 	bo.MaxInterval = c.config.RetryPolicy.MaxInterval
 
-	fmt.Println("CIAONE", c.config.RetryPolicy)
-
 	start := time.Now()
 	return func() time.Duration {
 		next := bo.NextBackOff()
