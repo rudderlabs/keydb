@@ -111,9 +111,9 @@ type Service struct {
 		putInCacheSuccessDuration   stats.Timer
 		putInCacheFailDuration      stats.Timer
 		downloadSnapshotDuration    stats.Timer
-		loadSnapshotToDiskDuration  stats.Timer
+		loadSnapshotsToDiskDuration stats.Timer
 		uploadSnapshotDuration      stats.Timer
-		createSnapshotDuration      stats.Timer
+		createSnapshotsDuration     stats.Timer
 	}
 }
 
@@ -222,12 +222,15 @@ func NewService(
 		stats.TimerType, stats.Tags{"success": "true"})
 	service.metrics.putInCacheFailDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds",
 		stats.TimerType, stats.Tags{"success": "false"})
+	// NOTE: pay attention to the wording of the metrics below. if singular (i.e. snapshot instead of snapshots) then
+	// it tracks an operation that handles a single snapshot. if plural (i.e. snapshots instead of snapshot) then it
+	// tracks an operation that handles multiple snapshots (e.g. CreateSnapshots).
 	service.metrics.downloadSnapshotDuration = stat.NewStat("keydb_download_snapshot_duration_seconds", stats.TimerType)
-	service.metrics.loadSnapshotToDiskDuration = stat.NewStat(
-		"keydb_load_snapshot_to_disk_duration_seconds", stats.TimerType,
+	service.metrics.loadSnapshotsToDiskDuration = stat.NewStat(
+		"keydb_load_snapshots_to_disk_duration_seconds", stats.TimerType,
 	)
 	service.metrics.uploadSnapshotDuration = stat.NewStat("keydb_upload_snapshot_duration_seconds", stats.TimerType)
-	service.metrics.createSnapshotDuration = stat.NewStat("keydb_create_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.createSnapshotsDuration = stat.NewStat("keydb_create_snapshots_duration_seconds", stats.TimerType)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
@@ -461,11 +464,8 @@ func (s *Service) initCaches(
 					if err != nil {
 						return fmt.Errorf("failed to load snapshots: %w", err)
 					}
-					meanLoadDuration := time.Since(loadStart) / time.Duration(len(buffers))
 					filesLoaded.Add(int64(len(buffers)))
-					for range buffers {
-						s.metrics.loadSnapshotToDiskDuration.SendTiming(meanLoadDuration)
-					}
+					s.metrics.loadSnapshotsToDiskDuration.Since(loadStart)
 					buffers = buffers[:0]
 				}
 				buffers = append(buffers, bytes.NewReader(buf.Bytes()))
@@ -489,11 +489,8 @@ func (s *Service) initCaches(
 		if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
 			return fmt.Errorf("failed to load snapshots: %w", err)
 		}
-		meanLoadDuration := time.Since(loadStart) / time.Duration(len(buffers))
 		filesLoaded.Add(int64(len(buffers)))
-		for range buffers {
-			s.metrics.loadSnapshotToDiskDuration.SendTiming(meanLoadDuration)
-		}
+		s.metrics.loadSnapshotsToDiskDuration.Since(loadStart)
 	}
 
 	s.logger.Infon("Caches initialized successfully",
@@ -849,13 +846,10 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 
 	start := time.Now()
 	newSince, hasData, err := s.cache.CreateSnapshots(ctx, writers, since)
-	meanDuration := time.Since(start) / time.Duration(len(writers))
 	if err != nil {
 		return fmt.Errorf("failed to create snapshots: %w", err)
 	}
-	for range writers {
-		s.metrics.createSnapshotDuration.SendTiming(meanDuration)
-	}
+	s.metrics.createSnapshotsDuration.Since(start)
 
 	log = log.Withn(logger.NewIntField("newSince", int64(newSince)))
 
