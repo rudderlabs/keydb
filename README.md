@@ -44,7 +44,12 @@ config := client.Config{
     Addresses:       []string{"localhost:50051", "localhost:50052"}, // List of node addresses
     TotalHashRanges: 128,                                           // Optional, defaults to 128
     RetryCount:      3,                                             // Optional, defaults to 3
-    RetryDelay:      100 * time.Millisecond,                        // Optional, defaults to 100ms
+    RetryPolicy:     client.RetryPolicy{
+        Disabled:        false,
+        InitialInterval: 1 * time.Second,
+        Multiplier:      1.5,
+        MaxInterval:     1 * time.Minute,
+    },
 }
 
 // Logger is required
@@ -107,7 +112,7 @@ for i, key := range keys {
     although before trying again it will update its internal metadata with the new cluster node addresses first
     - Cluster changes trigger retries via recursion so there is no limit on the retries here
     - The client will retry as soon as possible right after trying to establish connections to new nodes (if any)
-  - Normal errors trigger retries with a linear backoff configured with a `RetryCount` and a `RetryDelay`
+  - Normal errors trigger retries with an exponential backoff configured with a `RetryPolicy`
   - For the retries client configuration please refer to the client [Config](./client/client.go) `struct`
 
 ## Node Configuration
@@ -232,7 +237,6 @@ type HashRangeMovementsRequest struct {
 	Upload                      bool        `json:"upload,omitempty"`
 	Download                    bool        `json:"download,omitempty"`
 	FullSync                    bool        `json:"full_sync,omitempty"`
-	RetryPolicy                 RetryPolicy `json:"retry_policy,omitempty"`
 	LoadSnapshotsMaxConcurrency uint32      `json:"load_snapshots_max_concurrency,omitempty"`
 }
 ```
@@ -261,14 +265,7 @@ follows this schema:
     ],
     "full_sync": false,
     "skip_create_snapshots": false,
-    "load_snapshots_max_concurrency": 3,
-    "retry_policy": {
-        "disabled": false,
-        "initial_interval": "3s",
-        "multiplier": 1.5,
-        "max_interval": "1m",
-        "max_elapsed_time": "15m"
-    }
+    "load_snapshots_max_concurrency": 3
 }
 ```
 
@@ -283,9 +280,7 @@ Usage:
 * if `skip_create_snapshots` == `true` → it does not ask nodes to create snapshots
   * useful if you did a pre-upload via `/hashRangeMovements`
 * if `load_snapshots_max_concurrency` > 0 → it limits how many snapshots can be loaded concurrently from S3
-* if `retry_policy.disabled` == `false` → it uses an exponential backoff with the provided parameters
-  * if a parameter is `0` then the default applies
-  * if the operation does not succeed after all the retries, then a rollback to the "last operation" is triggered
+* if the operation does not succeed after all the retries, then a rollback to the "last operation" is triggered
   * to see what was the "last recorded operation" you can call `/lastOperation`
 
 ### Alternative Scaling Methods
