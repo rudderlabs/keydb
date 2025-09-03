@@ -279,16 +279,15 @@ func (c *Client) get(
 					c.metrics.getReqRetries.Increment()
 				}
 				resp, err = client.Get(gCtx, req)
-				if err == nil && resp != nil {
-					if resp.ErrorCode == pb.ErrorCode_NO_ERROR {
-						break // for internal errors, scaling or wrong code we retry
-					}
-				}
-
 				if resp != nil && c.clusterSize != resp.ClusterSize {
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
+				}
+				if err == nil && resp != nil {
+					if resp.ErrorCode == pb.ErrorCode_NO_ERROR {
+						break // for internal errors, scaling or wrong code we retry
+					}
 				}
 
 				// If retry is disabled, return immediately after first attempt
@@ -331,12 +330,6 @@ func (c *Client) get(
 					return gCtx.Err()
 				case <-time.After(retryDelay):
 				}
-			}
-
-			if c.clusterSize != resp.ClusterSize {
-				hasClusterSizeChanged.Store(resp.NodesAddresses)
-				cancel()
-				return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 			}
 
 			// Store results
@@ -431,16 +424,15 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 					c.metrics.putReqRetries.Increment()
 				}
 				resp, err = client.Put(gCtx, req)
-				if err == nil && resp != nil {
-					if resp.Success && resp.ErrorCode == pb.ErrorCode_NO_ERROR {
-						break // for internal errors, scaling or wrong code we retry
-					}
-				}
-
 				if resp != nil && c.clusterSize != resp.ClusterSize {
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
 					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
+				}
+				if err == nil && resp != nil {
+					if resp.Success && resp.ErrorCode == pb.ErrorCode_NO_ERROR {
+						break // for internal errors, scaling or wrong code we retry
+					}
 				}
 
 				// If retry is disabled, return immediately after first attempt
@@ -483,12 +475,6 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 					return gCtx.Err()
 				case <-time.After(retryDelay):
 				}
-			}
-
-			if c.clusterSize != resp.ClusterSize {
-				hasClusterSizeChanged.Store(resp.NodesAddresses)
-				cancel()
-				return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 			}
 
 			return nil
