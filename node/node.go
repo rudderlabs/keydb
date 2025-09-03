@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -110,6 +109,10 @@ type Service struct {
 		putKeysHashingDuration      stats.Timer
 		putInCacheSuccessDuration   stats.Timer
 		putInCacheFailDuration      stats.Timer
+		downloadSnapshotDuration    stats.Timer
+		loadSnapshotToDiskDuration  stats.Timer
+		uploadSnapshotDuration      stats.Timer
+		createSnapshotsDuration     stats.Timer
 	}
 }
 
@@ -218,6 +221,15 @@ func NewService(
 		stats.TimerType, stats.Tags{"success": "true"})
 	service.metrics.putInCacheFailDuration = stat.NewTaggedStat("keydb_grpc_cache_put_duration_seconds",
 		stats.TimerType, stats.Tags{"success": "false"})
+	// NOTE: pay attention to the wording of the metrics below. if singular (i.e. snapshot instead of snapshots) then
+	// it tracks an operation that handles a single snapshot. if plural (i.e. snapshots instead of snapshot) then it
+	// tracks an operation that handles multiple snapshots (e.g. CreateSnapshots).
+	service.metrics.downloadSnapshotDuration = stat.NewStat("keydb_download_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.loadSnapshotToDiskDuration = stat.NewStat(
+		"keydb_load_snapshot_to_disk_duration_seconds", stats.TimerType,
+	)
+	service.metrics.uploadSnapshotDuration = stat.NewStat("keydb_upload_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.createSnapshotsDuration = stat.NewStat("keydb_create_snapshots_duration_seconds", stats.TimerType)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
@@ -406,11 +418,31 @@ func (s *Service) initCaches(
 	}
 
 	var (
-		group, gCtx  = kitsync.NewEagerGroup(ctx, int(maxConcurrency))
-		buffers      = make([]io.Reader, 0, len(filesByHashRange))
-		buffersMu    sync.Mutex
-		filesLoading atomic.Int64
+		loadCtx, loadCancel = context.WithCancel(ctx)
+		loadDone            = make(chan error, 1)
+		filesLoaded         int64
+		group, gCtx         = kitsync.NewEagerGroup(ctx, 0)
+		readers             = make(chan io.Reader, maxConcurrency)
 	)
+	defer loadCancel()
+	go func() {
+		defer close(loadDone)
+		for r := range readers {
+			s.logger.Infon("Loading downloaded snapshots",
+				logger.NewIntField("totalFiles", totalFiles),
+				logger.NewFloatField("loadingPercentage",
+					float64(filesLoaded)*100/float64(totalFiles),
+				),
+			)
+			loadStart := time.Now()
+			if err := s.cache.LoadSnapshots(loadCtx, r); err != nil {
+				loadDone <- fmt.Errorf("failed to load snapshots: %w", err)
+				return
+			}
+			s.metrics.loadSnapshotToDiskDuration.Since(loadStart)
+			filesLoaded++
+		}
+	}()
 	for r := range filesByHashRange {
 		snapshotFiles := filesByHashRange[r]
 		if len(snapshotFiles) == 0 {
@@ -418,15 +450,13 @@ func (s *Service) initCaches(
 			continue
 		}
 
-		group.Go(func() error { // Try to load snapshot for this range
-			for _, snapshotFile := range snapshotFiles {
-				filesLoading.Add(1)
-				s.logger.Infon("Loading snapshot file",
+		for _, snapshotFile := range snapshotFiles {
+			group.Go(func() error {
+				s.logger.Infon("Starting download of snapshot file from cloud storage",
 					logger.NewStringField("filename", snapshotFile),
-					logger.NewIntField("totalFiles", totalFiles),
-					logger.NewFloatField("percentage", float64(filesLoading.Load())/float64(totalFiles)),
 				)
 
+				startDownload := time.Now()
 				buf := aws.NewWriteAtBuffer([]byte{})
 				err := s.storage.Download(gCtx, buf, snapshotFile)
 				if err != nil {
@@ -436,20 +466,41 @@ func (s *Service) initCaches(
 					}
 					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
 				}
-				buffersMu.Lock()
-				buffers = append(buffers, bytes.NewReader(buf.Bytes()))
-				buffersMu.Unlock()
-			}
-			return nil
-		})
+				s.metrics.downloadSnapshotDuration.Since(startDownload)
+
+				select {
+				case <-gCtx.Done():
+					return gCtx.Err()
+				case readers <- bytes.NewReader(buf.Bytes()):
+				}
+				return nil
+			})
+		}
 	}
 	if err = group.Wait(); err != nil {
-		return fmt.Errorf("failed to initialize caches: %w", err)
+		close(readers)
+		loadCancel()
+		<-loadDone // ignoring this error, even if the load failed we want to report the error from the group
+		return err
 	}
-	if err = s.cache.LoadSnapshots(ctx, buffers...); err != nil {
-		return fmt.Errorf("failed to load snapshots: %w", err)
+
+	close(readers)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-loadDone:
+		if err != nil {
+			return err
+		}
 	}
-	s.logger.Infon("Caches initialized successfully")
+
+	s.logger.Infon("Caches initialized successfully",
+		logger.NewFloatField("loadingPercentage",
+			float64(filesLoaded)*100/float64(totalFiles),
+		),
+	)
+
 	return nil
 }
 
@@ -795,10 +846,12 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 		logger.NewStringField("since", sinceLog.String()))
 	log.Infon("Creating snapshots")
 
+	start := time.Now()
 	newSince, hasData, err := s.cache.CreateSnapshots(ctx, writers, since)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshots: %w", err)
 	}
+	s.metrics.createSnapshotsDuration.Since(start)
 
 	log = log.Withn(logger.NewIntField("newSince", int64(newSince)))
 
@@ -857,10 +910,12 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			logger.NewStringField("filename", filename),
 		)
 
+		startUpload := time.Now()
 		_, err = s.storage.UploadReader(ctx, filename, buf)
 		if err != nil {
 			return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
 		}
+		s.metrics.uploadSnapshotDuration.Since(startUpload)
 
 		s.since[hashRange] = newSince
 
