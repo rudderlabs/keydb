@@ -1,8 +1,6 @@
 package main
 
 import (
-	"time"
-
 	"github.com/rudderlabs/keydb/internal/scaler"
 )
 
@@ -69,30 +67,20 @@ type AutoScaleRequest struct {
 	NewNodesAddresses []string `json:"new_nodes_addresses"`
 	// FullSync indicates whether to perform a full synchronization during snapshot creation.
 	// When true, all data will be included in snapshots regardless of incremental changes.
-	FullSync                    bool        `json:"full_sync,omitempty"`
-	RetryPolicy                 RetryPolicy `json:"retry_policy,omitempty"`
-	SkipCreateSnapshots         bool        `json:"skip_create_snapshots,omitempty"`
-	LoadSnapshotsMaxConcurrency uint32      `json:"load_snapshots_max_concurrency,omitempty"`
-}
-
-type RetryPolicy struct {
-	Disabled        bool          `json:"disabled"`
-	InitialInterval time.Duration `json:"initial_interval"`
-	Multiplier      float64       `json:"multiplier"`
-	MaxInterval     time.Duration `json:"max_interval"`
-	MaxElapsedTime  time.Duration `json:"max_elapsed_time"`
+	FullSync                    bool   `json:"full_sync,omitempty"`
+	SkipCreateSnapshots         bool   `json:"skip_create_snapshots,omitempty"`
+	LoadSnapshotsMaxConcurrency uint32 `json:"load_snapshots_max_concurrency,omitempty"`
 }
 
 // HashRangeMovementsRequest represents a request to preview hash range movements
 type HashRangeMovementsRequest struct {
-	OldClusterSize              uint32      `json:"old_cluster_size"`
-	NewClusterSize              uint32      `json:"new_cluster_size"`
-	TotalHashRanges             uint32      `json:"total_hash_ranges"`
-	Upload                      bool        `json:"upload,omitempty"`
-	Download                    bool        `json:"download,omitempty"`
-	FullSync                    bool        `json:"full_sync,omitempty"`
-	RetryPolicy                 RetryPolicy `json:"retry_policy,omitempty"`
-	LoadSnapshotsMaxConcurrency uint32      `json:"load_snapshots_max_concurrency,omitempty"`
+	OldClusterSize              uint32 `json:"old_cluster_size"`
+	NewClusterSize              uint32 `json:"new_cluster_size"`
+	TotalHashRanges             uint32 `json:"total_hash_ranges"`
+	Upload                      bool   `json:"upload,omitempty"`
+	Download                    bool   `json:"download,omitempty"`
+	FullSync                    bool   `json:"full_sync,omitempty"`
+	LoadSnapshotsMaxConcurrency uint32 `json:"load_snapshots_max_concurrency,omitempty"`
 }
 
 type HashRangeMovementsResponse struct {

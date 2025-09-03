@@ -432,22 +432,23 @@ func (c *Cache) String() string {
 	return sb.String()
 }
 
-func (c *Cache) writeTo(list *pb.KVList, w *lockedWriter) (err error) {
+func (c *Cache) writeTo(list *pb.KVList, w *lockedWriter) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if err = binary.Write(w.writer, binary.LittleEndian, uint64(proto.Size(list))); err != nil {
-		return
+	err := binary.Write(w.writer, binary.LittleEndian, uint64(proto.Size(list)))
+	if err != nil {
+		return err
 	}
 
 	var buf []byte
 	buf, err = proto.Marshal(list)
 	if err != nil {
-		return
+		return err
 	}
 
 	_, err = w.writer.Write(buf)
-	return
+	return err
 }
 
 func getKeyPrefix(hashRange uint32) string {

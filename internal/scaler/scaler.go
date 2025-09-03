@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -18,6 +19,22 @@ import (
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
+const (
+	DefaultRetryPolicyInitialInterval = 1 * time.Second
+	DefaultRetryPolicyMultiplier      = 1.5
+	DefaultRetryPolicyMaxInterval     = 30 * time.Second
+	DefaultMaxElapsedTime             = 10 * time.Minute
+)
+
+// RetryPolicy defines the retry policy configuration
+type RetryPolicy struct {
+	Disabled        bool          `json:"disabled"`
+	InitialInterval time.Duration `json:"initial_interval"`
+	Multiplier      float64       `json:"multiplier"`
+	MaxInterval     time.Duration `json:"max_interval"`
+	MaxElapsedTime  time.Duration `json:"max_elapsed_time"`
+}
+
 // Config holds the configuration for a client
 type Config struct {
 	// Addresses is a list of node addresses (host:port)
@@ -26,11 +43,8 @@ type Config struct {
 	// TotalHashRanges is the total number of hash ranges
 	TotalHashRanges uint32
 
-	// RetryCount is the number of times to retry a request
-	RetryCount int
-
-	// RetryDelay is the delay between retries
-	RetryDelay time.Duration
+	// RetryPolicy defines the retry behavior for failed requests
+	RetryPolicy RetryPolicy
 }
 
 type ScalingOperationType string
@@ -94,12 +108,18 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		return nil, fmt.Errorf("total hash ranges must be greater than 0")
 	}
 
-	if config.RetryCount == 0 {
-		return nil, fmt.Errorf("retry count must be greater than 0")
+	// Set default retry policy values if not specified
+	if config.RetryPolicy.InitialInterval == 0 {
+		config.RetryPolicy.InitialInterval = DefaultRetryPolicyInitialInterval
 	}
-
-	if config.RetryDelay == 0 {
-		return nil, fmt.Errorf("retry delay must be greater than 0")
+	if config.RetryPolicy.Multiplier == 0 {
+		config.RetryPolicy.Multiplier = DefaultRetryPolicyMultiplier
+	}
+	if config.RetryPolicy.MaxInterval == 0 {
+		config.RetryPolicy.MaxInterval = DefaultRetryPolicyMaxInterval
+	}
+	if config.RetryPolicy.MaxElapsedTime == 0 {
+		config.RetryPolicy.MaxElapsedTime = DefaultMaxElapsedTime
 	}
 
 	client := &Client{
@@ -184,24 +204,33 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 	req := &pb.GetNodeInfoRequest{NodeId: nodeID}
 
 	// Send the request with retries
-	var err error
-	var resp *pb.GetNodeInfoResponse
-	for i := 0; i <= c.config.RetryCount; i++ {
+	var (
+		err         error
+		resp        *pb.GetNodeInfoResponse
+		nextBackoff = c.getNextBackoffFunc()
+	)
+	for attempt := int64(1); ; attempt++ {
 		resp, err = client.GetNodeInfo(ctx, req)
 		if err == nil {
 			break
 		}
 
-		// If this is the last retry, return the error
-		if i == c.config.RetryCount {
+		retryDelay := nextBackoff()
+		if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
 			return nil, fmt.Errorf("failed to get node info from node %d: %w", nodeID, err)
 		}
+
+		c.logger.Warnn("Cannot get node info",
+			logger.NewIntField("nodeID", int64(nodeID)),
+			logger.NewIntField("attempt", attempt),
+			logger.NewDurationField("retryDelay", retryDelay),
+			obskit.Error(err))
 
 		// Wait before retrying
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(c.config.RetryDelay):
+		case <-time.After(retryDelay):
 		}
 	}
 
@@ -227,32 +256,51 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 		FullSync:  fullSync,
 	}
 
-	var err error
-	var resp *pb.CreateSnapshotsResponse
-	for i := 0; i <= c.config.RetryCount; i++ {
+	var (
+		err         error
+		resp        *pb.CreateSnapshotsResponse
+		nextBackoff = c.getNextBackoffFunc()
+	)
+	for attempt := int64(1); ; attempt++ {
 		resp, err = client.CreateSnapshots(ctx, req)
-		if err == nil {
+		if err == nil && resp != nil && resp.Success {
 			break
 		}
 
-		// If this is the last retry, return the error
-		if i == c.config.RetryCount {
-			return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
+		retryDelay := nextBackoff()
+		if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
+			if err != nil {
+				return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
+			}
+			if resp != nil {
+				return fmt.Errorf("failed to create snapshot on node %d: %s", nodeID, resp.ErrorMessage)
+			}
+			return fmt.Errorf("cannot create snapshots on node %d: both error and response are nil", nodeID)
+		}
+
+		if err != nil {
+			c.logger.Warnn("Cannot create snapshots",
+				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("attempt", attempt),
+				logger.NewDurationField("retryDelay", retryDelay),
+				obskit.Error(err))
+		} else if resp != nil {
+			c.logger.Warnn("Create snapshots unsuccessful",
+				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("attempt", attempt),
+				logger.NewBoolField("success", resp.Success),
+				logger.NewDurationField("retryDelay", retryDelay),
+				obskit.Error(errors.New(resp.ErrorMessage)))
+		} else {
+			return fmt.Errorf("cannot create snapshots on node %d: both error and response are nil", nodeID)
 		}
 
 		// Wait before retrying
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(c.config.RetryDelay):
+		case <-time.After(retryDelay):
 		}
-	}
-
-	if !resp.Success {
-		if err == nil {
-			err = errors.New(resp.ErrorMessage)
-		}
-		return fmt.Errorf("failed to create snapshot on node %d: %w", nodeID, err)
 	}
 
 	return nil
@@ -277,30 +325,50 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint3
 		MaxConcurrency: maxConcurrency,
 	}
 
-	var err error
-	var resp *pb.LoadSnapshotsResponse
-	for i := 0; i <= c.config.RetryCount; i++ {
+	var (
+		err         error
+		resp        *pb.LoadSnapshotsResponse
+		nextBackoff = c.getNextBackoffFunc()
+	)
+	for attempt := int64(1); ; attempt++ {
 		resp, err = client.LoadSnapshots(ctx, req)
 		if err == nil && resp != nil && resp.Success {
 			break
 		}
 
-		// If this is the last retry, return the error
-		if i == c.config.RetryCount {
-			errMsg := "unknown error"
+		retryDelay := nextBackoff()
+		if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
 			if err != nil {
-				errMsg = err.Error()
-			} else if resp != nil {
-				errMsg = resp.ErrorMessage
+				return fmt.Errorf("failed to load snapshots on node %d: %w", nodeID, err)
 			}
-			return fmt.Errorf("failed to load snapshots on node %d: %s", nodeID, errMsg)
+			if resp != nil {
+				return fmt.Errorf("failed to load snapshots on node %d: %s", nodeID, resp.ErrorMessage)
+			}
+			return fmt.Errorf("cannot load snapshots on node %d: both error and response are nil", nodeID)
+		}
+
+		if err != nil {
+			c.logger.Warnn("Cannot load snapshots",
+				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("attempt", attempt),
+				logger.NewDurationField("retryDelay", retryDelay),
+				obskit.Error(err))
+		} else if resp != nil {
+			c.logger.Warnn("Load snapshots unsuccessful",
+				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("attempt", attempt),
+				logger.NewBoolField("success", resp.Success),
+				logger.NewDurationField("retryDelay", retryDelay),
+				obskit.Error(errors.New(resp.ErrorMessage)))
+		} else {
+			return fmt.Errorf("cannot load snapshots on node %d: both error and response are nil", nodeID)
 		}
 
 		// Wait before retrying
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(c.config.RetryDelay):
+		case <-time.After(retryDelay):
 		}
 	}
 
@@ -333,37 +401,41 @@ func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
 				NodesAddresses: c.config.Addresses,
 			}
 
-			var err error
-			var resp *pb.ScaleResponse
-			for i := 0; i <= c.config.RetryCount; i++ {
+			var (
+				err         error
+				resp        *pb.ScaleResponse
+				nextBackoff = c.getNextBackoffFunc()
+			)
+			for attempt := int64(1); ; attempt++ {
 				resp, err = client.Scale(ctx, req)
 				if err == nil && resp != nil && resp.Success {
 					break
 				}
 
-				errMsg := "unknown error"
-				if err != nil {
-					errMsg = err.Error()
-				} else if resp != nil {
-					errMsg = resp.ErrorMessage
+				if err == nil {
+					if resp != nil {
+						err = errors.New(resp.ErrorMessage)
+					} else {
+						err = errors.New("unknown error")
+					}
 				}
 
-				// If this is the last retry, save the error
-				if i == c.config.RetryCount {
-					return fmt.Errorf("failed to scale node %d: %s", nodeID, errMsg)
+				retryDelay := nextBackoff()
+				if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
+					return fmt.Errorf("failed to scale node %d: %w", nodeID, err)
 				}
 
 				c.logger.Warnn("Cannot scale node",
 					logger.NewIntField("nodeID", int64(nodeID)),
-					logger.NewDurationField("retryDelay", c.config.RetryDelay),
-					obskit.Error(errors.New(errMsg)),
-				)
+					logger.NewIntField("attempt", attempt),
+					logger.NewDurationField("retryDelay", retryDelay),
+					obskit.Error(err))
 
 				// Wait before retrying
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case <-time.After(c.config.RetryDelay):
+				case <-time.After(retryDelay):
 				}
 			}
 
@@ -403,35 +475,41 @@ func (c *Client) ScaleComplete(ctx context.Context, nodeIDs []uint32) error {
 			req := &pb.ScaleCompleteRequest{}
 
 			// Send the request with retries
-			var err error
-			var resp *pb.ScaleCompleteResponse
-			for i := 0; i <= c.config.RetryCount; i++ {
+			var (
+				err         error
+				resp        *pb.ScaleCompleteResponse
+				nextBackoff = c.getNextBackoffFunc()
+			)
+			for attempt := int64(1); ; attempt++ {
 				resp, err = client.ScaleComplete(ctx, req)
 				if err == nil && resp != nil && resp.Success {
 					break
 				}
 
-				// If this is the last retry, return the error
-				if i == c.config.RetryCount {
-					return fmt.Errorf("failed to complete scale operation on node %d: %w", nodeID, err)
+				if err == nil {
+					if resp != nil {
+						err = errors.New("unsuccessful response from nodes")
+					} else {
+						err = errors.New("unknown error")
+					}
 				}
 
-				logErr := errors.New("unsuccessful response from nodes")
-				if err != nil {
-					logErr = err
+				retryDelay := nextBackoff()
+				if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
+					return fmt.Errorf("failed to complete scale on node %d: %w", nodeID, err)
 				}
 
 				c.logger.Warnn("Cannot complete scale operation",
 					logger.NewIntField("nodeID", int64(nodeID)),
-					logger.NewDurationField("retryDelay", c.config.RetryDelay),
-					obskit.Error(logErr),
-				)
+					logger.NewIntField("attempt", attempt),
+					logger.NewDurationField("retryDelay", retryDelay),
+					obskit.Error(err))
 
 				// Wait before retrying
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
-				case <-time.After(c.config.RetryDelay):
+				case <-time.After(retryDelay):
 				}
 			}
 
@@ -611,4 +689,19 @@ func (c *Client) rollbackToOldConfiguration(ctx context.Context, operation *Scal
 	}
 
 	return nil
+}
+
+func (c *Client) getNextBackoffFunc() func() time.Duration {
+	bo := backoff.NewExponentialBackOff()
+	bo.Multiplier = c.config.RetryPolicy.Multiplier
+	bo.InitialInterval = c.config.RetryPolicy.InitialInterval
+	bo.MaxInterval = c.config.RetryPolicy.MaxInterval
+
+	start := time.Now()
+	return func() time.Duration {
+		if c.config.RetryPolicy.MaxElapsedTime > 0 && time.Since(start) > c.config.RetryPolicy.MaxElapsedTime {
+			return backoff.Stop
+		}
+		return bo.NextBackOff()
+	}
 }

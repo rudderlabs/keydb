@@ -66,9 +66,12 @@ func TestExecuteScalingWithRollback_FailureWithRollback(t *testing.T) {
 	// Setup test client
 	client, err := NewClient(Config{
 		Addresses:       []string{addr},
-		RetryCount:      3,
-		RetryDelay:      100 * time.Millisecond,
 		TotalHashRanges: 16,
+		RetryPolicy: RetryPolicy{
+			InitialInterval: time.Millisecond,
+			Multiplier:      1.0,
+			MaxInterval:     time.Millisecond,
+		},
 	}, logger.NOP)
 	require.NoError(t, err)
 
@@ -107,9 +110,13 @@ func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
 	// Setup test client
 	testClient, err := NewClient(Config{
 		Addresses:       []string{addr},
-		RetryCount:      3,
-		RetryDelay:      100 * time.Millisecond,
 		TotalHashRanges: 16,
+		RetryPolicy: RetryPolicy{
+			InitialInterval: time.Millisecond,
+			Multiplier:      1.0,
+			MaxInterval:     time.Millisecond,
+			MaxElapsedTime:  250 * time.Millisecond,
+		},
 	}, logger.NOP)
 	require.NoError(t, err)
 

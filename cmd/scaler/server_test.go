@@ -71,7 +71,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	}, node0Conf)
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address)
 
 	// Test Put
 	_ = s.Do("/put", PutRequest{
@@ -212,7 +212,9 @@ func TestAutoScale(t *testing.T) {
 	}, node0Conf)
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address)
 
 	// Test Put some initial data
 	_ = s.Do("/put", PutRequest{
@@ -239,9 +241,6 @@ func TestAutoScale(t *testing.T) {
 	_ = s.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, node1Address},
-		RetryPolicy: RetryPolicy{
-			Disabled: true,
-		},
 	}, true)
 
 	// Verify scale up worked - check node info
@@ -287,9 +286,6 @@ func TestAutoScale(t *testing.T) {
 	_ = s.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
-		RetryPolicy: RetryPolicy{
-			Disabled: true,
-		},
 	}, true)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
@@ -357,7 +353,12 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	go proxy.Start(t) // Starting the proxy after we get the service to populate RemoteAddr
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		InitialInterval: time.Second,
+		Multiplier:      1,
+		MaxInterval:     time.Second,
+		MaxElapsedTime:  3 * time.Second,
+	}, node0Address)
 
 	// Test Put some initial data
 	_ = s.Do("/put", PutRequest{
@@ -390,11 +391,6 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		_ = s.Do("/autoScale", AutoScaleRequest{
 			OldNodesAddresses: []string{node0Address},
 			NewNodesAddresses: []string{node0Address, node1Address},
-			RetryPolicy: RetryPolicy{
-				InitialInterval: time.Second,
-				Multiplier:      1,
-				MaxInterval:     3 * time.Second,
-			},
 		}, true)
 	}()
 	go func() {
@@ -483,7 +479,12 @@ func TestAutoScaleTransientError(t *testing.T) {
 	node1 := startMockNodeService(t, "node1")
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0.address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		InitialInterval: 10 * time.Millisecond,
+		Multiplier:      1,
+		MaxInterval:     10 * time.Millisecond,
+		MaxElapsedTime:  time.Second,
+	}, node0.address)
 
 	t.Log("Scaling up from 1 node to 2 nodes...")
 	node0.createSnapshotsReturnError.Store(true)
@@ -496,11 +497,6 @@ func TestAutoScaleTransientError(t *testing.T) {
 		_ = s.Do("/autoScale", AutoScaleRequest{
 			OldNodesAddresses: []string{node0.address},
 			NewNodesAddresses: []string{node0.address, node1.address},
-			RetryPolicy: RetryPolicy{
-				InitialInterval: time.Millisecond,
-				Multiplier:      1,
-				MaxInterval:     1 * time.Second,
-			},
 		}, true)
 	}()
 
@@ -539,9 +535,6 @@ func TestAutoScaleTransientError(t *testing.T) {
 		_ = s.Do("/autoScale", AutoScaleRequest{
 			OldNodesAddresses: []string{node0.address, node1.address},
 			NewNodesAddresses: []string{node0.address},
-			RetryPolicy: RetryPolicy{
-				Disabled: true,
-			},
 		}, true)
 	}()
 	<-done
@@ -578,7 +571,7 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 	}, node0Conf)
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address)
 
 	// Test error cases
 	testCases := []struct {
@@ -662,7 +655,9 @@ func TestAutoHealing(t *testing.T) {
 	}, node0Conf)
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address)
 
 	// Test Put some initial data
 	_ = s.Do("/put", PutRequest{
@@ -679,9 +674,6 @@ func TestAutoHealing(t *testing.T) {
 	_ = s.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address},
-		RetryPolicy: RetryPolicy{
-			Disabled: true,
-		},
 	}, true)
 
 	// Verify auto-healing worked - check node info
@@ -733,7 +725,7 @@ func TestHashRangeMovements(t *testing.T) {
 	}, node0Conf)
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address)
 
 	// Test successful hash range movements preview
 	t.Run("successful scale up preview", func(t *testing.T) {
@@ -961,7 +953,7 @@ func TestHashRangeMovements(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, newNodeConf)
 
-		s := startScalerHTTPServer(t, totalHashRanges, node0Address, newNodeAddress)
+		s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address, newNodeAddress)
 
 		body = s.Do("/hashRangeMovements", HashRangeMovementsRequest{
 			OldClusterSize:  1,
@@ -1013,7 +1005,7 @@ func TestHashRangeMovements(t *testing.T) {
 
 func TestHandleLastOperation(t *testing.T) {
 	// Start test server
-	s := startScalerHTTPServer(t, 128, "localhost:0")
+	s := startScalerHTTPServer(t, 128, scaler.RetryPolicy{}, "localhost:0")
 
 	// Record an operation
 	s.scaler.RecordOperation(scaler.ScaleUp, 2, 3, []string{"node1", "node2"}, []string{"node1", "node2", "node3"})
@@ -1073,7 +1065,9 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	}, node0Conf)
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address)
 
 	// Test Put some data
 	_ = s.Do("/put", PutRequest{
@@ -1091,9 +1085,6 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, "random-no1-address:12345"}, // Simulating a non-running node
 		FullSync:          false,
-		RetryPolicy: RetryPolicy{
-			Disabled: true,
-		},
 	}
 
 	// This should fail and trigger rollback
@@ -1192,7 +1183,9 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	}, node1Conf)
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address, node1Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address, node1Address)
 
 	// Test Put some data
 	_ = s.Do("/put", PutRequest{
@@ -1211,9 +1204,6 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{unreachableAddr}, // Simulating a non-running node
 		FullSync:          false,
-		RetryPolicy: RetryPolicy{
-			Disabled: true,
-		},
 	}
 
 	// This should fail and trigger rollback
@@ -1314,7 +1304,9 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	}, node1Conf)
 
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, totalHashRanges, node0Address, node1Address)
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address, node1Address)
 
 	// Test Put some data
 	_ = s.Do("/put", PutRequest{
@@ -1332,9 +1324,6 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	autoHealReq := AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address, unreachableAddr}, // Only node0 is available now
-		RetryPolicy: RetryPolicy{
-			Disabled: true,
-		},
 	}
 
 	// This should fail and trigger rollback
@@ -1401,16 +1390,15 @@ func TestRollbackFailure(t *testing.T) {
 	node0Address := "random-node0-address:12345"
 	node1Address := "random-node1-address:12345"
 	// Start the Scaler HTTP Server
-	s := startScalerHTTPServer(t, 3, node0Address)
+	s := startScalerHTTPServer(t, 3, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address)
 
 	// Try to scale up with no nodes running - this should fail and rollback should also fail
 	autoScaleReq := AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, node1Address},
 		FullSync:          false,
-		RetryPolicy: RetryPolicy{
-			Disabled: true,
-		},
 	}
 
 	// This should fail and rollback should also fail
@@ -1517,7 +1505,7 @@ func getService(
 	return service, address
 }
 
-func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...string) *opClient { // nolint:unparam
+func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, rp scaler.RetryPolicy, addresses ...string) *opClient {
 	t.Helper()
 
 	log := logger.NOP
@@ -1536,8 +1524,7 @@ func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, addresses ...st
 	op, err := scaler.NewClient(scaler.Config{
 		Addresses:       addresses,
 		TotalHashRanges: totalHashRanges,
-		RetryCount:      3,
-		RetryDelay:      time.Second,
+		RetryPolicy:     rp,
 	}, log)
 	require.NoError(t, err)
 
