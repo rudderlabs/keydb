@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.2-alpha](https://github.com/rudderlabs/keydb/compare/v0.4.1-alpha...v0.4.2-alpha) (2025-09-03)
+
+
+### Miscellaneous
+
+* improved documentation ([#41](https://github.com/rudderlabs/keydb/issues/41)) ([e4a112a](https://github.com/rudderlabs/keydb/commit/e4a112ad8de79742394f2d062030ad2a8556e2d6))
+* infinite exponential retry policy ([#43](https://github.com/rudderlabs/keydb/issues/43)) ([4864918](https://github.com/rudderlabs/keydb/commit/486491836240ee2277fad4109199256b93f4797b))
+* load snapshots max concurrency ([#42](https://github.com/rudderlabs/keydb/issues/42)) ([5b15806](https://github.com/rudderlabs/keydb/commit/5b158066be04118a1dd49cbbe346acd1a5735570))
+
 ## [0.4.1-alpha](https://github.com/rudderlabs/keydb/compare/v0.4.0-alpha...v0.4.1-alpha) (2025-08-28)
 
 
