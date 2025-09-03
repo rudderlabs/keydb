@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	DefaultRetryPolicyInitialInterval        = 1 * time.Second
+	DefaultRetryPolicyInitialInterval        = 100 * time.Millisecond
 	DefaultRetryPolicyMultiplier             = 1.5
 	DefaultRetryPolicyMaxInterval            = 30 * time.Second
 	DefaultTotalHashRanges            uint32 = 128
@@ -36,10 +36,10 @@ func (e *errClusterSizeChanged) Error() string { return "cluster size changed" }
 
 // RetryPolicy defines the retry policy configuration
 type RetryPolicy struct {
-	Disabled        bool          `json:"disabled"`
-	InitialInterval time.Duration `json:"initial_interval"`
-	Multiplier      float64       `json:"multiplier"`
-	MaxInterval     time.Duration `json:"max_interval"`
+	Disabled        bool
+	InitialInterval time.Duration
+	Multiplier      float64
+	MaxInterval     time.Duration
 }
 
 // Config holds the configuration for a client
