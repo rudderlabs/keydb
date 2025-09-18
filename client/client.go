@@ -11,7 +11,9 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"google.golang.org/grpc"
+	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -137,13 +139,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 
 	// Connect to all nodes
 	for i, addr := range config.Addresses {
-		conn, err := grpc.NewClient(addr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-				var dialer net.Dialer
-				return dialer.DialContext(ctx, "tcp", addr)
-			}),
-		)
+		conn, err := client.createConnection(addr)
 		if err != nil {
 			// Close all connections on error
 			_ = client.Close()
@@ -539,13 +535,7 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 		// But we can only do this if we have addresses for the new nodes
 		for i := int(oldClusterSize); i < int(newClusterSize); i++ {
 			addr := nodesAddresses[i]
-			conn, err := grpc.NewClient(addr,
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-					var dialer net.Dialer
-					return dialer.DialContext(ctx, "tcp", addr)
-				}),
-			)
+			conn, err := c.createConnection(addr)
 			if err != nil {
 				return fmt.Errorf("failed to connect to node %d at %s: %w", i, addr, err)
 			}
@@ -567,4 +557,35 @@ func (c *Client) getNextBackoffFunc() func() time.Duration {
 	return func() time.Duration {
 		return bo.NextBackOff()
 	}
+}
+
+// createConnection creates a gRPC connection with proper keepalive and retry configuration
+func (c *Client) createConnection(addr string) (*grpc.ClientConn, error) {
+	// Configure keepalive parameters to detect dead connections
+	kacp := keepalive.ClientParameters{
+		Time:                10 * time.Second, // send pings every 10 seconds if idle
+		Timeout:             3 * time.Second,  // wait 3 seconds for ping ack before considering connection dead
+		PermitWithoutStream: true,             // send pings even without active streams
+	}
+
+	// Service config with retry policy for connection-level retries
+	backoffConfig := grpcbackoff.Config{ // TODO add variables
+		BaseDelay:  1.0 * time.Second,
+		Multiplier: 1.6,
+		Jitter:     0.2,
+		MaxDelay:   120 * time.Second,
+	}
+
+	return grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(kacp),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoffConfig,
+			MinConnectTimeout: 20 * time.Second,
+		}),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "tcp", addr)
+		}),
+	)
 }
