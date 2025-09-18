@@ -28,6 +28,15 @@ const (
 	DefaultRetryPolicyMultiplier             = 1.5
 	DefaultRetryPolicyMaxInterval            = 30 * time.Second
 	DefaultTotalHashRanges            uint32 = 128
+
+	DefaultGrpcKeepAliveTime    = 10 * time.Second
+	DefaultGrpcKeepAliveTimeout = 2 * time.Second
+
+	DefaultGrpcBackoffBaseDelay  = 1 * time.Second
+	DefaultGrpcBackoffMultiplier = 1.6
+	DefaultGrpcBackoffJitter     = 0.2
+	DefaultGrpcMaxDelay          = 2 * time.Minute
+	DefaultGrpcMinConnectTimeout = 20 * time.Second
 )
 
 type errClusterSizeChanged struct {
@@ -44,6 +53,27 @@ type RetryPolicy struct {
 	MaxInterval     time.Duration
 }
 
+// GrpcConfig holds gRPC connection configuration
+type GrpcConfig struct {
+	// KeepAliveTime is the time after which a ping will be sent on the transport
+	KeepAliveTime time.Duration
+	// KeepAliveTimeout is the time the client waits for a response to the keepalive ping
+	KeepAliveTimeout time.Duration
+	// DisableKeepAlivePermitWithoutStream disables keepalive pings even when there are no active streams
+	DisableKeepAlivePermitWithoutStream bool
+
+	// BackoffBaseDelay is the initial backoff delay for connection attempts
+	BackoffBaseDelay time.Duration
+	// BackoffMultiplier is the multiplier for exponential backoff
+	BackoffMultiplier float64
+	// BackoffJitter adds randomness to backoff delays
+	BackoffJitter float64
+	// BackoffMaxDelay is the maximum backoff delay
+	BackoffMaxDelay time.Duration
+	// MinConnectTimeout is the minimum timeout for connection attempts
+	MinConnectTimeout time.Duration
+}
+
 // Config holds the configuration for a client
 type Config struct {
 	// Addresses is a list of node addresses (host:port)
@@ -54,6 +84,9 @@ type Config struct {
 
 	// RetryPolicy defines the retry behavior for failed requests
 	RetryPolicy RetryPolicy
+
+	// GrpcConfig defines the gRPC connection configuration
+	GrpcConfig GrpcConfig
 }
 
 // Client is a client for the KeyDB service
@@ -117,6 +150,29 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 	}
 	if config.RetryPolicy.MaxInterval == 0 {
 		config.RetryPolicy.MaxInterval = DefaultRetryPolicyMaxInterval
+	}
+
+	// Set gRPC config defaults
+	if config.GrpcConfig.KeepAliveTime == 0 {
+		config.GrpcConfig.KeepAliveTime = DefaultGrpcKeepAliveTime
+	}
+	if config.GrpcConfig.KeepAliveTimeout == 0 {
+		config.GrpcConfig.KeepAliveTimeout = DefaultGrpcKeepAliveTimeout
+	}
+	if config.GrpcConfig.BackoffBaseDelay == 0 {
+		config.GrpcConfig.BackoffBaseDelay = DefaultGrpcBackoffBaseDelay
+	}
+	if config.GrpcConfig.BackoffMultiplier == 0 {
+		config.GrpcConfig.BackoffMultiplier = DefaultGrpcBackoffMultiplier
+	}
+	if config.GrpcConfig.BackoffJitter == 0 {
+		config.GrpcConfig.BackoffJitter = DefaultGrpcBackoffJitter
+	}
+	if config.GrpcConfig.BackoffMaxDelay == 0 {
+		config.GrpcConfig.BackoffMaxDelay = DefaultGrpcMaxDelay
+	}
+	if config.GrpcConfig.MinConnectTimeout == 0 {
+		config.GrpcConfig.MinConnectTimeout = DefaultGrpcMinConnectTimeout
 	}
 
 	client := &Client{
@@ -563,17 +619,17 @@ func (c *Client) getNextBackoffFunc() func() time.Duration {
 func (c *Client) createConnection(addr string) (*grpc.ClientConn, error) {
 	// Configure keepalive parameters to detect dead connections
 	kacp := keepalive.ClientParameters{
-		Time:                10 * time.Second, // send pings every 10 seconds if idle
-		Timeout:             3 * time.Second,  // wait 3 seconds for ping ack before considering connection dead
-		PermitWithoutStream: true,             // send pings even without active streams
+		Time:                c.config.GrpcConfig.KeepAliveTime,
+		Timeout:             c.config.GrpcConfig.KeepAliveTimeout,
+		PermitWithoutStream: !c.config.GrpcConfig.DisableKeepAlivePermitWithoutStream,
 	}
 
-	// Service config with retry policy for connection-level retries
-	backoffConfig := grpcbackoff.Config{ // TODO add variables
-		BaseDelay:  1.0 * time.Second,
-		Multiplier: 1.6,
-		Jitter:     0.2,
-		MaxDelay:   120 * time.Second,
+	// Configure connection backoff parameters
+	backoffConfig := grpcbackoff.Config{
+		BaseDelay:  c.config.GrpcConfig.BackoffBaseDelay,
+		Multiplier: c.config.GrpcConfig.BackoffMultiplier,
+		Jitter:     c.config.GrpcConfig.BackoffJitter,
+		MaxDelay:   c.config.GrpcConfig.BackoffMaxDelay,
 	}
 
 	return grpc.NewClient(addr,
@@ -581,7 +637,7 @@ func (c *Client) createConnection(addr string) (*grpc.ClientConn, error) {
 		grpc.WithKeepaliveParams(kacp),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff:           backoffConfig,
-			MinConnectTimeout: 20 * time.Second,
+			MinConnectTimeout: c.config.GrpcConfig.MinConnectTimeout,
 		}),
 		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
 			var dialer net.Dialer
