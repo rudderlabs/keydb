@@ -154,7 +154,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 }
 
 func (c *Client) initMetrics() {
-	c.metrics.getReqCount = c.stats.NewTaggedStat("keydb_client_req_total", stats.CountType, stats.Tags{
+	c.metrics.getReqCount = c.stats.NewTaggedStat("keydb_client_req_count_total", stats.CountType, stats.Tags{
 		"method": "get",
 	})
 	c.metrics.getReqLatency = c.stats.NewTaggedStat("keydb_client_req_latency_seconds", stats.TimerType, stats.Tags{
