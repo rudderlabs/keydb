@@ -50,10 +50,12 @@ jobs:
           ls -la
           echo "Looking for coverage files:"
           find . -name "*.txt" -type f
-      - name: Merge Coverage reports
+      - name: Verify coverage file
         run: |
-          go install github.com/wadey/gocovmerge@latest
-          gocovmerge unit/coverage.txt > coverage.txt
+          echo "Coverage file exists:"
+          ls -la coverage.txt
+          echo "First few lines of coverage file:"
+          head -5 coverage.txt
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
