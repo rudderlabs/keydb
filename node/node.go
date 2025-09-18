@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -457,7 +457,7 @@ func (s *Service) initCaches(
 				)
 
 				startDownload := time.Now()
-				buf := aws.NewWriteAtBuffer([]byte{})
+				buf := manager.NewWriteAtBuffer([]byte{})
 				err := s.storage.Download(gCtx, buf, snapshotFile)
 				if err != nil {
 					if errors.Is(err, filemanager.ErrKeyNotFound) {
