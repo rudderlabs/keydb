@@ -632,6 +632,8 @@ func (c *Client) createConnection(addr string) (*grpc.ClientConn, error) {
 		MaxDelay:   c.config.GrpcConfig.BackoffMaxDelay,
 	}
 
+	// WARNING: for DNS related issues please refer to https://github.com/grpc/grpc/blob/master/doc/naming.md
+	// Additionally make sure that you can resolve the address (e.g. via ping) from one pod to another.
 	return grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(kacp),
