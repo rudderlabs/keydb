@@ -11,7 +11,9 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"google.golang.org/grpc"
+	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
@@ -24,6 +26,15 @@ const (
 	DefaultRetryPolicyMultiplier      = 1.5
 	DefaultRetryPolicyMaxInterval     = 30 * time.Second
 	DefaultMaxElapsedTime             = 10 * time.Minute
+
+	DefaultGrpcKeepAliveTime    = 10 * time.Second
+	DefaultGrpcKeepAliveTimeout = 2 * time.Second
+
+	DefaultGrpcBackoffBaseDelay  = 1 * time.Second
+	DefaultGrpcBackoffMultiplier = 1.6
+	DefaultGrpcBackoffJitter     = 0.2
+	DefaultGrpcMaxDelay          = 2 * time.Minute
+	DefaultGrpcMinConnectTimeout = 20 * time.Second
 )
 
 // RetryPolicy defines the retry policy configuration
@@ -33,6 +44,27 @@ type RetryPolicy struct {
 	Multiplier      float64       `json:"multiplier"`
 	MaxInterval     time.Duration `json:"max_interval"`
 	MaxElapsedTime  time.Duration `json:"max_elapsed_time"`
+}
+
+// GrpcConfig holds gRPC connection configuration
+type GrpcConfig struct {
+	// KeepAliveTime is the time after which a ping will be sent on the transport
+	KeepAliveTime time.Duration `json:"keep_alive_time"`
+	// KeepAliveTimeout is the time the client waits for a response to the keepalive ping
+	KeepAliveTimeout time.Duration `json:"keep_alive_timeout"`
+	// DisableKeepAlivePermitWithoutStream disables keepalive pings even when there are no active streams
+	DisableKeepAlivePermitWithoutStream bool `json:"disable_keep_alive_permit_without_stream"`
+
+	// BackoffBaseDelay is the initial backoff delay for connection attempts
+	BackoffBaseDelay time.Duration `json:"backoff_base_delay"`
+	// BackoffMultiplier is the multiplier for exponential backoff
+	BackoffMultiplier float64 `json:"backoff_multiplier"`
+	// BackoffJitter adds randomness to backoff delays
+	BackoffJitter float64 `json:"backoff_jitter"`
+	// BackoffMaxDelay is the maximum backoff delay
+	BackoffMaxDelay time.Duration `json:"backoff_max_delay"`
+	// MinConnectTimeout is the minimum timeout for connection attempts
+	MinConnectTimeout time.Duration `json:"min_connect_timeout"`
 }
 
 // Config holds the configuration for a client
@@ -45,6 +77,9 @@ type Config struct {
 
 	// RetryPolicy defines the retry behavior for failed requests
 	RetryPolicy RetryPolicy
+
+	// GrpcConfig defines the gRPC connection configuration
+	GrpcConfig GrpcConfig
 }
 
 type ScalingOperationType string
@@ -122,6 +157,29 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		config.RetryPolicy.MaxElapsedTime = DefaultMaxElapsedTime
 	}
 
+	// Set gRPC config defaults
+	if config.GrpcConfig.KeepAliveTime == 0 {
+		config.GrpcConfig.KeepAliveTime = DefaultGrpcKeepAliveTime
+	}
+	if config.GrpcConfig.KeepAliveTimeout == 0 {
+		config.GrpcConfig.KeepAliveTimeout = DefaultGrpcKeepAliveTimeout
+	}
+	if config.GrpcConfig.BackoffBaseDelay == 0 {
+		config.GrpcConfig.BackoffBaseDelay = DefaultGrpcBackoffBaseDelay
+	}
+	if config.GrpcConfig.BackoffMultiplier == 0 {
+		config.GrpcConfig.BackoffMultiplier = DefaultGrpcBackoffMultiplier
+	}
+	if config.GrpcConfig.BackoffJitter == 0 {
+		config.GrpcConfig.BackoffJitter = DefaultGrpcBackoffJitter
+	}
+	if config.GrpcConfig.BackoffMaxDelay == 0 {
+		config.GrpcConfig.BackoffMaxDelay = DefaultGrpcMaxDelay
+	}
+	if config.GrpcConfig.MinConnectTimeout == 0 {
+		config.GrpcConfig.MinConnectTimeout = DefaultGrpcMinConnectTimeout
+	}
+
 	client := &Client{
 		config:      config,
 		connections: make(map[int]*grpc.ClientConn),
@@ -136,13 +194,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 
 	// Connect to all nodes
 	for i, addr := range config.Addresses {
-		conn, err := grpc.NewClient(addr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-				var dialer net.Dialer
-				return dialer.DialContext(ctx, "tcp", addr)
-			}),
-		)
+		conn, err := client.createConnection(addr)
 		if err != nil {
 			// Close all connections on error
 			_ = client.Close()
@@ -541,13 +593,7 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 	}
 
 	for i, addr := range nodesAddresses {
-		conn, err := grpc.NewClient(addr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-				var dialer net.Dialer
-				return dialer.DialContext(ctx, "tcp", addr)
-			}),
-		)
+		conn, err := c.createConnection(addr)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %d at %s: %w", i, addr, err)
 		}
@@ -704,4 +750,37 @@ func (c *Client) getNextBackoffFunc() func() time.Duration {
 		}
 		return bo.NextBackOff()
 	}
+}
+
+// createConnection creates a gRPC connection with proper keepalive and retry configuration
+func (c *Client) createConnection(addr string) (*grpc.ClientConn, error) {
+	// Configure keepalive parameters to detect dead connections
+	kacp := keepalive.ClientParameters{
+		Time:                c.config.GrpcConfig.KeepAliveTime,
+		Timeout:             c.config.GrpcConfig.KeepAliveTimeout,
+		PermitWithoutStream: !c.config.GrpcConfig.DisableKeepAlivePermitWithoutStream,
+	}
+
+	// Configure connection backoff parameters
+	backoffConfig := grpcbackoff.Config{
+		BaseDelay:  c.config.GrpcConfig.BackoffBaseDelay,
+		Multiplier: c.config.GrpcConfig.BackoffMultiplier,
+		Jitter:     c.config.GrpcConfig.BackoffJitter,
+		MaxDelay:   c.config.GrpcConfig.BackoffMaxDelay,
+	}
+
+	// WARNING: for DNS related issues please refer to https://github.com/grpc/grpc/blob/master/doc/naming.md
+	// Additionally make sure that you can resolve the address (e.g. via ping) from one pod to another.
+	return grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(kacp),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoffConfig,
+			MinConnectTimeout: c.config.GrpcConfig.MinConnectTimeout,
+		}),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "tcp", addr)
+		}),
+	)
 }
