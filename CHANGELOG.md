@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.3-alpha](https://github.com/rudderlabs/keydb/compare/v0.4.2-alpha...v0.4.3-alpha) (2025-09-18)
+
+
+### Miscellaneous
+
+* grpc backoffs and keep alives ([#50](https://github.com/rudderlabs/keydb/issues/50)) ([46fc72a](https://github.com/rudderlabs/keydb/commit/46fc72aedd69fdd6fd4d374bd53d80e05abfb3fc))
+* improve server start and stop handling ([#51](https://github.com/rudderlabs/keydb/issues/51)) ([e468df6](https://github.com/rudderlabs/keydb/commit/e468df6681eb66484d72df3172151223774fb741))
+
 ## [0.4.2-alpha](https://github.com/rudderlabs/keydb/compare/v0.4.1-alpha...v0.4.2-alpha) (2025-09-03)
 
 
