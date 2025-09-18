@@ -35,7 +35,7 @@ func RequireExpectedFiles(
 	}
 }
 
-func GetCloudStorage(t testing.TB, conf *config.Config, minio *miniokit.Resource) filemanager.S3Manager {
+func GetCloudStorage(t testing.TB, conf *config.Config, minio *miniokit.Resource) *filemanager.S3Manager {
 	t.Helper()
 
 	conf.Set("Storage.Bucket", minio.BucketName)
