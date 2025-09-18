@@ -41,7 +41,7 @@ jobs:
       - name: Merge Coverage reports
         run: |
           go install github.com/wadey/gocovmerge@latest
-          gocovmerge */coverage.txt > coverage.txt
+          gocovmerge unit/coverage.txt > coverage.txt
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
