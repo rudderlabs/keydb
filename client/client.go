@@ -315,6 +315,11 @@ func (c *Client) get(
 				cancel()
 				return fmt.Errorf("no client for node %d", nodeID)
 			}
+			conn, ok := c.connections[int(nodeID)]
+			if !ok {
+				cancel()
+				return fmt.Errorf("no connection for node %d", nodeID)
+			}
 
 			// Create the request
 			req := &pb.GetRequest{Keys: nodeKeys}
@@ -363,12 +368,16 @@ func (c *Client) get(
 						logger.NewIntField("nodeId", int64(nodeID)),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
+						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
 						obskit.Error(err))
 				} else if resp != nil {
 					c.logger.Warnn("get keys from node",
 						logger.NewIntField("nodeId", int64(nodeID)),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
+						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
 						obskit.Error(errors.New(resp.ErrorCode.String())))
 				} else {
 					cancel()
@@ -460,6 +469,11 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 				cancel()
 				return fmt.Errorf("no client for node %d", nodeID)
 			}
+			conn, ok := c.connections[int(nodeID)]
+			if !ok {
+				cancel()
+				return fmt.Errorf("no connection for node %d", nodeID)
+			}
 
 			// Create the request
 			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: uint64(ttl.Seconds())}
@@ -508,12 +522,16 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 						logger.NewIntField("nodeID", int64(nodeID)),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
+						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
 						obskit.Error(err))
 				} else if resp != nil {
 					c.logger.Warnn("put keys in node",
 						logger.NewIntField("nodeID", int64(nodeID)),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
+						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
 						obskit.Error(errors.New(resp.ErrorCode.String())))
 				} else {
 					cancel()

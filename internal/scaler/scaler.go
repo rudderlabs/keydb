@@ -251,6 +251,10 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 		// or if there is a bug in the hashing function
 		return nil, fmt.Errorf("no client for node %d", nodeID)
 	}
+	conn, ok := c.connections[int(nodeID)]
+	if !ok {
+		return nil, fmt.Errorf("no connection for node %d", nodeID)
+	}
 
 	// Create the request
 	req := &pb.GetNodeInfoRequest{NodeId: nodeID}
@@ -276,6 +280,8 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 			logger.NewIntField("nodeID", int64(nodeID)),
 			logger.NewIntField("attempt", attempt),
 			logger.NewDurationField("retryDelay", retryDelay),
+			logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+			logger.NewStringField("connState", conn.GetState().String()),
 			obskit.Error(err))
 
 		// Wait before retrying
@@ -301,6 +307,10 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 		// this should never happen unless clusterSize is updated and the c.clients map isn't
 		// or if there is a bug in the hashing function
 		return fmt.Errorf("no client for node %d", nodeID)
+	}
+	conn, ok := c.connections[int(nodeID)]
+	if !ok {
+		return fmt.Errorf("no connection for node %d", nodeID)
 	}
 
 	req := &pb.CreateSnapshotsRequest{
@@ -335,6 +345,8 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 				logger.NewIntField("nodeID", int64(nodeID)),
 				logger.NewIntField("attempt", attempt),
 				logger.NewDurationField("retryDelay", retryDelay),
+				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+				logger.NewStringField("connState", conn.GetState().String()),
 				obskit.Error(err))
 		} else if resp != nil {
 			c.logger.Warnn("Create snapshots unsuccessful",
@@ -342,6 +354,8 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 				logger.NewIntField("attempt", attempt),
 				logger.NewBoolField("success", resp.Success),
 				logger.NewDurationField("retryDelay", retryDelay),
+				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+				logger.NewStringField("connState", conn.GetState().String()),
 				obskit.Error(errors.New(resp.ErrorMessage)))
 		} else {
 			return fmt.Errorf("cannot create snapshots on node %d: both error and response are nil", nodeID)
@@ -370,6 +384,10 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint3
 		// this should never happen unless clusterSize is updated and the c.clients map isn't
 		// or if there is a bug in the hashing function
 		return fmt.Errorf("no client for node %d", nodeID)
+	}
+	conn, ok := c.connections[int(nodeID)]
+	if !ok {
+		return fmt.Errorf("no connection for node %d", nodeID)
 	}
 
 	req := &pb.LoadSnapshotsRequest{
@@ -404,6 +422,8 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint3
 				logger.NewIntField("nodeID", int64(nodeID)),
 				logger.NewIntField("attempt", attempt),
 				logger.NewDurationField("retryDelay", retryDelay),
+				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+				logger.NewStringField("connState", conn.GetState().String()),
 				obskit.Error(err))
 		} else if resp != nil {
 			c.logger.Warnn("Load snapshots unsuccessful",
@@ -411,6 +431,8 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint3
 				logger.NewIntField("attempt", attempt),
 				logger.NewBoolField("success", resp.Success),
 				logger.NewDurationField("retryDelay", retryDelay),
+				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+				logger.NewStringField("connState", conn.GetState().String()),
 				obskit.Error(errors.New(resp.ErrorMessage)))
 		} else {
 			return fmt.Errorf("cannot load snapshots on node %d: both error and response are nil", nodeID)
@@ -436,19 +458,20 @@ func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
 		return fmt.Errorf("at least one node ID must be provided")
 	}
 
-	clients := make([]pb.NodeServiceClient, 0, len(nodeIDs))
-	for _, id := range nodeIDs {
-		client, ok := c.clients[int(id)]
-		if !ok {
-			return fmt.Errorf("no client for node %d, update cluster size first", id)
-		}
-		clients = append(clients, client)
-	}
-
 	// Send ScaleRequest to all nodes
-	group, ctx := kitsync.NewEagerGroup(ctx, len(clients))
-	for nodeID, client := range clients {
+	group, ctx := kitsync.NewEagerGroup(ctx, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
 		group.Go(func() error {
+			// Get the client for this node
+			client, ok := c.clients[int(nodeID)]
+			if !ok {
+				return fmt.Errorf("no client for node %d", nodeID)
+			}
+			conn, ok := c.connections[int(nodeID)]
+			if !ok {
+				return fmt.Errorf("no connection for node %d", nodeID)
+			}
+
 			req := &pb.ScaleRequest{
 				NodesAddresses: c.config.Addresses,
 			}
@@ -481,6 +504,8 @@ func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
 					logger.NewIntField("nodeID", int64(nodeID)),
 					logger.NewIntField("attempt", attempt),
 					logger.NewDurationField("retryDelay", retryDelay),
+					logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+					logger.NewStringField("connState", conn.GetState().String()),
 					obskit.Error(err))
 
 				// Wait before retrying
@@ -512,18 +537,19 @@ func (c *Client) ScaleComplete(ctx context.Context, nodeIDs []uint32) error {
 		return fmt.Errorf("at least one node ID must be provided")
 	}
 
-	clients := make([]pb.NodeServiceClient, 0, len(nodeIDs))
-	for _, id := range nodeIDs {
-		client, ok := c.clients[int(id)]
-		if !ok {
-			return fmt.Errorf("no client for node %d, update cluster size first", id)
-		}
-		clients = append(clients, client)
-	}
-
-	group, ctx := kitsync.NewEagerGroup(ctx, len(clients))
-	for nodeID, client := range clients {
+	group, ctx := kitsync.NewEagerGroup(ctx, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
 		group.Go(func() error {
+			// Get the client for this node
+			client, ok := c.clients[int(nodeID)]
+			if !ok {
+				return fmt.Errorf("no client for node %d", nodeID)
+			}
+			conn, ok := c.connections[int(nodeID)]
+			if !ok {
+				return fmt.Errorf("no connection for node %d", nodeID)
+			}
+
 			req := &pb.ScaleCompleteRequest{}
 
 			// Send the request with retries
@@ -555,6 +581,8 @@ func (c *Client) ScaleComplete(ctx context.Context, nodeIDs []uint32) error {
 					logger.NewIntField("nodeID", int64(nodeID)),
 					logger.NewIntField("attempt", attempt),
 					logger.NewDurationField("retryDelay", retryDelay),
+					logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+					logger.NewStringField("connState", conn.GetState().String()),
 					obskit.Error(err))
 
 				// Wait before retrying
