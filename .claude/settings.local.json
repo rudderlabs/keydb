@@ -5,7 +5,8 @@
       "WebSearch",
       "Bash(go vet:*)",
       "Bash(go run:*)",
-      "Bash(gofmt:*)"
+      "Bash(gofmt:*)",
+      "Bash(git tag:*)"
     ],
     "deny": [],
     "ask": []
