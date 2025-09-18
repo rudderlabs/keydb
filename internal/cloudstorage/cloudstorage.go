@@ -8,7 +8,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
-func GetCloudStorage(conf *config.Config, log logger.Logger) (filemanager.S3Manager, error) {
+func GetCloudStorage(conf *config.Config, log logger.Logger) (*filemanager.S3Manager, error) {
 	var (
 		bucket           = conf.GetStringVar("", "Storage.Bucket", "AWS_BUCKET")
 		regionHint       = conf.GetStringVar("us-east-1", "Storage.RegionHint", "AWS_S3_REGION_HINT")
