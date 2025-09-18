@@ -49,6 +49,16 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 			Multiplier:      conf.GetFloat64("retryPolicy.multiplier", 0),
 			MaxInterval:     conf.GetDuration("retryPolicy.maxInterval", 0, time.Second),
 		},
+		GrpcConfig: client.GrpcConfig{
+			KeepAliveTime:                       conf.GetDuration("grpc.keepAliveTime", 0, time.Second),
+			KeepAliveTimeout:                    conf.GetDuration("grpc.keepAliveTimeout", 0, time.Second),
+			DisableKeepAlivePermitWithoutStream: conf.GetBool("grpc.disableKeepAlivePermitWithoutStream", false),
+			BackoffBaseDelay:                    conf.GetDuration("grpc.backoffBaseDelay", 0, time.Second),
+			BackoffMultiplier:                   conf.GetFloat64("grpc.backoffMultiplier", 0),
+			BackoffJitter:                       conf.GetFloat64("grpc.backoffJitter", 0),
+			BackoffMaxDelay:                     conf.GetDuration("grpc.backoffMaxDelay", 0, time.Second),
+			MinConnectTimeout:                   conf.GetDuration("grpc.minConnectTimeout", 0, time.Second),
+		},
 	}
 	c, err := client.NewClient(clientConfig, log.Child("client"))
 	if err != nil {
@@ -67,6 +77,17 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 			InitialInterval: conf.GetDuration("scalerRetryPolicy.initialInterval", 0, time.Second),
 			Multiplier:      conf.GetFloat64("scalerRetryPolicy.multiplier", 0),
 			MaxInterval:     conf.GetDuration("scalerRetryPolicy.maxInterval", 0, time.Second),
+			MaxElapsedTime:  conf.GetDuration("scalerRetryPolicy.maxElapsedTime", 0, time.Second),
+		},
+		GrpcConfig: scaler.GrpcConfig{
+			KeepAliveTime:                       conf.GetDuration("scalerGrpc.keepAliveTime", 0, time.Second),
+			KeepAliveTimeout:                    conf.GetDuration("scalerGrpc.keepAliveTimeout", 0, time.Second),
+			DisableKeepAlivePermitWithoutStream: conf.GetBool("scalerGrpc.disableKeepAlivePermitWithoutStream", false),
+			BackoffBaseDelay:                    conf.GetDuration("scalerGrpc.backoffBaseDelay", 0, time.Second),
+			BackoffMultiplier:                   conf.GetFloat64("scalerGrpc.backoffMultiplier", 0),
+			BackoffJitter:                       conf.GetFloat64("scalerGrpc.backoffJitter", 0),
+			BackoffMaxDelay:                     conf.GetDuration("scalerGrpc.backoffMaxDelay", 0, time.Second),
+			MinConnectTimeout:                   conf.GetDuration("scalerGrpc.minConnectTimeout", 0, time.Second),
 		},
 	}, log.Child("scaler"))
 	if err != nil {

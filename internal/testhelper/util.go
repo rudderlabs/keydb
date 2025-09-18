@@ -3,6 +3,7 @@ package testhelper
 import (
 	"context"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,11 +36,16 @@ func RequireExpectedFiles(
 	}
 }
 
-func GetCloudStorage(t testing.TB, conf *config.Config, minio *miniokit.Resource) filemanager.S3Manager {
+func GetCloudStorage(t testing.TB, conf *config.Config, minio *miniokit.Resource) *filemanager.S3Manager {
 	t.Helper()
 
+	endpoint := minio.Endpoint
+	if strings.Index(endpoint, "http") != 0 {
+		endpoint = "http://" + endpoint
+	}
+
 	conf.Set("Storage.Bucket", minio.BucketName)
-	conf.Set("Storage.Endpoint", minio.Endpoint)
+	conf.Set("Storage.Endpoint", endpoint)
 	conf.Set("Storage.AccessKeyId", minio.AccessKeyID)
 	conf.Set("Storage.AccessKey", minio.AccessKeySecret)
 	conf.Set("Storage.Region", minio.Region)

@@ -1451,7 +1451,7 @@ func withProxy(proxy *tcpproxy.Proxy) option {
 }
 
 func getService(
-	ctx context.Context, t testing.TB, cs filemanager.S3Manager, nodeConfig node.Config, conf *config.Config,
+	ctx context.Context, t testing.TB, cs *filemanager.S3Manager, nodeConfig node.Config, conf *config.Config,
 	opts ...option,
 ) (*node.Service, string) {
 	t.Helper()

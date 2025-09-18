@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(make test:*)"
+      "Bash(make test:*)",
+      "WebSearch",
+      "Bash(go vet:*)",
+      "Bash(go run:*)",
+      "Bash(gofmt:*)"
     ],
     "deny": [],
     "ask": []
