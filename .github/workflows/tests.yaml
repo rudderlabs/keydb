@@ -21,12 +21,6 @@ jobs:
       - run: go version
       - run: go mod download
       - run: make test
-      - name: Check coverage file exists
-        run: |
-          echo "Checking if coverage.txt exists:"
-          ls -la coverage.txt || echo "coverage.txt not found"
-          echo "Current directory contents:"
-          ls -la
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
@@ -44,18 +38,6 @@ jobs:
           go-version-file: 'go.mod'
       - name: Download coverage reports
         uses: actions/download-artifact@v5
-      - name: Debug downloaded files
-        run: |
-          echo "Current directory contents:"
-          ls -la
-          echo "Looking for coverage files:"
-          find . -name "*.txt" -type f
-      - name: Verify coverage file
-        run: |
-          echo "Coverage file exists:"
-          ls -la coverage.txt
-          echo "First few lines of coverage file:"
-          head -5 coverage.txt
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
