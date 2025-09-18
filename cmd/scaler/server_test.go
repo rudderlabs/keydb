@@ -1535,7 +1535,7 @@ func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, rp scaler.Retry
 
 	opServer := newHTTPServer(c, op, addr, log)
 	go func() {
-		err := opServer.Start()
+		err := opServer.Start(context.Background())
 		if !errors.Is(err, http.ErrServerClosed) {
 			t.Errorf("Scaler server error: %v", err)
 		}

@@ -69,7 +69,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 			log.Warnn("Failed to close client", obskit.Error(err))
 		}
 	}()
-	op, err := scaler.NewClient(scaler.Config{
+	scClient, err := scaler.NewClient(scaler.Config{
 		Addresses:       strings.Split(nodeAddresses, ","),
 		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
 		RetryPolicy: scaler.RetryPolicy{
@@ -94,7 +94,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 		return fmt.Errorf("failed to create scaler: %w", err)
 	}
 	defer func() {
-		if err := op.Close(); err != nil {
+		if err := scClient.Close(); err != nil {
 			log.Warnn("Failed to close scaler", obskit.Error(err))
 		}
 	}()
@@ -114,13 +114,13 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 
 	// Create and start HTTP server
 	serverAddr := conf.GetString("serverAddr", ":8080")
-	server := newHTTPServer(c, op, serverAddr, log)
+	server := newHTTPServer(c, scClient, serverAddr, log)
 
 	// Start server in a goroutine
 	serverErrCh := make(chan error, 1)
 	go func() {
 		log.Infon("Starting HTTP server", logger.NewStringField("addr", serverAddr))
-		if err := server.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErrCh <- fmt.Errorf("server error: %w", err)
 		}
 		close(serverErrCh)

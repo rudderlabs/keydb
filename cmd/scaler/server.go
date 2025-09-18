@@ -15,6 +15,7 @@ import (
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/scaler"
 	pb "github.com/rudderlabs/keydb/proto"
+	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
@@ -81,7 +82,7 @@ func newHTTPServer(client *client.Client, scaler *scaler.Client, addr string, lo
 }
 
 // Start starts the HTTP server
-func (s *httpServer) Start() error { return s.server.ListenAndServe() }
+func (s *httpServer) Start(ctx context.Context) error { return httputil.ListenAndServe(ctx, s.server) }
 
 // Stop stops the HTTP server
 func (s *httpServer) Stop(ctx context.Context) error { return s.server.Shutdown(ctx) }
