@@ -3,15 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/rudderlabs/rudder-go-kit/httputil"
-
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/rudderlabs/keydb/client"
