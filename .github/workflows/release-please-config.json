@@ -12,7 +12,8 @@
         {"type": "test", "section": "Miscellaneous", "hidden": false},
         {"type": "doc", "section": "Documentation", "hidden": false}
       ],
-      "bump-minor-pre-major": true
+      "bump-minor-pre-major": true,
+      "prerelease": false
     }
   }
 }
