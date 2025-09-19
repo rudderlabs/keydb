@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.1.0](https://github.com/rudderlabs/keydb/compare/rudder-keydb-v1.0.0...rudder-keydb-v1.1.0) (2025-09-19)
+
+
+### Features
+
+* add Helm chart and deployment setup for KeyDB Operator ([9da2183](https://github.com/rudderlabs/keydb/commit/9da2183c32eca2a1977cf1c1eafe4abc8ea39f92))
+* add more observability and metrics ([#6](https://github.com/rudderlabs/keydb/issues/6)) ([a9c50b1](https://github.com/rudderlabs/keydb/commit/a9c50b1244202567954d57e001f90bc4481cf57c))
+* adding stats ([0820dea](https://github.com/rudderlabs/keydb/commit/0820dea032fb8c7cbae12ad7fcb129deb8768171))
+* cuckoo filters ([2c9f6c4](https://github.com/rudderlabs/keydb/commit/2c9f6c467cb8d806d1a512c80bd34f17c8bebf5c))
+* implement Badger metrics collector ([#5](https://github.com/rudderlabs/keydb/issues/5)) ([a4997b9](https://github.com/rudderlabs/keydb/commit/a4997b9f543477ab27415dd99ac3e7104ea2360b))
+* implement GitHub Actions workflows and improve snapshot functionality ([69f2374](https://github.com/rudderlabs/keydb/commit/69f23748d1b552da6d4f59beac13d9e2d160ac9a))
+* implement rollback functionality for scaling operations ([#23](https://github.com/rudderlabs/keydb/issues/23)) ([dd119e7](https://github.com/rudderlabs/keydb/commit/dd119e7205cc355ec17a41349969ae284a93d1ff))
+* improve keydb write latencies ([#9](https://github.com/rudderlabs/keydb/issues/9)) ([97e8501](https://github.com/rudderlabs/keydb/commit/97e850102b2db088827a215e9362b287b3fc1894))
+* load snapshots ([479336c](https://github.com/rudderlabs/keydb/commit/479336c6052290ac0bdee77cbd7b7ca2ecbde96d))
+* **node:** add configurable backup folder name and refactor snapshot file path ([#33](https://github.com/rudderlabs/keydb/issues/33)) ([d79c882](https://github.com/rudderlabs/keydb/commit/d79c8829babcf62b714d3181b031810b59976f23))
+* operator ([27cbeae](https://github.com/rudderlabs/keydb/commit/27cbeaeffb70f50f8dbcd3bc322e6cf60e7c80b2))
+
+
+### Bug Fixes
+
+* cache initialization ([a584b7b](https://github.com/rudderlabs/keydb/commit/a584b7b3ab213ca925312a6f92f0e030610fe7ea))
+* data races ([d851213](https://github.com/rudderlabs/keydb/commit/d8512138964d3579858c6f7cb7a25cacc7a85f02))
+* get/put cluster size changes ([5fcc9d4](https://github.com/rudderlabs/keydb/commit/5fcc9d4374e425b39f84fdceaa09193bb9335dc4))
+* growth keys ([3d041fe](https://github.com/rudderlabs/keydb/commit/3d041fef76e80804352901244e6c101b476ae6b8))
+* handle context cancellation in snapshot creation ([#39](https://github.com/rudderlabs/keydb/issues/39)) ([9cd22ab](https://github.com/rudderlabs/keydb/commit/9cd22abe3d946e9f049505dc9da701292b31f3da))
+* load snapshots ([51740bb](https://github.com/rudderlabs/keydb/commit/51740bb3a5ef346909471479ff7caf20d8b1e452))
+* node ([00886a3](https://github.com/rudderlabs/keydb/commit/00886a31baf18649b0378bdd7093b3f925137229))
+* node test ([64f0b4c](https://github.com/rudderlabs/keydb/commit/64f0b4c7d224da2a6ec8cd86700d82a5e86b04bc))
+* resp is nil while retrying ([6856420](https://github.com/rudderlabs/keydb/commit/685642061a9b233368c220ab282924710039bc41))
+* scaling operations with load snapshots op ([c927763](https://github.com/rudderlabs/keydb/commit/c9277632751b17640f07fc6569aebd63cd4ce743))
+* snapshot handling shouldn't list more than once ([f863cf9](https://github.com/rudderlabs/keydb/commit/f863cf90c10a5a0cf362383cbafc69c0fce34be9))
+* tests ([bf6c420](https://github.com/rudderlabs/keydb/commit/bf6c420ac35d5f1b523194fc5422eb216fff72ad))
+
 ## [0.4.3-alpha](https://github.com/rudderlabs/keydb/compare/v0.4.2-alpha...v0.4.3-alpha) (2025-09-18)
 
 
