@@ -12,12 +12,9 @@ jobs:
         shell: bash
         run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
         id: extract_branch
-      - uses: google-github-actions/release-please-action@v3
+      - uses: google-github-actions/release-please-action@v4
         with:
           token: ${{ secrets.PAT }}
-          pull-request-title-pattern: "chore: release ${version}"
-          release-type: go
-          package-name: rudder-keydb
-          default-branch: ${{ steps.extract_branch.outputs.branch }}
-          changelog-types: '[{"type":"feat","section":"Features","hidden":false},{"type":"fix","section":"Bug Fixes","hidden":false},{"type":"chore","section":"Miscellaneous","hidden":false},{"type":"refactor","section":"Miscellaneous","hidden":false},{"type":"test","section":"Miscellaneous","hidden":false},{"type":"doc","section":"Documentation","hidden":false}]'
-          bump-minor-pre-major: true
+          target-branch: ${{ steps.extract_branch.outputs.branch }}
+          config-file: .github/workflows/release-please-config.json
+          manifest-file: .github/workflows/.release-please-manifest.json

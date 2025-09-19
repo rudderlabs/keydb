@@ -14,7 +14,7 @@ jobs:
     name: Unit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
@@ -32,16 +32,12 @@ jobs:
     needs:
       - unit
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: 'go.mod'
       - name: Download coverage reports
-        uses: actions/download-artifact@v4
-      - name: Merge Coverage reports
-        run: |
-          go install github.com/wadey/gocovmerge@latest
-          gocovmerge */coverage.txt > coverage.txt
+        uses: actions/download-artifact@v5
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
