@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -57,13 +58,13 @@ func TestScaleUpAndDown(t *testing.T) {
 
 	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx0, cancel0 := context.WithCancel(context.Background())
+	defer cancel0()
 
 	// Create the node service
 	totalHashRanges := uint32(3)
 	node0Conf := newConf()
-	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+	node0, node0Address := getService(ctx0, t, cloudStorage, node.Config{
 		NodeID:           0,
 		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
@@ -87,14 +88,16 @@ func TestScaleUpAndDown(t *testing.T) {
 	// Test CreateSnapshots
 	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 0, FullSync: false}, true)
 
-	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+	keydbth.RequireExpectedFiles(context.Background(), t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
 		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 	)
 
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+
 	node1Conf := newConf()
-	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
+	node1, node1Address := getService(ctx1, t, cloudStorage, node.Config{
 		NodeID:           1,
 		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
@@ -108,7 +111,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	}, true)
 	_ = s.Do("/loadSnapshots", LoadSnapshotsRequest{
 		NodeID:     1,
-		HashRanges: hash.GetNodeHashRangesList(1, 2, totalHashRanges),
+		HashRanges: hash.New(2, totalHashRanges).GetNodeHashRangesList(1),
 	}, true)
 	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0, 1}}, true)
 	_ = s.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0, 1}}, true)
@@ -119,7 +122,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
-	require.ElementsMatch(t, []uint32{0, 2}, infoResponse.HashRanges)
+	require.ElementsMatch(t, []uint32{0, 1}, infoResponse.HashRanges)
 	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
 
 	// Test node info 1
@@ -128,7 +131,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
-	require.ElementsMatch(t, []uint32{1}, infoResponse.HashRanges)
+	require.ElementsMatch(t, []uint32{2}, infoResponse.HashRanges)
 	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
 
 	// Get again now that the cluster is made of two nodes
@@ -149,17 +152,15 @@ func TestScaleUpAndDown(t *testing.T) {
 	// remove node0, you have to remove node1
 	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 0, FullSync: false}, true)
 	_ = s.Do("/createSnapshots", CreateSnapshotsRequest{NodeID: 1, FullSync: false}, true)
-	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+	keydbth.RequireExpectedFiles(context.Background(), t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
 		regexp.MustCompile("^.+/hr_0_s_1_2.snapshot$"),
 		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
 	)
 	_ = s.Do("/loadSnapshots", LoadSnapshotsRequest{
 		NodeID:     0,
-		HashRanges: hash.GetNodeHashRangesList(0, 1, totalHashRanges),
+		HashRanges: hash.New(1, totalHashRanges).GetNodeHashRangesList(0),
 	}, true)
 	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{Addresses: []string{node0Address}}, true)
 	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0}}, true)
@@ -176,9 +177,18 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.ElementsMatch(t, []uint32{0, 1, 2}, infoResponse.HashRanges)
 	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
 
-	cancel()
-	node0.Close()
+	// Close node1 before doing a GET to make sure node1 won't pick that request
+	cancel1()
 	node1.Close()
+
+	// Test Get
+	body = s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+
+	cancel0()
+	node0.Close()
 }
 
 func TestAutoScale(t *testing.T) {
@@ -218,14 +228,16 @@ func TestAutoScale(t *testing.T) {
 
 	// Test Put some initial data
 	_ = s.Do("/put", PutRequest{
-		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+		// Hash ranges: keyA → 1, keyB → 0, keyC → 2
+		Keys: []string{"keyA", "keyB", "keyC"},
+		TTL:  testTTL,
 	}, true)
 
 	// Test Get to verify data exists
 	body := s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4"},
+		Keys: []string{"keyA", "keyB", "keyC", "keyD"},
 	})
-	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+	require.JSONEq(t, `{"keyA":true,"keyB":true,"keyC":true,"keyD":false}`, body)
 
 	// Create second node for scale up test
 	node1Conf := newConf()
@@ -249,36 +261,44 @@ func TestAutoScale(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
+	require.ElementsMatch(t, []uint32{0, 1}, infoResponse.HashRanges)
 
 	body = s.Do("/info", InfoRequest{NodeID: 1})
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
+	require.ElementsMatch(t, []uint32{2}, infoResponse.HashRanges)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
-		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 	)
 
 	// Verify data is still accessible after scale up
 	body = s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4"},
+		Keys: []string{"keyA", "keyB", "keyC", "keyD"},
 	})
-	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+	require.JSONEq(t, `{"keyA":true,"keyB":true,"keyC":true,"keyD":false}`, body)
 
 	// Write more keys after scale up to test data preservation during scale down
 	_ = s.Do("/put", PutRequest{
-		Keys: []string{"key5", "key6", "key7", "key8"}, TTL: testTTL,
+		// Hash ranges: AAA → 0, BBB → 2, CCC → 0, DDD → 0
+		Keys: []string{"AAA", "BBB", "CCC", "DDD"},
+		TTL:  testTTL,
 	}, true)
 
 	// Verify all keys are accessible before scale down
 	body = s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "AAA", "BBB", "CCC", "DDD"},
 	})
 	require.JSONEq(t,
-		`{"key1":true,"key2":true,"key3":true,"key4":false,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":false,"AAA":true,"BBB":true,"CCC":true,"DDD":true}`,
 		body,
 	)
+
+	// Keys status at this point
+	// Node0 should have AAA(0), CCC(0), DDD(0), keyB(0), keyA(1)
+	// Node1 should have BBB(2), keyC(2)
 
 	t.Log("Scaling down from 2 nodes to 1 node...")
 
@@ -289,8 +309,8 @@ func TestAutoScale(t *testing.T) {
 	}, true)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
-		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
 	)
 
 	// Verify scale down worked - check node info
@@ -299,13 +319,14 @@ func TestAutoScale(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 1, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 1)
+	require.ElementsMatch(t, []uint32{0, 1, 2}, infoResponse.HashRanges)
 
 	// Verify all data is still accessible after scale down
 	body = s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "AAA", "BBB", "CCC", "DDD"},
 	})
 	require.JSONEq(t,
-		`{"key1":true,"key2":true,"key3":true,"key4":false,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":false,"AAA":true,"BBB":true,"CCC":true,"DDD":true}`,
 		body,
 	)
 
@@ -362,14 +383,16 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 
 	// Test Put some initial data
 	_ = s.Do("/put", PutRequest{
-		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+		// keyA → 1, keyB → 0, keyC → 2
+		Keys: []string{"keyA", "keyB", "keyC"},
+		TTL:  testTTL,
 	}, true)
 
 	// Test Get to verify data exists
 	body := s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4"},
+		Keys: []string{"keyA", "keyB", "keyC", "keyD"},
 	})
-	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+	require.JSONEq(t, `{"keyA":true,"keyB":true,"keyC":true,"keyD":false}`, body)
 
 	// Create second node for scale up test
 	node1Conf := newConf()
@@ -414,26 +437,28 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	require.Len(t, infoResponse.NodesAddresses, 2)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
-		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 	)
 
 	// Verify data is still accessible after scale up
 	body = s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4"},
+		Keys: []string{"keyA", "keyB", "keyC", "keyD"},
 	})
-	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+	require.JSONEq(t, `{"keyA":true,"keyB":true,"keyC":true,"keyD":false}`, body)
 
 	// Write more keys after scale up to test data preservation during scale down
 	_ = s.Do("/put", PutRequest{
-		Keys: []string{"key5", "key6", "key7", "key8"}, TTL: testTTL,
+		// Hash ranges: AAA → 0, BBB → 2, CCC → 0, DDD → 0
+		Keys: []string{"AAA", "BBB", "CCC", "DDD"},
+		TTL:  testTTL,
 	}, true)
 
 	// Verify all keys are accessible before scale down
 	body = s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "AAA", "BBB", "CCC", "DDD"},
 	})
 	require.JSONEq(t,
-		`{"key1":true,"key2":true,"key3":true,"key4":false,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":false,"AAA":true,"BBB":true,"CCC":true,"DDD":true}`,
 		body,
 	)
 
@@ -446,8 +471,8 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	}, true)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
-		regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
 	)
 
 	// Verify scale down worked - check node info
@@ -459,10 +484,10 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 
 	// Verify all data is still accessible after scale down
 	body = s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "AAA", "BBB", "CCC", "DDD"},
 	})
 	require.JSONEq(t,
-		`{"key1":true,"key2":true,"key3":true,"key4":false,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":false,"AAA":true,"BBB":true,"CCC":true,"DDD":true}`,
 		body,
 	)
 
@@ -739,8 +764,8 @@ func TestHashRangeMovements(t *testing.T) {
 		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we have some movements
-		require.EqualValues(t, 4, response.Total)
-		require.Len(t, response.Movements, 4)
+		require.EqualValues(t, 3, response.Total)
+		require.Len(t, response.Movements, 3)
 
 		// Verify each movement has valid data
 		for _, movement := range response.Movements {
@@ -762,8 +787,8 @@ func TestHashRangeMovements(t *testing.T) {
 		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we have some movements
-		require.EqualValues(t, 4, response.Total)
-		require.Len(t, response.Movements, 4)
+		require.EqualValues(t, 3, response.Total)
+		require.Len(t, response.Movements, 3)
 
 		// Verify each movement has valid data
 		for _, movement := range response.Movements {
@@ -878,8 +903,8 @@ func TestHashRangeMovements(t *testing.T) {
 		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with upload=true
-		require.EqualValues(t, 4, response.Total)
-		require.Len(t, response.Movements, 4)
+		require.EqualValues(t, 5, response.Total)
+		require.Len(t, response.Movements, 5)
 
 		// Verify each movement has valid data
 		for _, movement := range response.Movements {
@@ -890,9 +915,10 @@ func TestHashRangeMovements(t *testing.T) {
 		}
 
 		keydbth.RequireExpectedFiles(context.Background(), t, minioContainer, defaultBackupFolderName,
-			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_5_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_6_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_7_s_0_1.snapshot$"),
 		)
 
@@ -915,8 +941,8 @@ func TestHashRangeMovements(t *testing.T) {
 		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with upload=true and splitUploads=true
-		require.EqualValues(t, 4, response.Total)
-		require.Len(t, response.Movements, 4)
+		require.EqualValues(t, 5, response.Total)
+		require.Len(t, response.Movements, 5)
 
 		// Verify each movement has valid data
 		for _, movement := range response.Movements {
@@ -931,14 +957,16 @@ func TestHashRangeMovements(t *testing.T) {
 		// We expect both the files from the previous test and the new split upload files.
 		keydbth.RequireExpectedFiles(context.Background(), t, minioContainer, defaultBackupFolderName,
 			// Files from the previous "upload" test
-			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_5_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_6_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_7_s_0_1.snapshot$"),
 			// Files from the current "upload with split uploads" test
-			regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
 			regexp.MustCompile("^.+/hr_3_s_1_2.snapshot$"),
 			regexp.MustCompile("^.+/hr_5_s_1_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_6_s_1_2.snapshot$"),
 			regexp.MustCompile("^.+/hr_7_s_1_2.snapshot$"),
 		)
 
@@ -965,8 +993,8 @@ func TestHashRangeMovements(t *testing.T) {
 		require.NoError(t, jsonrs.Unmarshal([]byte(body), &response))
 
 		// Verify we still get movements even with download=true
-		require.EqualValues(t, 4, response.Total)
-		require.Len(t, response.Movements, 4)
+		require.EqualValues(t, 5, response.Total)
+		require.Len(t, response.Movements, 5)
 
 		// Try to fetch only keys that are served by the new node to see if they exist
 		keys := []string{
@@ -980,8 +1008,9 @@ func TestHashRangeMovements(t *testing.T) {
 			"key29", "key30", "key31", "key32",
 		}
 		var node1Keys []string
+		h := hash.New(2, totalHashRanges)
 		for _, key := range keys {
-			_, nodeID := hash.GetNodeNumber(key, 2, totalHashRanges)
+			nodeID := h.GetNodeNumber(key)
 			if nodeID == 1 {
 				node1Keys = append(node1Keys, key)
 			}
@@ -991,12 +1020,16 @@ func TestHashRangeMovements(t *testing.T) {
 		body = s.Do("/get", GetRequest{
 			Keys: node1Keys,
 		})
-		require.JSONEq(t, `{
-			"key1":true,"key3":true,"key5":true,"key7":true,"key9":true,
-			"key10":true,"key12":true,"key14":true,"key16":true,"key18":true,
-			"key21":true,"key23":true,"key25":true,"key27":true,"key29":true,
-			"key30":true,"key32":true
-		}`, body)
+		expectedKeys := strings.Builder{}
+		expectedKeys.WriteString("{")
+		for i, key := range node1Keys {
+			if i > 0 {
+				expectedKeys.WriteString(",")
+			}
+			expectedKeys.WriteString(`"` + key + `":true`)
+		}
+		expectedKeys.WriteString("}")
+		require.JSONEq(t, expectedKeys.String(), body)
 	})
 
 	cancel()

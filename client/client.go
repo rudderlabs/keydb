@@ -27,7 +27,7 @@ const (
 	DefaultRetryPolicyInitialInterval        = 100 * time.Millisecond
 	DefaultRetryPolicyMultiplier             = 1.5
 	DefaultRetryPolicyMaxInterval            = 30 * time.Second
-	DefaultTotalHashRanges            uint32 = 128
+	DefaultTotalHashRanges            uint32 = 271
 
 	DefaultGrpcKeepAliveTime    = 10 * time.Second
 	DefaultGrpcKeepAliveTimeout = 2 * time.Second
@@ -96,13 +96,16 @@ type Client struct {
 	// clusterSize is the number of nodes in the cluster
 	clusterSize uint32
 
+	// hash is the hash instance used for consistent hashing
+	hash *hash.Hash
+
 	// connections is a map of node index to connection
 	connections map[int]*grpc.ClientConn
 
 	// clients is a map of node index to client
 	clients map[int]pb.NodeServiceClient
 
-	// mu protects connections, clients and clusterSize
+	// mu protects connections, clients, clusterSize and hash
 	mu sync.RWMutex
 
 	logger logger.Logger
@@ -175,11 +178,13 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		config.GrpcConfig.MinConnectTimeout = DefaultGrpcMinConnectTimeout
 	}
 
+	clusterSize := uint32(len(config.Addresses))
 	client := &Client{
 		config:      config,
 		connections: make(map[int]*grpc.ClientConn),
 		clients:     make(map[int]pb.NodeServiceClient),
-		clusterSize: uint32(len(config.Addresses)),
+		clusterSize: clusterSize,
+		hash:        hash.New(clusterSize, config.TotalHashRanges),
 		logger:      log,
 	}
 
@@ -294,7 +299,7 @@ func (c *Client) get(
 		if _, alreadyFetched := results[key]; alreadyFetched {
 			continue
 		}
-		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
+		nodeID := c.hash.GetNodeNumber(key)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
@@ -449,7 +454,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 	// Group keys by node
 	keysByNode := make(map[uint32][]string)
 	for _, key := range keys {
-		_, nodeID := hash.GetNodeNumber(key, c.clusterSize, c.config.TotalHashRanges)
+		nodeID := c.hash.GetNodeNumber(key)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
@@ -594,6 +599,9 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 	c.config.Addresses = nodesAddresses
 	oldClusterSize := c.clusterSize
 	c.clusterSize = newClusterSize
+
+	// Update hash instance with new cluster size
+	c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
 
 	// If cluster is smaller, close connections that are not needed
 	if newClusterSize < oldClusterSize {

@@ -14,7 +14,6 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/scaler"
 	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -255,7 +254,6 @@ func TestScaleUpAndDown(t *testing.T) {
 		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 			regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 		)
 
 		node1Conf := newConf()
@@ -266,11 +264,11 @@ func TestScaleUpAndDown(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
 		}, node1Conf)
-		require.Equal(t, map[uint32]uint64{0: 1, 1: 1, 2: 1}, node1.since,
+		require.Equal(t, map[uint32]uint64{0: 1, 1: 1}, node1.since,
 			"Node should populate the since map upon start-up",
 		)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1}))
 
@@ -295,7 +293,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		// remove node0, you have to remove node1
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, hash.GetNodeHashRangesList(0, 1, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, node0.hasher.GetNodeHashRangesList(0)...))
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
@@ -359,7 +357,6 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 			regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 		)
 
 		// Using a different path for the new node1 to avoid a conflict with node0
@@ -372,7 +369,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			Addresses:        []string{node0Address},
 		}, node1Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, hash.GetNodeHashRangesList(1, 2, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1}))
 
@@ -393,7 +390,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			Addresses:        []string{node0Address, node1Address},
 		}, node2Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address, node2Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 2, 0, hash.GetNodeHashRangesList(2, 3, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 2, 0, node2.hasher.GetNodeHashRangesList(2)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1, 2}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1, 2}))
 
@@ -419,7 +416,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// node0, you have to remove node1
 		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
 		require.NoError(t, op.CreateSnapshots(ctx, 2, false))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, hash.GetNodeHashRangesList(0, 1, totalHashRanges)...))
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, node0.hasher.GetNodeHashRangesList(0)...))
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
@@ -497,7 +494,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
 			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
-			regexp.MustCompile("^.+/hr_3_s_([1-9])+_2.snapshot$"),
+			regexp.MustCompile("^.+/hr_1_s_1_2.snapshot$"),
 		)
 
 		cancel()
