@@ -82,12 +82,13 @@ type Service struct {
 
 	config Config
 
-	// mu protects cache, scaling, since and lastSnapshotTime
+	// mu protects cache, scaling, since, lastSnapshotTime and hasher
 	mu               sync.RWMutex
 	cache            Cache
 	scaling          bool
 	since            map[uint32]uint64
 	lastSnapshotTime time.Time
+	hasher           *hash.Hash
 
 	now            func() time.Time
 	maxFilesToList int64
@@ -186,6 +187,7 @@ func NewService(
 		storage:        storage,
 		since:          make(map[uint32]uint64),
 		maxFilesToList: config.MaxFilesToList,
+		hasher:         hash.New(config.ClusterSize, config.TotalHashRanges),
 		stats:          stat,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
@@ -317,7 +319,7 @@ func (s *Service) logCacheLevels(ctx context.Context) {
 }
 
 func (s *Service) getCurrentRanges() map[uint32]struct{} {
-	return hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+	return s.hasher.GetNodeHashRanges(s.config.NodeID)
 }
 
 // initCaches initializes the caches for all hash ranges this node handles
@@ -422,20 +424,22 @@ func (s *Service) initCaches(
 		loadDone            = make(chan error, 1)
 		filesLoaded         int64
 		group, gCtx         = kitsync.NewEagerGroup(ctx, 0)
-		readers             = make(chan io.Reader, maxConcurrency)
+		readers             = make(chan snapshot, maxConcurrency)
 	)
 	defer loadCancel()
 	go func() {
 		defer close(loadDone)
-		for r := range readers {
+		for sn := range readers {
 			s.logger.Infon("Loading downloaded snapshots",
+				logger.NewIntField("range", int64(sn.hashRange)),
+				logger.NewStringField("filename", sn.filename),
 				logger.NewIntField("totalFiles", totalFiles),
 				logger.NewFloatField("loadingPercentage",
 					float64(filesLoaded)*100/float64(totalFiles),
 				),
 			)
 			loadStart := time.Now()
-			if err := s.cache.LoadSnapshots(loadCtx, r); err != nil {
+			if err := s.cache.LoadSnapshots(loadCtx, sn.reader); err != nil {
 				loadDone <- fmt.Errorf("failed to load snapshots: %w", err)
 				return
 			}
@@ -471,7 +475,11 @@ func (s *Service) initCaches(
 				select {
 				case <-gCtx.Done():
 					return gCtx.Err()
-				case readers <- bytes.NewReader(buf.Bytes()):
+				case readers <- snapshot{
+					filename:  snapshotFile,
+					hashRange: r,
+					reader:    bytes.NewReader(buf.Bytes()),
+				}:
 				}
 				return nil
 			})
@@ -522,9 +530,7 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 
 	// Group keys by hash range
 	hashingStart := time.Now()
-	keysByHashRange, indexes, err := hash.GetKeysByHashRangeWithIndexes(
-		req.Keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges,
-	)
+	keysByHashRange, indexes, err := s.hasher.GetKeysByHashRangeWithIndexes(req.Keys, s.config.NodeID)
 	if err != nil {
 		if errors.Is(err, hash.ErrWrongNode) {
 			s.metrics.errWrongNodeCounter.Increment()
@@ -576,9 +582,7 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 
 	// Group keys by hash range
 	hashingStart := time.Now()
-	keysByHashRange, err := hash.GetKeysByHashRange(
-		req.Keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges,
-	)
+	keysByHashRange, err := s.hasher.GetKeysByHashRange(req.Keys, s.config.NodeID)
 	if err != nil {
 		if errors.Is(err, hash.ErrWrongNode) {
 			s.metrics.errWrongNodeCounter.Increment()
@@ -625,7 +629,7 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 	}
 
 	// Get hash ranges for this node
-	ranges := hash.GetNodeHashRanges(s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+	ranges := s.hasher.GetNodeHashRanges(s.config.NodeID)
 
 	// Convert to proto hash ranges
 	hashRanges := make([]uint32, 0, len(ranges))
@@ -685,10 +689,14 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	s.config.ClusterSize = uint32(len(req.NodesAddresses))
 	s.config.Addresses = req.NodesAddresses
 
+	// Update hash instance
+	s.hasher = hash.New(s.config.ClusterSize, s.config.TotalHashRanges)
+
 	// Reinitialize caches for the new cluster size
 	if err := s.initCaches(ctx, false, 0); err != nil { // Revert to previous cluster size on error
 		log.Errorn("Failed to initialize caches", obskit.Error(err))
 		s.config.ClusterSize = previousClusterSize
+		s.hasher = hash.New(s.config.ClusterSize, s.config.TotalHashRanges)
 		s.scaling = false
 		return &pb.ScaleResponse{
 			Success:             false,
@@ -951,11 +959,11 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 }
 
 func (s *Service) GetKeysByHashRange(keys []string) (map[uint32][]string, error) {
-	return hash.GetKeysByHashRange(keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+	return s.hasher.GetKeysByHashRange(keys, s.config.NodeID)
 }
 
 func (s *Service) GetKeysByHashRangeWithIndexes(keys []string) (map[uint32][]string, map[string]int, error) {
-	return hash.GetKeysByHashRangeWithIndexes(keys, s.config.NodeID, s.config.ClusterSize, s.config.TotalHashRanges)
+	return s.hasher.GetKeysByHashRangeWithIndexes(keys, s.config.NodeID)
 }
 
 func (s *Service) getSnapshotFilenamePrefix() string {
@@ -966,4 +974,10 @@ func getSnapshotFilenamePostfix(hashRange uint32, from, to uint64) string {
 	return strconv.Itoa(int(hashRange)) +
 		"_s_" + strconv.FormatUint(from, 10) + "_" + strconv.FormatUint(to, 10) +
 		".snapshot"
+}
+
+type snapshot struct {
+	filename  string
+	hashRange uint32
+	reader    io.Reader
 }

@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: keydb-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_SITE_REGION: us-east-1
+      MINIO_API_SELECT_PARQUET: on
+      MINIO_ACCESS_KEY: MYACCESSKEY
+      MINIO_SECRET_KEY: MYSECRETKEY
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - keydb-network
+
+  minio-setup:
+    image: minio/mc:latest
+    container_name: keydb-minio-setup
+    environment:
+      MINIO_BUCKET: keydb-snapshots
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set test http://minio:9000 MYACCESSKEY MYSECRETKEY;
+      mc mb test/keydb-snapshots --ignore-existing;
+      mc anonymous set download test/keydb-snapshots;
+      exit 0;
+      "
+    networks:
+      - keydb-network
+
+  keydb-0:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: keydb-0
+    ports:
+      - "50051:50051"
+      - "9102:9102"
+      - "7777:7777"
+    environment:
+      KEYDB_NODE_ID: keydb-0
+      KEYDB_NODE_ADDRESSES: keydb-0:50051
+      KEYDB_OPEN_TELEMETRY_ENABLED: true
+      KEYDB_OPEN_TELEMETRY_METRICS_PROMETHEUS_ENABLED: true
+      KEYDB_OPEN_TELEMETRY_METRICS_PROMETHEUS_PORT: 9102
+
+      # S3/MinIO storage configuration
+      KEYDB_STORAGE_BUCKET: keydb-snapshots
+      KEYDB_STORAGE_REGION_HINT: us-east-1
+      KEYDB_STORAGE_ACCESS_KEY_ID: MYACCESSKEY
+      KEYDB_STORAGE_ACCESS_KEY: MYSECRETKEY
+      KEYDB_STORAGE_ENDPOINT: http://minio:9000
+      KEYDB_STORAGE_S3_FORCE_PATH_STYLE: true
+      KEYDB_STORAGE_DISABLE_SSL: true
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    networks:
+      - keydb-network
+    restart: unless-stopped
+
+  keydb-scaler:
+    build:
+      context: .
+      dockerfile: Dockerfile-scaler
+    container_name: keydb-scaler
+    ports:
+      - "8080:8080"
+    environment:
+      KEYDB_SCALER_NODE_ADDRESSES: keydb-0:50051
+    depends_on:
+      - keydb-0
+    networks:
+      - keydb-network
+    restart: unless-stopped
+
+networks:
+  keydb-network:
+    driver: bridge
+volumes:
+  minio-data:
+    driver: local

@@ -19,6 +19,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
+	"github.com/rudderlabs/keydb/internal/cloudstorage"
+	"github.com/rudderlabs/keydb/internal/hash"
+	"github.com/rudderlabs/keydb/internal/release"
+	"github.com/rudderlabs/keydb/node"
+	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	_ "github.com/rudderlabs/rudder-go-kit/maxprocs"
@@ -26,12 +31,6 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
-
-	"github.com/rudderlabs/keydb/internal/cloudstorage"
-	"github.com/rudderlabs/keydb/internal/hash"
-	"github.com/rudderlabs/keydb/internal/release"
-	"github.com/rudderlabs/keydb/node"
-	pb "github.com/rudderlabs/keydb/proto"
 )
 
 var podNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
@@ -188,11 +187,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
+	h := hash.New(nodeConfig.ClusterSize, nodeConfig.TotalHashRanges)
 	log.Infon("Starting node",
 		logger.NewStringField("addresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
-		logger.NewIntField("hashRanges", int64(len(
-			hash.GetNodeHashRanges(nodeConfig.NodeID, nodeConfig.ClusterSize, nodeConfig.TotalHashRanges),
-		))),
+		logger.NewIntField("hashRanges", int64(len(h.GetNodeHashRanges(nodeConfig.NodeID)))),
 	)
 
 	wg.Add(1)
