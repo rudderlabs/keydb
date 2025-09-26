@@ -604,8 +604,16 @@ type hashResult struct {
 }
 
 func getKeysForNodeID(h *Hash, noOfKeys int, nodeID uint32) []hashResult {
+	// Get the hash ranges assigned to this nodeID
+	nodeHashRanges := h.GetNodeHashRanges(nodeID)
+	if len(nodeHashRanges) == 0 {
+		// If nodeID has no hash ranges, return empty slice
+		return nil
+	}
+
 	keys := make([]hashResult, 0, noOfKeys)
 	for len(keys) < noOfKeys {
+		// Generate random keys until we find ones that belong to this nodeID
 		key := kitrand.String(20)
 		nn := h.GetNodeNumber(key)
 		if nn == nodeID {
