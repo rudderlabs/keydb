@@ -130,14 +130,12 @@ func TestHasherDistribution(t *testing.T) {
 		isFnv  bool
 	}{
 		{
-			name:   "xxhash",
-			hasher: xxhashHasher{},
-			isFnv:  false,
+			name:  "xxhash",
+			isFnv: false,
 		},
 		{
-			name:   "fnv",
-			hasher: fnvHasher{},
-			isFnv:  true,
+			name:  "fnv",
+			isFnv: true,
 		},
 	}
 
@@ -152,7 +150,7 @@ func TestHasherDistribution(t *testing.T) {
 			}
 
 			for _, h := range hashers {
-				stats := measureDistribution(h.name, tc.clusterSize, keys, h.hasher, h.isFnv)
+				stats := measureDistribution(h.name, tc.clusterSize, keys, h.isFnv)
 				allStats = append(allStats, stats)
 
 				t.Logf(
@@ -167,9 +165,7 @@ func TestHasherDistribution(t *testing.T) {
 	printDistributionReport(t, allStats)
 }
 
-func measureDistribution(
-	hasherName string, clusterSize uint32, keys []string, hasher consistent.Hasher, isFnv bool,
-) distributionStats {
+func measureDistribution(hasherName string, clusterSize uint32, keys []string, isFnv bool) distributionStats {
 	totalHashRanges := clusterSize * 32 // Use reasonable hash ranges
 	var h *Hash
 	if isFnv {
@@ -182,7 +178,7 @@ func measureDistribution(
 	start := time.Now()
 	hashValues := make([]uint64, len(keys))
 	for i, key := range keys {
-		hashValues[i] = hasher.Sum64([]byte(key))
+		hashValues[i] = h.hasher.Sum64([]byte(key))
 	}
 	hashTime := time.Since(start)
 
