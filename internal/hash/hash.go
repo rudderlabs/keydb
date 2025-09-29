@@ -254,7 +254,7 @@ func (h xxhashHasher) Sum64(data []byte) uint64 {
 type fnvHasher struct{}
 
 func (h fnvHasher) Sum64(data []byte) uint64 {
-	hasher := fnv.New32a()
+	hasher := fnv.New64a()
 	_, _ = hasher.Write(data)
-	return uint64(hasher.Sum32())
+	return hasher.Sum64()
 }
