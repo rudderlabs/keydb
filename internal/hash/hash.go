@@ -145,8 +145,8 @@ func (h *Hash) GetNodeHashRanges(nodeID uint32) map[uint32]struct{} {
 
 	ranges := make(map[uint32]struct{})
 	for hashRange := uint32(0); hashRange < h.totalHashRanges; hashRange++ {
-		m := h.consistent.GetPartitionOwner(int(hashRange)).(member)
-		rangeNodeID, err := strconv.ParseUint(string(m), 10, 32)
+		m := h.consistent.GetPartitionOwner(int(hashRange))
+		rangeNodeID, err := strconv.ParseUint(m.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
@@ -165,8 +165,8 @@ func (h *Hash) GetNodeHashRangesList(nodeID uint32) []uint32 {
 
 	ranges := make([]uint32, 0)
 	for i := uint32(0); i < h.totalHashRanges; i++ {
-		m := h.consistent.GetPartitionOwner(int(i)).(member)
-		rangeNodeID, err := strconv.ParseUint(string(m), 10, 32)
+		m := h.consistent.GetPartitionOwner(int(i))
+		rangeNodeID, err := strconv.ParseUint(m.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
