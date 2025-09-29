@@ -206,14 +206,14 @@ func GetHashRangeMovements(
 	destinationNodeMovements := make(map[uint32][]uint32)
 
 	for hashRange := uint32(0); hashRange < totalHashRanges; hashRange++ {
-		oldMember := oldClusterHasher.consistent.GetPartitionOwner(int(hashRange)).(member)
-		oldNodeID, err := strconv.ParseUint(string(oldMember), 10, 32)
+		oldMember := oldClusterHasher.consistent.GetPartitionOwner(int(hashRange))
+		oldNodeID, err := strconv.ParseUint(oldMember.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
 
-		newMember := newClusterHasher.consistent.GetPartitionOwner(int(hashRange)).(member)
-		newNodeID, err := strconv.ParseUint(string(newMember), 10, 32)
+		newMember := newClusterHasher.consistent.GetPartitionOwner(int(hashRange))
+		newNodeID, err := strconv.ParseUint(newMember.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
