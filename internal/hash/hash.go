@@ -119,8 +119,8 @@ func (h *Hash) GetKeysByHashRangeWithIndexes(keys []string, nodeID uint32) (
 	indexes := make(map[string]int, len(keys))
 	for i, key := range keys {
 		bk := []byte(key)
-		mem := h.consistent.LocateKey(bk).(member)
-		keyNodeID, err := strconv.ParseUint(string(mem), 10, 32)
+		mem := h.consistent.LocateKey(bk)
+		keyNodeID, err := strconv.ParseUint(mem.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
