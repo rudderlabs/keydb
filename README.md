@@ -42,7 +42,7 @@ import (
 
 config := client.Config{
     Addresses:       []string{"localhost:50051", "localhost:50052"}, // List of node addresses
-    TotalHashRanges: 128,                                           // Optional, defaults to 128
+    TotalHashRanges: 271,                                           // Optional, defaults to 271
     RetryCount:      3,                                             // Optional, defaults to 3
     RetryPolicy:     client.RetryPolicy{
         Disabled:        false,
@@ -128,7 +128,7 @@ export KEYDB_CLUSTER_SIZE=3
 export KEYDB_NODE_ADDRESSES='["localhost:50051","localhost:50052","localhost:50053"]'
 export KEYDB_PORT=50051
 export KEYDB_SNAPSHOT_INTERVAL=60s
-export KEYDB_TOTAL_HASH_RANGES=128
+export KEYDB_TOTAL_HASH_RANGES=271
 
 # Storage configuration
 export KEYDB_STORAGE_BUCKET="my-keydb-bucket"
@@ -185,7 +185,7 @@ curl --location 'localhost:8080/hashRangeMovements' \
 --data '{
     "old_cluster_size": 4,
     "new_cluster_size": 5,
-    "total_hash_ranges": 128
+    "total_hash_ranges": 271
 }'
 ```
 
@@ -213,19 +213,17 @@ What the `scaler` might tell us in that case specifically is that 100 hash range
 }
 ```
 
-You can try different combinations, but usually when you double (or split by half) the cluster size, the number of 
-hash ranges that will be moved will be lower. Keep that in mind for customers with large amounts of data.
-Having more nodes might mean more disks but CPU and memory can be tuned accordingly to use the same total amount, so
-the increased infra cost for having 1-2 more disks might be negligible. 
+You can try different combinations:
 
 | op         | old_cluster_size | new_cluster_size | total_hash_ranges | no_of_moved_hash_ranges |
 |------------|------------------|------------------|-------------------|-------------------------|
-| scale_up   | 1                | 2                | 128               | 64                      |
-| scale_up   | 1                | 3                | 128               | 85                      |
-| scale_up   | 1                | 4                | 128               | 96                      |
-| scale_down | 2                | 1                | 128               | 64                      |
-| scale_up   | 4                | 8                | 128               | 64                      |
-| scale_up   | 3                | 8                | 128               | 110                     |
+| scale_up   | 1                | 2                | 271               | 102                     |
+| scale_up   | 1                | 3                | 271               | 167                     |
+| scale_up   | 1                | 4                | 271               | 200                     |
+| scale_up   | 2                | 3                | 271               | 87                      |
+| scale_up   | 2                | 4                | 271               | 137                     |
+| scale_up   | 3                | 4                | 271               | 84                      |
+| scale_up   | 4                | 5                | 271               | 68                      |
 
 Supported options:
 

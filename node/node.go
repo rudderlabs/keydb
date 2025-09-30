@@ -31,7 +31,7 @@ import (
 
 const (
 	// DefaultTotalHashRanges is the default number of hash ranges
-	DefaultTotalHashRanges = 128
+	DefaultTotalHashRanges = 271
 
 	// DefaultSnapshotInterval is the default interval for creating snapshots (in seconds)
 	DefaultSnapshotInterval = 24 * time.Hour
