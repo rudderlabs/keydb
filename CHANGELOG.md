@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/rudderlabs/keydb/compare/v1.1.0...v1.2.0) (2025-09-30)
+
+
+### Miscellaneous Chores
+
+* empty commit to fix release ([#65](https://github.com/rudderlabs/keydb/issues/65)) ([e357f87](https://github.com/rudderlabs/keydb/commit/e357f878a577526d745cea9aef8a287b183edc1b))
+
 ## [1.1.0](https://github.com/rudderlabs/keydb/compare/v1.0.0...v1.1.0) (2025-09-19)
 
 
