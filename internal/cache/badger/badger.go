@@ -50,7 +50,7 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 	opts := badger.DefaultOptions(path).
 		WithCompression(options.None).
 		WithNumVersionsToKeep(1).
-		WithNumGoroutines(conf.GetInt("BadgerDB.Dedup.NumGoroutines", 128/3)).
+		WithNumGoroutines(conf.GetInt("BadgerDB.Dedup.NumGoroutines", 100)).
 		WithBloomFalsePositive(conf.GetFloat64("BadgerDB.Dedup.BloomFalsePositive", 0.000001)).
 		WithIndexCacheSize(conf.GetInt64Var(
 			16*bytesize.MB, 1, "BadgerDB.Dedup.indexCacheSize", "BadgerDB.indexCacheSize",

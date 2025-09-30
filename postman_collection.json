@@ -114,7 +114,7 @@
 				"header": [],
 				"body": {
 					"mode": "raw",
-					"raw": "{\n    \"old_cluster_size\": 8,\n    \"new_cluster_size\": 4,\n    \"total_hash_ranges\": 128,\n    \"upload\": false,\n    \"full_sync\": true,\n    \"split_uploads\": false\n}",
+					"raw": "{\n    \"old_cluster_size\": 8,\n    \"new_cluster_size\": 4,\n    \"total_hash_ranges\": 271,\n    \"upload\": false,\n    \"full_sync\": true,\n    \"split_uploads\": false\n}",
 					"options": {
 						"raw": {
 							"language": "json"
