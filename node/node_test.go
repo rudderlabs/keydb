@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/internal/scaler"
 	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -414,9 +415,18 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// then it will be node2 and the clusterSize will be 3
 		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove
 		// node0, you have to remove node1
-		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
-		require.NoError(t, op.CreateSnapshots(ctx, 2, false))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, node0.hasher.GetNodeHashRangesList(0)...))
+		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(3, 1, totalHashRanges)
+		for sourceNodeID, hashRanges := range sourceNodeMovements {
+			require.NoError(t, op.CreateSnapshots(ctx, sourceNodeID, false, hashRanges...))
+		}
+		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
+			regexp.MustCompile("^.+/hr_0_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
+			regexp.MustCompile("^.+/hr_2_s_0_2.snapshot$"),
+		)
+		for destinationNodeID, hashRanges := range destinationNodeMovements {
+			require.NoError(t, op.LoadSnapshots(ctx, destinationNodeID, totalHashRanges, hashRanges...))
+		}
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
 		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
