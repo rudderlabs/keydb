@@ -90,12 +90,13 @@ type Service struct {
 	lastSnapshotTime time.Time
 	hasher           *hash.Hash
 
-	now            func() time.Time
-	maxFilesToList int64
-	waitGroup      sync.WaitGroup
-	storage        cloudStorage
-	stats          stats.Stats
-	logger         logger.Logger
+	now                   func() time.Time
+	maxFilesToList        int64
+	forceSkipFilesListing config.ValueLoader[bool]
+	waitGroup             sync.WaitGroup
+	storage               cloudStorage
+	stats                 stats.Stats
+	logger                logger.Logger
 
 	metrics struct {
 		getKeysCounters             map[uint32]stats.Counter
@@ -182,13 +183,14 @@ func NewService(
 	}
 
 	service := &Service{
-		now:            time.Now,
-		config:         config,
-		storage:        storage,
-		since:          make(map[uint32]uint64),
-		maxFilesToList: config.MaxFilesToList,
-		hasher:         hash.New(config.ClusterSize, config.TotalHashRanges),
-		stats:          stat,
+		now:                   time.Now,
+		config:                config,
+		storage:               storage,
+		since:                 make(map[uint32]uint64),
+		maxFilesToList:        config.MaxFilesToList,
+		forceSkipFilesListing: kitConf.GetReloadableBoolVar(false, "NodeService.forceSkipFilesListing"),
+		hasher:                hash.New(config.ClusterSize, config.TotalHashRanges),
+		stats:                 stat,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
@@ -350,10 +352,20 @@ func (s *Service) initCaches(
 	}
 
 	// List all files in the bucket
-	list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
-	files, err := list.Next()
-	if err != nil {
-		return fmt.Errorf("failed to list snapshot files: %w", err)
+	var (
+		err   error
+		files []*filemanager.FileInfo
+	)
+	if !s.forceSkipFilesListing.Load() {
+		list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
+		files, err = list.Next()
+		if err != nil {
+			return fmt.Errorf("failed to list snapshot files: %w", err)
+		}
+	}
+	if len(files) == 0 {
+		s.logger.Infon("No snapshots found, skipping caches initialization")
+		return nil
 	}
 
 	var selected map[uint32]struct{}
