@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.1](https://github.com/rudderlabs/keydb/compare/v1.2.0...v1.2.1) (2025-10-08)
+
+
+### Miscellaneous
+
+* **deps:** bump actions/setup-go from 5 to 6 ([#60](https://github.com/rudderlabs/keydb/issues/60)) ([22cd206](https://github.com/rudderlabs/keydb/commit/22cd2062fe4d11488957d51574f043b1d5f279a0))
+* **deps:** bump actions/stale from 9 to 10 ([#59](https://github.com/rudderlabs/keydb/issues/59)) ([3e88330](https://github.com/rudderlabs/keydb/commit/3e88330351ad4d1d9ae0700d2fab6ff93ec2504f))
+* **deps:** bump the go-deps group across 1 directory with 2 updates ([#63](https://github.com/rudderlabs/keydb/issues/63)) ([ec81c2b](https://github.com/rudderlabs/keydb/commit/ec81c2b9df36180de3e3b763c8537df79a810551))
+* **deps:** bump the go-deps group across 1 directory with 3 updates ([#69](https://github.com/rudderlabs/keydb/issues/69)) ([ebc2caa](https://github.com/rudderlabs/keydb/commit/ebc2caaf656b4fbf253649e10089c32de1dfd614))
+* force skip listing files ([#70](https://github.com/rudderlabs/keydb/issues/70)) ([fc3180b](https://github.com/rudderlabs/keydb/commit/fc3180b5a685a6e460709ad804232e1ca7099f26))
+* rename changelog-types to changelog-sections in release-please config ([#72](https://github.com/rudderlabs/keydb/issues/72)) ([f6bced3](https://github.com/rudderlabs/keydb/commit/f6bced3e6fa0c14061f8ad8d12790b298e55222e))
+* update release-please action to use googleapis namespace ([#71](https://github.com/rudderlabs/keydb/issues/71)) ([a5c4a46](https://github.com/rudderlabs/keydb/commit/a5c4a4646ca7545bb77fb35e9654a29872f8c609))
+
 ## [1.2.0](https://github.com/rudderlabs/keydb/compare/v1.1.0...v1.2.0) (2025-09-30)
 
 
