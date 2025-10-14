@@ -2,12 +2,12 @@ GO := go
 TESTFILE    := _testok
 DOCKER_USER :=
 
-GOLANG_CI				:= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.3.1
+GOLANG_CI				:= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0
 GOFUMPT					:= mvdan.cc/gofumpt@latest
 GOVULNCHECK				:= golang.org/x/vuln/cmd/govulncheck@latest
 GOIMPORTS 				:= golang.org/x/tools/cmd/goimports@latest
-MOCKGEN 				:= github.com/golang/mock/mockgen@v1.6.0
-GOTESTSUM				:= gotest.tools/gotestsum@v1.11.0
+MOCKGEN 				:= go.uber.org/mock/mockgen@v0.6.0
+GOTESTSUM				:= gotest.tools/gotestsum@v1.13.0
 
 # go tools versions
 protoc-gen-go=google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
