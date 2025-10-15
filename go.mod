@@ -1,6 +1,6 @@
 module github.com/rudderlabs/keydb
 
-go 1.24.6
+go 1.25.3
 
 require (
 	github.com/DataDog/zstd v1.5.7

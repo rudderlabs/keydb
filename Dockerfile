@@ -1,11 +1,9 @@
 # Define build arguments
 # GO_VERSION is updated automatically to match go.mod, see Makefile
-ARG GO_VERSION=1.24.6
-ARG ALPINE_VERSION=3.22
 ARG PKG_NAME=github.com/rudderlabs/keydb
 
 # Build stage
-FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
+FROM golang:1.25.3-alpine3.22@sha256:20ee0b674f987514ae3afb295b6a2a4e5fa11de8cc53a289343bbdab59b0df59 AS builder
 
 # Install necessary dependencies (zstd-dev used with cgo)
 RUN apk --no-cache add --update make tzdata ca-certificates gcc musl-dev zstd-dev
@@ -38,7 +36,7 @@ RUN go build \
     -o ./keydb ./cmd/node
 
 # Final stage
-FROM alpine:${ALPINE_VERSION}
+FROM alpine:3.22.2@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
 
 # Update and install additional packages (zstd-libs used with cgo)
 RUN apk --no-cache upgrade && \
