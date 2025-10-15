@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2](https://github.com/rudderlabs/keydb/compare/v1.2.1...v1.2.2) (2025-10-15)
+
+
+### Miscellaneous
+
+* **deps:** bump github.com/rudderlabs/rudder-go-kit ([#75](https://github.com/rudderlabs/keydb/issues/75)) ([7054de0](https://github.com/rudderlabs/keydb/commit/7054de07e4bbb9a6503fde2a4c6d641412592b5c))
+* hardening docker image ([#76](https://github.com/rudderlabs/keydb/issues/76)) ([4cacfb6](https://github.com/rudderlabs/keydb/commit/4cacfb61cde728d78c159229bd1ea8a9bdd0d4ed))
+
 ## [1.2.1](https://github.com/rudderlabs/keydb/compare/v1.2.0...v1.2.1) (2025-10-08)
 
 
