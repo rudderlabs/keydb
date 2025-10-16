@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.3](https://github.com/rudderlabs/keydb/compare/v1.2.2...v1.2.3) (2025-10-16)
+
+
+### Miscellaneous
+
+* **deps:** bump golang from `20ee0b6` to `aee43c3` ([#78](https://github.com/rudderlabs/keydb/issues/78)) ([715a5bb](https://github.com/rudderlabs/keydb/commit/715a5bb89682b5f1eb08b1bcaeea8870a87c34a4))
+* refactor release package to match with dockerfile ([#79](https://github.com/rudderlabs/keydb/issues/79)) ([948bac6](https://github.com/rudderlabs/keydb/commit/948bac694dbd70ffe8a8f521e4865187db05bd49))
+
 ## [1.2.2](https://github.com/rudderlabs/keydb/compare/v1.2.1...v1.2.2) (2025-10-15)
 
 
