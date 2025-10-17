@@ -327,30 +327,28 @@ For a comprehensive list of available settings you can refer to the constructor 
   * When too small, you might not be able to buffer enough writes before flushing to L0 (e.g. a bigger size can reduce
     the frequency of flushes)
 * `NumLevelZeroTables` default to `10`
-  * L0 flushing would start after ~640MB (64MB `MemTableSize` times 10)
-  * Reducing this value might lead to flushing to L0 (disk) more frequently
-* `BaseLevelSize` default `1GB` (base level = L1, i.e. the primary destination of compaction from L0)
+  * L0 compaction would start after ~640MB (64MB `MemTableSize` times 10)
+* `BaseLevelSize` default `1GB` (base level >= L1, i.e. the primary destination of compaction from L0)
   * Badger uses an LSM tree: immutable sorted tables (SSTables) grouped into levels
   * Level 0 (L0): contains newly flushed SSTables from MemTables, possibly overlapping in key ranges
-  * Level 1 and beyond (L1, L2, ...): contain non-overlapping SSTables
+  * Level 1 and beyond (L1, L2, ...): contain non-overlapping SSTables (i.e. disjoint)
   * Each successive level can hold more data than the previous one, usually growing by a size multiplier (default 5)
   * The base level size determines how big Level 1 (the base level) should be (consider that the base level is the first
     level of compaction where the overlapping key ranges from L0 are compacted down in L1 first and then down in higher
     levels as data keeps on growing)
   * TL;DR: More SSTables can accumulate in L1 before being compacted to L2
     * This means fewer compactions overall (good for write throughput)
-    * Higher read amplification (since L1 can grow larger and contains overlapping SSTables, lookups may need to check 
-      more files)
+    * Higher read amplification (since L1 can grow larger lookups may need to check more files)
     * Larger total on-disk data before compactions
 * `NumCompactors` default `4`
   * This increases the parallelism for compaction jobs, helping improve overall throughput with compactions
-* `BlockCacheSize` (default to `1GB`) - Cache for SSTable data blocks (actual value/key payloads read from disk)
+* `BlockCacheSize` (default disabled) - Cache for SSTable data blocks (actual value/key payloads read from disk)
   * During compaction Badger must read data blocks from SSTables in input levels, merge them, and write new SSTables to 
     the next level
   * If the block cache is too small, compaction threads can cause a lot of block cache evictions
   * Reads during compaction will go to disk instead of RAM → higher disk I/O, slower compactions
   * User queries may suffer, since compaction and queries compete for cache
-* `IndexCacheSize` (default to `512MB`) - Cache for SSTable index blocks and Bloom filters (metadata needed to locate 
+* `IndexCacheSize` (default to `16MB`) - Cache for SSTable index blocks and Bloom filters (metadata needed to locate 
   keys inside SSTables)
   * During compaction, the compactor repeatedly queries SSTable indexes to decide which keys to merge or drop
   * If index cache is too small, index blocks and bloom filters are constantly evicted
