@@ -27,6 +27,7 @@ type scalerClient interface {
 	UpdateClusterData(addresses ...string) error
 	CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error
 	LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint32, hashRanges ...uint32) error
+	ClearLoadedSnapshots(ctx context.Context, nodeID uint32) error
 	ExecuteScalingWithRollback(opType scaler.ScalingOperationType, oldAddresses, newAddresses []string,
 		fn func() error) error
 	GetLastOperation() *scaler.ScalingOperation
@@ -63,6 +64,7 @@ func newHTTPServer(client *client.Client, scaler *scaler.Client, addr string, lo
 	mux.Post("/info", s.handleInfo)
 	mux.Post("/createSnapshots", s.handleCreateSnapshots)
 	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
+	mux.Post("/clearLoadedSnapshots", s.handleClearLoadedSnapshots)
 	mux.Post("/scale", s.handleScale)
 	mux.Post("/scaleComplete", s.handleScaleComplete)
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
@@ -218,6 +220,27 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	// Load snapshots from cloud storage
 	if err := s.scaler.LoadSnapshots(r.Context(), req.NodeID, req.MaxConcurrency, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// handleClearLoadedSnapshots handles POST /clearLoadedSnapshots requests
+func (s *httpServer) handleClearLoadedSnapshots(w http.ResponseWriter, r *http.Request) {
+	// Parse request body
+	var req ClearLoadedSnapshotsRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Clear loaded snapshots checkpoint
+	if err := s.scaler.ClearLoadedSnapshots(r.Context(), req.NodeID); err != nil {
+		http.Error(w, fmt.Sprintf("Error clearing loaded snapshots: %v", err), http.StatusInternalServerError)
 		return
 	}
 

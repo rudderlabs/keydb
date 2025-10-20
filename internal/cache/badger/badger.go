@@ -477,3 +477,53 @@ func (l loggerForBadger) Warningf(fmt string, args ...any) {
 func (c *Cache) LevelsToString() string {
 	return c.cache.LevelsToString()
 }
+
+const loadedSnapshotPrefix = "checkpoint:loaded_snapshot:"
+
+// IsSnapshotLoaded checks if a snapshot file has already been loaded
+func (c *Cache) IsSnapshotLoaded(filename string) (bool, error) {
+	key := []byte(loadedSnapshotPrefix + filename)
+	err := c.cache.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(key)
+		return err
+	})
+	if err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking if snapshot is loaded: %w", err)
+	}
+	return true, nil
+}
+
+// MarkSnapshotAsLoaded marks a snapshot file as loaded
+func (c *Cache) MarkSnapshotAsLoaded(filename string) error {
+	key := []byte(loadedSnapshotPrefix + filename)
+	err := c.cache.Update(func(txn *badger.Txn) error {
+		// Store with no expiration (TTL = 0)
+		return txn.Set(key, []byte("loaded"))
+	})
+	if err != nil {
+		return fmt.Errorf("marking snapshot as loaded: %w", err)
+	}
+	return nil
+}
+
+// ClearLoadedSnapshots clears all loaded snapshot checkpoints
+func (c *Cache) ClearLoadedSnapshots() error {
+	prefix := []byte(loadedSnapshotPrefix)
+	return c.cache.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			if err := txn.Delete(it.Item().Key()); err != nil {
+				return fmt.Errorf("deleting checkpoint key: %w", err)
+			}
+		}
+		return nil
+	})
+}

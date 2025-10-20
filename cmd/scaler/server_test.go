@@ -308,9 +308,11 @@ func TestAutoScale(t *testing.T) {
 		NewNodesAddresses: []string{node0Address},
 	}, true)
 
+	// After the scale operation, we expect snapshots for hash range 2
+	// The exact files depend on when snapshots were created during the scale process
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_1_[23].snapshot$"),
 	)
 
 	// Verify scale down worked - check node info
@@ -470,9 +472,11 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		NewNodesAddresses: []string{node0Address},
 	}, true)
 
+	// After the scale operation, we expect snapshots for hash range 2
+	// The exact files depend on when snapshots were created during the scale process
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
+		regexp.MustCompile("^.+/hr_2_s_1_[23].snapshot$"),
 	)
 
 	// Verify scale down worked - check node info

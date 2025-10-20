@@ -449,6 +449,77 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint3
 	return nil
 }
 
+// ClearLoadedSnapshots clears all loaded snapshot checkpoints on a node
+func (c *Client) ClearLoadedSnapshots(ctx context.Context, nodeID uint32) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Get the client for this node
+	client, ok := c.clients[int(nodeID)]
+	if !ok {
+		return fmt.Errorf("no client for node %d", nodeID)
+	}
+	conn, ok := c.connections[int(nodeID)]
+	if !ok {
+		return fmt.Errorf("no connection for node %d", nodeID)
+	}
+
+	req := &pb.ClearLoadedSnapshotsRequest{}
+
+	var (
+		err         error
+		resp        *pb.ClearLoadedSnapshotsResponse
+		nextBackoff = c.getNextBackoffFunc()
+	)
+	for attempt := int64(1); ; attempt++ {
+		resp, err = client.ClearLoadedSnapshots(ctx, req)
+		if err == nil && resp != nil && resp.Success {
+			break
+		}
+
+		retryDelay := nextBackoff()
+		if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
+			if err != nil {
+				return fmt.Errorf("failed to clear loaded snapshots on node %d: %w", nodeID, err)
+			}
+			if resp != nil {
+				return fmt.Errorf("failed to clear loaded snapshots on node %d: %s", nodeID, resp.ErrorMessage)
+			}
+			return fmt.Errorf("cannot clear loaded snapshots on node %d: both error and response are nil", nodeID)
+		}
+
+		if err != nil {
+			c.logger.Warnn("Cannot clear loaded snapshots",
+				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("attempt", attempt),
+				logger.NewDurationField("retryDelay", retryDelay),
+				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+				logger.NewStringField("connState", conn.GetState().String()),
+				obskit.Error(err))
+		} else if resp != nil {
+			c.logger.Warnn("Clear loaded snapshots unsuccessful",
+				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("attempt", attempt),
+				logger.NewBoolField("success", resp.Success),
+				logger.NewDurationField("retryDelay", retryDelay),
+				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+				logger.NewStringField("connState", conn.GetState().String()),
+				obskit.Error(errors.New(resp.ErrorMessage)))
+		} else {
+			return fmt.Errorf("cannot clear loaded snapshots on node %d: both error and response are nil", nodeID)
+		}
+
+		// Wait before retrying
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryDelay):
+		}
+	}
+
+	return nil
+}
+
 // Scale changes the number of nodes in the cluster
 func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
 	c.mu.Lock()

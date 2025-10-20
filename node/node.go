@@ -82,21 +82,19 @@ type Service struct {
 
 	config Config
 
-	// mu protects cache, scaling, since, lastSnapshotTime and hasher
+	// mu protects cache, scaling, lastSnapshotTime and hasher
 	mu               sync.RWMutex
 	cache            Cache
 	scaling          bool
-	since            map[uint32]uint64
 	lastSnapshotTime time.Time
 	hasher           *hash.Hash
 
-	now                   func() time.Time
-	maxFilesToList        int64
-	forceSkipFilesListing config.ValueLoader[bool]
-	waitGroup             sync.WaitGroup
-	storage               cloudStorage
-	stats                 stats.Stats
-	logger                logger.Logger
+	now            func() time.Time
+	maxFilesToList int64
+	waitGroup      sync.WaitGroup
+	storage        cloudStorage
+	stats          stats.Stats
+	logger         logger.Logger
 
 	metrics struct {
 		getKeysCounters             map[uint32]stats.Counter
@@ -146,6 +144,15 @@ type Cache interface {
 
 	// LevelsToString returns a string representation of the cache levels
 	LevelsToString() string
+
+	// IsSnapshotLoaded checks if a snapshot file has already been loaded
+	IsSnapshotLoaded(filename string) (bool, error)
+
+	// MarkSnapshotAsLoaded marks a snapshot file as loaded
+	MarkSnapshotAsLoaded(filename string) error
+
+	// ClearLoadedSnapshots clears all loaded snapshot checkpoints
+	ClearLoadedSnapshots() error
 }
 
 type cloudStorageReader interface {
@@ -183,14 +190,12 @@ func NewService(
 	}
 
 	service := &Service{
-		now:                   time.Now,
-		config:                config,
-		storage:               storage,
-		since:                 make(map[uint32]uint64),
-		maxFilesToList:        config.MaxFilesToList,
-		forceSkipFilesListing: kitConf.GetReloadableBoolVar(false, "NodeService.forceSkipFilesListing"),
-		hasher:                hash.New(config.ClusterSize, config.TotalHashRanges),
-		stats:                 stat,
+		now:            time.Now,
+		config:         config,
+		storage:        storage,
+		maxFilesToList: config.MaxFilesToList,
+		hasher:         hash.New(config.ClusterSize, config.TotalHashRanges),
+		stats:          stat,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
@@ -351,17 +356,16 @@ func (s *Service) initCaches(
 		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 	}
 
+	if !download {
+		s.logger.Infon("Downloading disabled, skipping caches initialization")
+		return nil
+	}
+
 	// List all files in the bucket
-	var (
-		err   error
-		files []*filemanager.FileInfo
-	)
-	if !s.forceSkipFilesListing.Load() {
-		list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
-		files, err = list.Next()
-		if err != nil {
-			return fmt.Errorf("failed to list snapshot files: %w", err)
-		}
+	list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
+	files, err := list.Next()
+	if err != nil {
+		return fmt.Errorf("failed to list snapshot files: %w", err)
 	}
 	if len(files) == 0 {
 		s.logger.Infon("No snapshots found, skipping caches initialization")
@@ -397,14 +401,6 @@ func (s *Service) initCaches(
 				continue
 			}
 		}
-		since, err := strconv.Atoi(matches[3]) // getting "to", not "from"
-		if err != nil {
-			s.logger.Warnn("Invalid snapshot filename (since)", logger.NewStringField("filename", file.Key))
-			continue
-		}
-		if s.since[hashRange] < uint64(since) {
-			s.since[hashRange] = uint64(since)
-		}
 		if filesByHashRange[hashRange] == nil {
 			filesByHashRange[hashRange] = make([]string, 0, 1)
 		}
@@ -415,12 +411,6 @@ func (s *Service) initCaches(
 		)
 		filesByHashRange[hashRange] = append(filesByHashRange[hashRange], file.Key)
 		totalFiles++
-	}
-
-	if !download {
-		// We still had to do the above in order to populate the "since" map
-		s.logger.Infon("Downloading disabled, skipping snapshots initialization")
-		return nil
 	}
 
 	for i := range filesByHashRange {
@@ -456,6 +446,16 @@ func (s *Service) initCaches(
 				return
 			}
 			s.metrics.loadSnapshotToDiskDuration.Since(loadStart)
+
+			// Mark the snapshot as loaded
+			if err := s.cache.MarkSnapshotAsLoaded(sn.filename); err != nil {
+				s.logger.Warnn("Failed to mark snapshot as loaded",
+					logger.NewStringField("filename", sn.filename),
+					obskit.Error(err),
+				)
+				// Continue even if marking fails - it's not critical
+			}
+
 			filesLoaded++
 		}
 	}()
@@ -468,13 +468,28 @@ func (s *Service) initCaches(
 
 		for _, snapshotFile := range snapshotFiles {
 			group.Go(func() error {
+				// Check if this snapshot has already been loaded
+				loaded, err := s.cache.IsSnapshotLoaded(snapshotFile)
+				if err != nil {
+					s.logger.Warnn("Error checking if snapshot is loaded",
+						logger.NewStringField("filename", snapshotFile),
+						obskit.Error(err),
+					)
+					// Continue with download if we can't check the checkpoint
+				} else if loaded {
+					s.logger.Infon("Snapshot already loaded, skipping",
+						logger.NewStringField("filename", snapshotFile),
+					)
+					return nil
+				}
+
 				s.logger.Infon("Starting download of snapshot file from cloud storage",
 					logger.NewStringField("filename", snapshotFile),
 				)
 
 				startDownload := time.Now()
 				buf := manager.NewWriteAtBuffer([]byte{})
-				err := s.storage.Download(gCtx, buf, snapshotFile)
+				err = s.storage.Download(gCtx, buf, snapshotFile)
 				if err != nil {
 					if errors.Is(err, filemanager.ErrKeyNotFound) {
 						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
@@ -746,6 +761,32 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
 
+// ClearLoadedSnapshots implements the ClearLoadedSnapshots RPC method
+func (s *Service) ClearLoadedSnapshots(
+	ctx context.Context, req *pb.ClearLoadedSnapshotsRequest,
+) (*pb.ClearLoadedSnapshotsResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.logger.Infon("Clear loaded snapshots request received")
+
+	if err := s.cache.ClearLoadedSnapshots(); err != nil {
+		s.logger.Errorn("Failed to clear loaded snapshots", obskit.Error(err))
+		return &pb.ClearLoadedSnapshotsResponse{
+			Success:      false,
+			ErrorMessage: err.Error(),
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	s.logger.Infon("Successfully cleared loaded snapshots")
+
+	return &pb.ClearLoadedSnapshotsResponse{
+		Success: true,
+		NodeId:  s.config.NodeID,
+	}, nil
+}
+
 // LoadSnapshots forces the node to load all snapshots from cloud storage
 func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsRequest) (*pb.LoadSnapshotsResponse, error) {
 	s.mu.Lock()
@@ -832,6 +873,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 		}
 	}
 
+	// Get "since" values from S3 filenames instead of using the removed since map
 	var (
 		since    map[uint32]uint64
 		sinceLog strings.Builder
@@ -848,8 +890,42 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			i++
 		}
 	} else {
+		// List all files in S3 and get the latest "since" value for each hash range from filenames
+		list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
+		files, err := list.Next()
+		if err != nil {
+			return fmt.Errorf("failed to list snapshot files: %w", err)
+		}
+
+		since = make(map[uint32]uint64, len(currentRanges))
+		for r := range currentRanges {
+			since[r] = 0
+		}
+
+		for _, file := range files {
+			matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
+			if len(matches) != 4 {
+				continue
+			}
+			hashRangeInt, err := strconv.Atoi(matches[1])
+			if err != nil {
+				continue
+			}
+			hashRange := uint32(hashRangeInt)
+			// Only consider files for hash ranges this node handles
+			if _, ok := currentRanges[hashRange]; !ok {
+				continue
+			}
+			toTimestamp, err := strconv.Atoi(matches[3]) // getting "to" timestamp
+			if err != nil {
+				continue
+			}
+			if since[hashRange] < uint64(toTimestamp) {
+				since[hashRange] = uint64(toTimestamp)
+			}
+		}
+
 		i := 0
-		since = s.since
 		for hr, ss := range since {
 			if i != 0 {
 				sinceLog.WriteString(",")
@@ -936,8 +1012,6 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			return fmt.Errorf("failed to upload snapshot file %q: %w", filename, err)
 		}
 		s.metrics.uploadSnapshotDuration.Since(startUpload)
-
-		s.since[hashRange] = newSince
 
 		if fullSync {
 			if len(filesToBeDeletedByHashRange[hashRange]) > 0 {

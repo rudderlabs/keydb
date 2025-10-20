@@ -19,13 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NodeService_Get_FullMethodName             = "/keydb.NodeService/Get"
-	NodeService_Put_FullMethodName             = "/keydb.NodeService/Put"
-	NodeService_GetNodeInfo_FullMethodName     = "/keydb.NodeService/GetNodeInfo"
-	NodeService_LoadSnapshots_FullMethodName   = "/keydb.NodeService/LoadSnapshots"
-	NodeService_CreateSnapshots_FullMethodName = "/keydb.NodeService/CreateSnapshots"
-	NodeService_Scale_FullMethodName           = "/keydb.NodeService/Scale"
-	NodeService_ScaleComplete_FullMethodName   = "/keydb.NodeService/ScaleComplete"
+	NodeService_Get_FullMethodName                  = "/keydb.NodeService/Get"
+	NodeService_Put_FullMethodName                  = "/keydb.NodeService/Put"
+	NodeService_GetNodeInfo_FullMethodName          = "/keydb.NodeService/GetNodeInfo"
+	NodeService_LoadSnapshots_FullMethodName        = "/keydb.NodeService/LoadSnapshots"
+	NodeService_CreateSnapshots_FullMethodName      = "/keydb.NodeService/CreateSnapshots"
+	NodeService_Scale_FullMethodName                = "/keydb.NodeService/Scale"
+	NodeService_ScaleComplete_FullMethodName        = "/keydb.NodeService/ScaleComplete"
+	NodeService_ClearLoadedSnapshots_FullMethodName = "/keydb.NodeService/ClearLoadedSnapshots"
 )
 
 // NodeServiceClient is the client API for NodeService service.
@@ -48,6 +49,8 @@ type NodeServiceClient interface {
 	Scale(ctx context.Context, in *ScaleRequest, opts ...grpc.CallOption) (*ScaleResponse, error)
 	// ScaleComplete is used by the scaler to notify all nodes that the scale is complete and they can now start serving traffic again
 	ScaleComplete(ctx context.Context, in *ScaleCompleteRequest, opts ...grpc.CallOption) (*ScaleCompleteResponse, error)
+	// ClearLoadedSnapshots clears all loaded snapshot checkpoints
+	ClearLoadedSnapshots(ctx context.Context, in *ClearLoadedSnapshotsRequest, opts ...grpc.CallOption) (*ClearLoadedSnapshotsResponse, error)
 }
 
 type nodeServiceClient struct {
@@ -128,6 +131,16 @@ func (c *nodeServiceClient) ScaleComplete(ctx context.Context, in *ScaleComplete
 	return out, nil
 }
 
+func (c *nodeServiceClient) ClearLoadedSnapshots(ctx context.Context, in *ClearLoadedSnapshotsRequest, opts ...grpc.CallOption) (*ClearLoadedSnapshotsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClearLoadedSnapshotsResponse)
+	err := c.cc.Invoke(ctx, NodeService_ClearLoadedSnapshots_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeServiceServer is the server API for NodeService service.
 // All implementations must embed UnimplementedNodeServiceServer
 // for forward compatibility.
@@ -148,6 +161,8 @@ type NodeServiceServer interface {
 	Scale(context.Context, *ScaleRequest) (*ScaleResponse, error)
 	// ScaleComplete is used by the scaler to notify all nodes that the scale is complete and they can now start serving traffic again
 	ScaleComplete(context.Context, *ScaleCompleteRequest) (*ScaleCompleteResponse, error)
+	// ClearLoadedSnapshots clears all loaded snapshot checkpoints
+	ClearLoadedSnapshots(context.Context, *ClearLoadedSnapshotsRequest) (*ClearLoadedSnapshotsResponse, error)
 	mustEmbedUnimplementedNodeServiceServer()
 }
 
@@ -178,6 +193,9 @@ func (UnimplementedNodeServiceServer) Scale(context.Context, *ScaleRequest) (*Sc
 }
 func (UnimplementedNodeServiceServer) ScaleComplete(context.Context, *ScaleCompleteRequest) (*ScaleCompleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ScaleComplete not implemented")
+}
+func (UnimplementedNodeServiceServer) ClearLoadedSnapshots(context.Context, *ClearLoadedSnapshotsRequest) (*ClearLoadedSnapshotsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClearLoadedSnapshots not implemented")
 }
 func (UnimplementedNodeServiceServer) mustEmbedUnimplementedNodeServiceServer() {}
 func (UnimplementedNodeServiceServer) testEmbeddedByValue()                     {}
@@ -326,6 +344,24 @@ func _NodeService_ScaleComplete_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeService_ClearLoadedSnapshots_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClearLoadedSnapshotsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeServiceServer).ClearLoadedSnapshots(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeService_ClearLoadedSnapshots_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeServiceServer).ClearLoadedSnapshots(ctx, req.(*ClearLoadedSnapshotsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NodeService_ServiceDesc is the grpc.ServiceDesc for NodeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -360,6 +396,10 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ScaleComplete",
 			Handler:    _NodeService_ScaleComplete_Handler,
+		},
+		{
+			MethodName: "ClearLoadedSnapshots",
+			Handler:    _NodeService_ClearLoadedSnapshots_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

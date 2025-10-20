@@ -866,6 +866,102 @@ func (x *ScaleCompleteResponse) GetSuccess() bool {
 	return false
 }
 
+type ClearLoadedSnapshotsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClearLoadedSnapshotsRequest) Reset() {
+	*x = ClearLoadedSnapshotsRequest{}
+	mi := &file_proto_keydb_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClearLoadedSnapshotsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClearLoadedSnapshotsRequest) ProtoMessage() {}
+
+func (x *ClearLoadedSnapshotsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_keydb_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClearLoadedSnapshotsRequest.ProtoReflect.Descriptor instead.
+func (*ClearLoadedSnapshotsRequest) Descriptor() ([]byte, []int) {
+	return file_proto_keydb_proto_rawDescGZIP(), []int{14}
+}
+
+type ClearLoadedSnapshotsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	ErrorMessage  string                 `protobuf:"bytes,2,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"` // Error message if the operation failed
+	NodeId        uint32                 `protobuf:"varint,3,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`                  // ID of the node that processed the request
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClearLoadedSnapshotsResponse) Reset() {
+	*x = ClearLoadedSnapshotsResponse{}
+	mi := &file_proto_keydb_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClearLoadedSnapshotsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClearLoadedSnapshotsResponse) ProtoMessage() {}
+
+func (x *ClearLoadedSnapshotsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_keydb_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClearLoadedSnapshotsResponse.ProtoReflect.Descriptor instead.
+func (*ClearLoadedSnapshotsResponse) Descriptor() ([]byte, []int) {
+	return file_proto_keydb_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ClearLoadedSnapshotsResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *ClearLoadedSnapshotsResponse) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *ClearLoadedSnapshotsResponse) GetNodeId() uint32 {
+	if x != nil {
+		return x.NodeId
+	}
+	return 0
+}
+
 var File_proto_keydb_proto protoreflect.FileDescriptor
 
 const file_proto_keydb_proto_rawDesc = "" +
@@ -927,13 +1023,18 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"\x16\n" +
 	"\x14ScaleCompleteRequest\"1\n" +
 	"\x15ScaleCompleteResponse\x12\x18\n" +
-	"\asuccess\x18\x01 \x01(\bR\asuccess*J\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\"\x1d\n" +
+	"\x1bClearLoadedSnapshotsRequest\"v\n" +
+	"\x1cClearLoadedSnapshotsResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12#\n" +
+	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x12\x17\n" +
+	"\anode_id\x18\x03 \x01(\rR\x06nodeId*J\n" +
 	"\tErrorCode\x12\f\n" +
 	"\bNO_ERROR\x10\x00\x12\x0e\n" +
 	"\n" +
 	"WRONG_NODE\x10\x01\x12\v\n" +
 	"\aSCALING\x10\x02\x12\x12\n" +
-	"\x0eINTERNAL_ERROR\x10\x032\xdb\x03\n" +
+	"\x0eINTERNAL_ERROR\x10\x032\xbe\x04\n" +
 	"\vNodeService\x12.\n" +
 	"\x03Get\x12\x11.keydb.GetRequest\x1a\x12.keydb.GetResponse\"\x00\x12.\n" +
 	"\x03Put\x12\x11.keydb.PutRequest\x1a\x12.keydb.PutResponse\"\x00\x12F\n" +
@@ -941,7 +1042,8 @@ const file_proto_keydb_proto_rawDesc = "" +
 	"\rLoadSnapshots\x12\x1b.keydb.LoadSnapshotsRequest\x1a\x1c.keydb.LoadSnapshotsResponse\"\x00\x12R\n" +
 	"\x0fCreateSnapshots\x12\x1d.keydb.CreateSnapshotsRequest\x1a\x1e.keydb.CreateSnapshotsResponse\"\x00\x124\n" +
 	"\x05Scale\x12\x13.keydb.ScaleRequest\x1a\x14.keydb.ScaleResponse\"\x00\x12L\n" +
-	"\rScaleComplete\x12\x1b.keydb.ScaleCompleteRequest\x1a\x1c.keydb.ScaleCompleteResponse\"\x00B#Z!github.com/rudderlabs/keydb/protob\x06proto3"
+	"\rScaleComplete\x12\x1b.keydb.ScaleCompleteRequest\x1a\x1c.keydb.ScaleCompleteResponse\"\x00\x12a\n" +
+	"\x14ClearLoadedSnapshots\x12\".keydb.ClearLoadedSnapshotsRequest\x1a#.keydb.ClearLoadedSnapshotsResponse\"\x00B#Z!github.com/rudderlabs/keydb/protob\x06proto3"
 
 var (
 	file_proto_keydb_proto_rawDescOnce sync.Once
@@ -956,23 +1058,25 @@ func file_proto_keydb_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_keydb_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_keydb_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_proto_keydb_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_proto_keydb_proto_goTypes = []any{
-	(ErrorCode)(0),                  // 0: keydb.ErrorCode
-	(*GetRequest)(nil),              // 1: keydb.GetRequest
-	(*GetResponse)(nil),             // 2: keydb.GetResponse
-	(*PutRequest)(nil),              // 3: keydb.PutRequest
-	(*PutResponse)(nil),             // 4: keydb.PutResponse
-	(*GetNodeInfoRequest)(nil),      // 5: keydb.GetNodeInfoRequest
-	(*GetNodeInfoResponse)(nil),     // 6: keydb.GetNodeInfoResponse
-	(*LoadSnapshotsRequest)(nil),    // 7: keydb.LoadSnapshotsRequest
-	(*LoadSnapshotsResponse)(nil),   // 8: keydb.LoadSnapshotsResponse
-	(*CreateSnapshotsRequest)(nil),  // 9: keydb.CreateSnapshotsRequest
-	(*CreateSnapshotsResponse)(nil), // 10: keydb.CreateSnapshotsResponse
-	(*ScaleRequest)(nil),            // 11: keydb.ScaleRequest
-	(*ScaleResponse)(nil),           // 12: keydb.ScaleResponse
-	(*ScaleCompleteRequest)(nil),    // 13: keydb.ScaleCompleteRequest
-	(*ScaleCompleteResponse)(nil),   // 14: keydb.ScaleCompleteResponse
+	(ErrorCode)(0),                       // 0: keydb.ErrorCode
+	(*GetRequest)(nil),                   // 1: keydb.GetRequest
+	(*GetResponse)(nil),                  // 2: keydb.GetResponse
+	(*PutRequest)(nil),                   // 3: keydb.PutRequest
+	(*PutResponse)(nil),                  // 4: keydb.PutResponse
+	(*GetNodeInfoRequest)(nil),           // 5: keydb.GetNodeInfoRequest
+	(*GetNodeInfoResponse)(nil),          // 6: keydb.GetNodeInfoResponse
+	(*LoadSnapshotsRequest)(nil),         // 7: keydb.LoadSnapshotsRequest
+	(*LoadSnapshotsResponse)(nil),        // 8: keydb.LoadSnapshotsResponse
+	(*CreateSnapshotsRequest)(nil),       // 9: keydb.CreateSnapshotsRequest
+	(*CreateSnapshotsResponse)(nil),      // 10: keydb.CreateSnapshotsResponse
+	(*ScaleRequest)(nil),                 // 11: keydb.ScaleRequest
+	(*ScaleResponse)(nil),                // 12: keydb.ScaleResponse
+	(*ScaleCompleteRequest)(nil),         // 13: keydb.ScaleCompleteRequest
+	(*ScaleCompleteResponse)(nil),        // 14: keydb.ScaleCompleteResponse
+	(*ClearLoadedSnapshotsRequest)(nil),  // 15: keydb.ClearLoadedSnapshotsRequest
+	(*ClearLoadedSnapshotsResponse)(nil), // 16: keydb.ClearLoadedSnapshotsResponse
 }
 var file_proto_keydb_proto_depIdxs = []int32{
 	0,  // 0: keydb.GetResponse.error_code:type_name -> keydb.ErrorCode
@@ -985,15 +1089,17 @@ var file_proto_keydb_proto_depIdxs = []int32{
 	9,  // 7: keydb.NodeService.CreateSnapshots:input_type -> keydb.CreateSnapshotsRequest
 	11, // 8: keydb.NodeService.Scale:input_type -> keydb.ScaleRequest
 	13, // 9: keydb.NodeService.ScaleComplete:input_type -> keydb.ScaleCompleteRequest
-	2,  // 10: keydb.NodeService.Get:output_type -> keydb.GetResponse
-	4,  // 11: keydb.NodeService.Put:output_type -> keydb.PutResponse
-	6,  // 12: keydb.NodeService.GetNodeInfo:output_type -> keydb.GetNodeInfoResponse
-	8,  // 13: keydb.NodeService.LoadSnapshots:output_type -> keydb.LoadSnapshotsResponse
-	10, // 14: keydb.NodeService.CreateSnapshots:output_type -> keydb.CreateSnapshotsResponse
-	12, // 15: keydb.NodeService.Scale:output_type -> keydb.ScaleResponse
-	14, // 16: keydb.NodeService.ScaleComplete:output_type -> keydb.ScaleCompleteResponse
-	10, // [10:17] is the sub-list for method output_type
-	3,  // [3:10] is the sub-list for method input_type
+	15, // 10: keydb.NodeService.ClearLoadedSnapshots:input_type -> keydb.ClearLoadedSnapshotsRequest
+	2,  // 11: keydb.NodeService.Get:output_type -> keydb.GetResponse
+	4,  // 12: keydb.NodeService.Put:output_type -> keydb.PutResponse
+	6,  // 13: keydb.NodeService.GetNodeInfo:output_type -> keydb.GetNodeInfoResponse
+	8,  // 14: keydb.NodeService.LoadSnapshots:output_type -> keydb.LoadSnapshotsResponse
+	10, // 15: keydb.NodeService.CreateSnapshots:output_type -> keydb.CreateSnapshotsResponse
+	12, // 16: keydb.NodeService.Scale:output_type -> keydb.ScaleResponse
+	14, // 17: keydb.NodeService.ScaleComplete:output_type -> keydb.ScaleCompleteResponse
+	16, // 18: keydb.NodeService.ClearLoadedSnapshots:output_type -> keydb.ClearLoadedSnapshotsResponse
+	11, // [11:19] is the sub-list for method output_type
+	3,  // [3:11] is the sub-list for method input_type
 	3,  // [3:3] is the sub-list for extension type_name
 	3,  // [3:3] is the sub-list for extension extendee
 	0,  // [0:3] is the sub-list for field type_name
@@ -1010,7 +1116,7 @@ func file_proto_keydb_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_keydb_proto_rawDesc), len(file_proto_keydb_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   14,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

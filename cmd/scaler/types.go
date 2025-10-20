@@ -34,6 +34,11 @@ type LoadSnapshotsRequest struct {
 	MaxConcurrency uint32   `json:"max_concurrency"`
 }
 
+// ClearLoadedSnapshotsRequest represents a request to clear loaded snapshots checkpoint
+type ClearLoadedSnapshotsRequest struct {
+	NodeID uint32 `json:"node_id"`
+}
+
 // ScaleRequest represents a request to scale the cluster
 type ScaleRequest struct {
 	NodeIDs []uint32 `json:"node_ids"`

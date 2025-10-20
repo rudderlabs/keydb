@@ -28,6 +28,9 @@ service NodeService {
 
   // ScaleComplete is used by the scaler to notify all nodes that the scale is complete and they can now start serving traffic again
   rpc ScaleComplete(ScaleCompleteRequest) returns (ScaleCompleteResponse) {}
+
+  // ClearLoadedSnapshots clears all loaded snapshot checkpoints
+  rpc ClearLoadedSnapshots(ClearLoadedSnapshotsRequest) returns (ClearLoadedSnapshotsResponse) {}
 }
 
 // NodeService message definitions
@@ -129,4 +132,12 @@ message ScaleCompleteRequest {}
 
 message ScaleCompleteResponse {
   bool success = 1;
+}
+
+message ClearLoadedSnapshotsRequest {}
+
+message ClearLoadedSnapshotsResponse {
+  bool success = 1;
+  string error_message = 2; // Error message if the operation failed
+  uint32 node_id = 3; // ID of the node that processed the request
 }
