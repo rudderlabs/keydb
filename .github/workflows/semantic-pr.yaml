@@ -11,6 +11,9 @@ on:
       - ready_for_review
       - synchronize
 
+permissions:
+  contents: read
+
 jobs:
   main:
     name: Validate PR title
