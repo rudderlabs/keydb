@@ -20,6 +20,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/keydb/internal/hash"
@@ -157,8 +158,31 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		}
 	}()
 
-	// create a gRPC server with latency interceptors
+	// Configure gRPC server keepalive parameters
+	grpcKeepaliveMinTime := conf.GetDuration("grpc.keepalive.minTime", 10, time.Second)
+	grpcKeepalivePermitWithoutStream := conf.GetBool("grpc.keepalive.permitWithoutStream", true)
+	grpcKeepaliveTime := conf.GetDuration("grpc.keepalive.time", 60, time.Second)
+	grpcKeepaliveTimeout := conf.GetDuration("grpc.keepalive.timeout", 20, time.Second)
+
+	log.Infon("gRPC server keepalive configuration",
+		logger.NewDurationField("enforcementMinTime", grpcKeepaliveMinTime),
+		logger.NewBoolField("enforcementPermitWithoutStream", grpcKeepalivePermitWithoutStream),
+		logger.NewDurationField("serverTime", grpcKeepaliveTime),
+		logger.NewDurationField("serverTimeout", grpcKeepaliveTimeout),
+	)
+
+	// create a gRPC server with latency interceptors and keepalive parameters
 	server := grpc.NewServer(
+		// Keepalive enforcement policy - controls what the server requires from clients
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             grpcKeepaliveMinTime,
+			PermitWithoutStream: grpcKeepalivePermitWithoutStream,
+		}),
+		// Keepalive parameters - controls server's own keepalive behavior
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    grpcKeepaliveTime,
+			Timeout: grpcKeepaliveTimeout,
+		}),
 		// Unary interceptor to record latency for unary RPCs
 		grpc.UnaryInterceptor(
 			func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (
