@@ -6,6 +6,7 @@ import (
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -723,4 +724,102 @@ func getScaler(t testing.TB, totalHashRanges uint32, addresses ...string) *scale
 	t.Cleanup(func() { _ = op.Close() })
 
 	return op
+}
+
+func TestListSnapshotsSorting(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, newConf func() *config.Config) {
+		t.Parallel()
+
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		totalHashRanges := uint32(4)
+		node0Conf := newConf()
+		node0, _ := getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, node0Conf)
+
+		// Create snapshot files with out-of-order from/to values for hash range 3
+		// Expected order after sorting: hr_3_s_0_100, hr_3_s_100_200, hr_3_s_200_300
+		snapshotFiles := []struct {
+			filename string
+			from     uint64
+			to       uint64
+		}{
+			{defaultBackupFolderName + "/hr_3_s_200_300.snapshot", 200, 300},
+			{defaultBackupFolderName + "/hr_3_s_0_100.snapshot", 0, 100},
+			{defaultBackupFolderName + "/hr_3_s_100_200.snapshot", 100, 200},
+			// Add some files for hash range 1 to test sorting across multiple ranges
+			{defaultBackupFolderName + "/hr_1_s_50_150.snapshot", 50, 150},
+			{defaultBackupFolderName + "/hr_1_s_0_50.snapshot", 0, 50},
+		}
+
+		// Upload empty snapshot files to minio
+		for _, sf := range snapshotFiles {
+			_, err := cloudStorage.UploadReader(ctx, sf.filename, strings.NewReader(""))
+			require.NoError(t, err)
+		}
+
+		// Call listSnapshots to get the sorted results
+		totalFiles, filesByHashRange, err := node0.listSnapshots(ctx)
+		require.NoError(t, err)
+		require.Equal(t, 5, totalFiles)
+		require.Equal(t, map[uint32][]snapshotFile{
+			1: {
+				{
+					filename:  defaultBackupFolderName + "/hr_1_s_0_50.snapshot",
+					hashRange: 1,
+					from:      0,
+					to:        50,
+				},
+				{
+					filename:  defaultBackupFolderName + "/hr_1_s_50_150.snapshot",
+					hashRange: 1,
+					from:      50,
+					to:        150,
+				},
+			},
+			3: {
+				{
+					filename:  defaultBackupFolderName + "/hr_3_s_0_100.snapshot",
+					hashRange: 3,
+					from:      0,
+					to:        100,
+				},
+				{
+					filename:  defaultBackupFolderName + "/hr_3_s_100_200.snapshot",
+					hashRange: 3,
+					from:      100,
+					to:        200,
+				},
+				{
+					filename:  defaultBackupFolderName + "/hr_3_s_200_300.snapshot",
+					hashRange: 3,
+					from:      200,
+					to:        300,
+				},
+			},
+		}, filesByHashRange)
+
+		cancel()
+		node0.Close()
+	}
+
+	run(t, func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		return conf
+	})
 }
