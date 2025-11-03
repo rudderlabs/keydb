@@ -8,7 +8,6 @@ import (
 	"io"
 	"path"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,21 +81,19 @@ type Service struct {
 
 	config Config
 
-	// mu protects cache, scaling, since, lastSnapshotTime and hasher
+	// mu protects cache, scaling, lastSnapshotTime and hasher
 	mu               sync.RWMutex
 	cache            Cache
 	scaling          bool
-	since            map[uint32]uint64
 	lastSnapshotTime time.Time
 	hasher           *hash.Hash
 
-	now                   func() time.Time
-	maxFilesToList        int64
-	forceSkipFilesListing config.ValueLoader[bool]
-	waitGroup             sync.WaitGroup
-	storage               cloudStorage
-	stats                 stats.Stats
-	logger                logger.Logger
+	now            func() time.Time
+	maxFilesToList int64
+	waitGroup      sync.WaitGroup
+	storage        cloudStorage
+	stats          stats.Stats
+	logger         logger.Logger
 
 	metrics struct {
 		getKeysCounters             map[uint32]stats.Counter
@@ -183,14 +180,12 @@ func NewService(
 	}
 
 	service := &Service{
-		now:                   time.Now,
-		config:                config,
-		storage:               storage,
-		since:                 make(map[uint32]uint64),
-		maxFilesToList:        config.MaxFilesToList,
-		forceSkipFilesListing: kitConf.GetReloadableBoolVar(false, "NodeService.forceSkipFilesListing"),
-		hasher:                hash.New(config.ClusterSize, config.TotalHashRanges),
-		stats:                 stat,
+		now:            time.Now,
+		config:         config,
+		storage:        storage,
+		maxFilesToList: config.MaxFilesToList,
+		hasher:         hash.New(config.ClusterSize, config.TotalHashRanges),
+		stats:          stat,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
 			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
@@ -351,80 +346,14 @@ func (s *Service) initCaches(
 		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
 	}
 
-	// List all files in the bucket
-	var (
-		err   error
-		files []*filemanager.FileInfo
-	)
-	if !s.forceSkipFilesListing.Load() {
-		list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
-		files, err = list.Next()
-		if err != nil {
-			return fmt.Errorf("failed to list snapshot files: %w", err)
-		}
-	}
-	if len(files) == 0 {
-		s.logger.Infon("No snapshots found, skipping caches initialization")
-		return nil
-	}
-
-	var selected map[uint32]struct{}
-	if len(selectedHashRanges) > 0 {
-		selected = make(map[uint32]struct{}, len(selectedHashRanges))
-		for _, r := range selectedHashRanges {
-			selected[r] = struct{}{}
-		}
-	} else { // no hash range was selected, download the data for all the ranges handled by this node
-		selected = currentRanges
-	}
-
-	totalFiles := int64(0)
-	filesByHashRange := make(map[uint32][]string, len(files))
-	for _, file := range files {
-		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
-		if len(matches) != 4 {
-			continue
-		}
-		hashRangeInt, err := strconv.Atoi(matches[1])
-		if err != nil {
-			s.logger.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
-			continue
-		}
-		hashRange := uint32(hashRangeInt)
-		if len(selectedHashRanges) > 0 {
-			if _, shouldHandle := selected[hashRange]; !shouldHandle {
-				s.logger.Warnn("Ignoring snapshot file for hash range since it was not selected")
-				continue
-			}
-		}
-		since, err := strconv.Atoi(matches[3]) // getting "to", not "from"
-		if err != nil {
-			s.logger.Warnn("Invalid snapshot filename (since)", logger.NewStringField("filename", file.Key))
-			continue
-		}
-		if s.since[hashRange] < uint64(since) {
-			s.since[hashRange] = uint64(since)
-		}
-		if filesByHashRange[hashRange] == nil {
-			filesByHashRange[hashRange] = make([]string, 0, 1)
-		}
-
-		s.logger.Debugn("Found snapshot file",
-			logger.NewIntField("hashRange", int64(hashRange)),
-			logger.NewStringField("filename", file.Key),
-		)
-		filesByHashRange[hashRange] = append(filesByHashRange[hashRange], file.Key)
-		totalFiles++
-	}
-
 	if !download {
-		// We still had to do the above in order to populate the "since" map
-		s.logger.Infon("Downloading disabled, skipping snapshots initialization")
+		s.logger.Infon("Downloading disabled, skipping caches initialization")
 		return nil
 	}
 
-	for i := range filesByHashRange {
-		sort.Strings(filesByHashRange[i])
+	totalFiles, filesByHashRange, err := s.listSnapshots(ctx, selectedHashRanges...)
+	if err != nil {
+		return fmt.Errorf("list snapshots: %w", err)
 	}
 
 	if maxConcurrency == 0 {
@@ -436,7 +365,7 @@ func (s *Service) initCaches(
 		loadDone            = make(chan error, 1)
 		filesLoaded         int64
 		group, gCtx         = kitsync.NewEagerGroup(ctx, 0)
-		readers             = make(chan snapshot, maxConcurrency)
+		readers             = make(chan snapshotReader, maxConcurrency)
 	)
 	defer loadCancel()
 	go func() {
@@ -445,7 +374,7 @@ func (s *Service) initCaches(
 			s.logger.Infon("Loading downloaded snapshots",
 				logger.NewIntField("range", int64(sn.hashRange)),
 				logger.NewStringField("filename", sn.filename),
-				logger.NewIntField("totalFiles", totalFiles),
+				logger.NewIntField("totalFiles", int64(totalFiles)),
 				logger.NewFloatField("loadingPercentage",
 					float64(filesLoaded)*100/float64(totalFiles),
 				),
@@ -469,12 +398,12 @@ func (s *Service) initCaches(
 		for _, snapshotFile := range snapshotFiles {
 			group.Go(func() error {
 				s.logger.Infon("Starting download of snapshot file from cloud storage",
-					logger.NewStringField("filename", snapshotFile),
+					logger.NewStringField("filename", snapshotFile.filename),
 				)
 
 				startDownload := time.Now()
 				buf := manager.NewWriteAtBuffer([]byte{})
-				err := s.storage.Download(gCtx, buf, snapshotFile)
+				err := s.storage.Download(gCtx, buf, snapshotFile.filename)
 				if err != nil {
 					if errors.Is(err, filemanager.ErrKeyNotFound) {
 						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
@@ -487,8 +416,8 @@ func (s *Service) initCaches(
 				select {
 				case <-gCtx.Done():
 					return gCtx.Err()
-				case readers <- snapshot{
-					filename:  snapshotFile,
+				case readers <- snapshotReader{
+					filename:  snapshotFile.filename,
 					hashRange: r,
 					reader:    bytes.NewReader(buf.Bytes()),
 				}:
@@ -522,6 +451,83 @@ func (s *Service) initCaches(
 	)
 
 	return nil
+}
+
+func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...uint32) (
+	int,
+	map[uint32][]snapshotFile,
+	error,
+) {
+	// List all files in the bucket
+	list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
+	files, err := list.Next()
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to list snapshot files: %w", err)
+	}
+	if len(files) == 0 {
+		s.logger.Infon("No snapshots found, skipping caches initialization")
+		return 0, nil, nil
+	}
+
+	var selectedRangesMap map[uint32]struct{}
+	if len(selectedHashRanges) > 0 {
+		selectedRangesMap = make(map[uint32]struct{}, len(selectedHashRanges))
+		for _, r := range selectedHashRanges {
+			selectedRangesMap[r] = struct{}{}
+		}
+	} else { // no hash range was selected, download the data for all the ranges handled by this node
+		selectedRangesMap = s.getCurrentRanges()
+	}
+
+	totalFiles := 0
+	filesByHashRange := make(map[uint32][]snapshotFile, len(files))
+	for _, file := range files {
+		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
+		if len(matches) != 4 {
+			continue
+		}
+		hashRangeInt, err := strconv.Atoi(matches[1])
+		if err != nil {
+			s.logger.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
+			continue
+		}
+		hashRange := uint32(hashRangeInt)
+		if len(selectedHashRanges) > 0 {
+			if _, shouldHandle := selectedRangesMap[hashRange]; !shouldHandle {
+				s.logger.Warnn("Ignoring snapshot file for hash range since it was not selected")
+				continue
+			}
+		}
+		from, err := strconv.ParseUint(matches[2], 10, 64)
+		if err != nil {
+			s.logger.Warnn("Invalid snapshot filename (from)", logger.NewStringField("filename", file.Key))
+			continue
+		}
+		to, err := strconv.ParseUint(matches[3], 10, 64)
+		if err != nil {
+			s.logger.Warnn("Invalid snapshot filename (to)", logger.NewStringField("filename", file.Key))
+			continue
+		}
+		if filesByHashRange[hashRange] == nil {
+			filesByHashRange[hashRange] = make([]snapshotFile, 0, 1)
+		}
+
+		s.logger.Debugn("Found snapshot file",
+			logger.NewIntField("hashRange", int64(hashRange)),
+			logger.NewStringField("filename", file.Key),
+			logger.NewIntField("from", int64(from)),
+			logger.NewIntField("to", int64(to)),
+		)
+		filesByHashRange[hashRange] = append(filesByHashRange[hashRange], snapshotFile{
+			filename:  file.Key,
+			hashRange: hashRange,
+			from:      from,
+			to:        to,
+		})
+		totalFiles++
+	}
+
+	return totalFiles, filesByHashRange, nil
 }
 
 // Get implements the Get RPC method
@@ -576,7 +582,7 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 }
 
 // Put implements the Put RPC method
-func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
+func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -848,8 +854,25 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			i++
 		}
 	} else {
+		_, filesByHashRange, err := s.listSnapshots(ctx, selectedHashRanges...)
+		if err != nil {
+			return fmt.Errorf("list snapshots: %w", err)
+		}
+
+		since = make(map[uint32]uint64, len(currentRanges))
+		for r := range currentRanges {
+			since[r] = 0
+		}
+
+		for hr, files := range filesByHashRange {
+			for _, file := range files {
+				if since[hr] < file.to {
+					since[hr] = file.to
+				}
+			}
+		}
+
 		i := 0
-		since = s.since
 		for hr, ss := range since {
 			if i != 0 {
 				sinceLog.WriteString(",")
@@ -937,8 +960,6 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 		}
 		s.metrics.uploadSnapshotDuration.Since(startUpload)
 
-		s.since[hashRange] = newSince
-
 		if fullSync {
 			if len(filesToBeDeletedByHashRange[hashRange]) > 0 {
 				// Clearing up old files that are incremental updates.
@@ -988,8 +1009,14 @@ func getSnapshotFilenamePostfix(hashRange uint32, from, to uint64) string {
 		".snapshot"
 }
 
-type snapshot struct {
+type snapshotReader struct {
 	filename  string
 	hashRange uint32
 	reader    io.Reader
+}
+
+type snapshotFile struct {
+	filename  string
+	hashRange uint32
+	from, to  uint64
 }

@@ -265,9 +265,6 @@ func TestScaleUpAndDown(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
 		}, node1Conf)
-		require.Equal(t, map[uint32]uint64{0: 1, 1: 1}, node1.since,
-			"Node should populate the since map upon start-up",
-		)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
@@ -634,124 +631,6 @@ func TestSelectedSnapshots(t *testing.T) {
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, false, false}, exists)
-
-		cancel()
-		node0.Close()
-	}
-
-	t.Run("badger", func(t *testing.T) {
-		run(t, func() *config.Config {
-			conf := config.New()
-			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-			conf.Set("BadgerDB.Dedup.Compress", false)
-			return conf
-		})
-	})
-
-	t.Run("badger compressed", func(t *testing.T) {
-		run(t, func() *config.Config {
-			conf := config.New()
-			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-			conf.Set("BadgerDB.Dedup.Compress", true)
-			return conf
-		})
-	})
-}
-
-func TestForceSkipFilesListing(t *testing.T) {
-	pool, err := dockertest.NewPool("")
-	require.NoError(t, err)
-	pool.MaxWait = 1 * time.Minute
-
-	run := func(t *testing.T, newConf func() *config.Config) {
-		t.Parallel()
-
-		minioContainer, err := miniokit.Setup(pool, t)
-		require.NoError(t, err)
-
-		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		totalHashRanges := uint32(4)
-		node0Conf := newConf()
-		node0, node0Address := getService(ctx, t, cloudStorage, Config{
-			NodeID:           0,
-			ClusterSize:      1,
-			TotalHashRanges:  totalHashRanges,
-			SnapshotInterval: 60 * time.Second,
-		}, node0Conf)
-		c := getClient(t, totalHashRanges, node0Address)
-		op := getScaler(t, totalHashRanges, node0Address)
-
-		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
-
-		exists, err := c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
-		require.NoError(t, err)
-		require.Equal(t, []bool{true, true, true, false}, exists)
-
-		err = op.CreateSnapshots(ctx, 0, false)
-		require.NoError(t, err)
-
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
-			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
-			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
-		)
-
-		cancel()
-		node0.Close()
-
-		ctx, cancel = context.WithCancel(context.Background())
-		defer cancel()
-		node0Conf = newConf()
-		node0, node0Address = getService(ctx, t, cloudStorage, Config{
-			NodeID:           0,
-			ClusterSize:      1,
-			TotalHashRanges:  totalHashRanges,
-			SnapshotInterval: 60 * time.Second,
-		}, node0Conf)
-		c = getClient(t, totalHashRanges, node0Address)
-
-		require.Equal(t, map[uint32]uint64{1: 1, 2: 1, 3: 1}, node0.since,
-			"Without forceSkipFilesListing, the since map should be populated from existing snapshots on startup",
-		)
-
-		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
-
-		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
-		require.NoError(t, err)
-		require.Equal(t, []bool{true, true, true, false}, exists)
-
-		cancel()
-		node0.Close()
-
-		// Repeat with forceSkipFilesListing=true
-		ctx, cancel = context.WithCancel(context.Background())
-		defer cancel()
-		node0Conf = newConf()
-		node0Conf.Set("NodeService.forceSkipFilesListing", true)
-		node0, node0Address = getService(ctx, t, cloudStorage, Config{
-			NodeID:           0,
-			ClusterSize:      1,
-			TotalHashRanges:  totalHashRanges,
-			SnapshotInterval: 60 * time.Second,
-		}, node0Conf)
-		c = getClient(t, totalHashRanges, node0Address)
-
-		require.Empty(t, node0.since,
-			"With forceSkipFilesListing, the since map should NOT be populated on startup",
-		)
-
-		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
-
-		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
-		require.NoError(t, err)
-		require.Equal(t, []bool{false, false, false, false}, exists,
-			"With forceSkipFilesListing, snapshots cannot be loaded even with explicit LoadSnapshots call")
 
 		cancel()
 		node0.Close()
