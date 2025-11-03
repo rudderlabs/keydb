@@ -22,9 +22,10 @@ type InfoRequest struct {
 
 // CreateSnapshotsRequest represents a request to create snapshots
 type CreateSnapshotsRequest struct {
-	NodeID     uint32   `json:"node_id"`
-	FullSync   bool     `json:"full_sync"`
-	HashRanges []uint32 `json:"hash_ranges,omitempty"`
+	NodeID                             uint32   `json:"node_id"`
+	FullSync                           bool     `json:"full_sync"`
+	HashRanges                         []uint32 `json:"hash_ranges,omitempty"`
+	DisableCreateSnapshotsSequentially bool     `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 
 // LoadSnapshotsRequest represents a request to load snapshots
@@ -67,20 +68,22 @@ type AutoScaleRequest struct {
 	NewNodesAddresses []string `json:"new_nodes_addresses"`
 	// FullSync indicates whether to perform a full synchronization during snapshot creation.
 	// When true, all data will be included in snapshots regardless of incremental changes.
-	FullSync                    bool   `json:"full_sync,omitempty"`
-	SkipCreateSnapshots         bool   `json:"skip_create_snapshots,omitempty"`
-	LoadSnapshotsMaxConcurrency uint32 `json:"load_snapshots_max_concurrency,omitempty"`
+	FullSync                           bool   `json:"full_sync,omitempty"`
+	SkipCreateSnapshots                bool   `json:"skip_create_snapshots,omitempty"`
+	LoadSnapshotsMaxConcurrency        uint32 `json:"load_snapshots_max_concurrency,omitempty"`
+	DisableCreateSnapshotsSequentially bool   `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 
 // HashRangeMovementsRequest represents a request to preview hash range movements
 type HashRangeMovementsRequest struct {
-	OldClusterSize              uint32 `json:"old_cluster_size"`
-	NewClusterSize              uint32 `json:"new_cluster_size"`
-	TotalHashRanges             uint32 `json:"total_hash_ranges"`
-	Upload                      bool   `json:"upload,omitempty"`
-	Download                    bool   `json:"download,omitempty"`
-	FullSync                    bool   `json:"full_sync,omitempty"`
-	LoadSnapshotsMaxConcurrency uint32 `json:"load_snapshots_max_concurrency,omitempty"`
+	OldClusterSize                     uint32 `json:"old_cluster_size"`
+	NewClusterSize                     uint32 `json:"new_cluster_size"`
+	TotalHashRanges                    uint32 `json:"total_hash_ranges"`
+	Upload                             bool   `json:"upload,omitempty"`
+	Download                           bool   `json:"download,omitempty"`
+	FullSync                           bool   `json:"full_sync,omitempty"`
+	LoadSnapshotsMaxConcurrency        uint32 `json:"load_snapshots_max_concurrency,omitempty"`
+	DisableCreateSnapshotsSequentially bool   `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 
 type HashRangeMovementsResponse struct {
