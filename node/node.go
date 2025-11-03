@@ -8,6 +8,7 @@ import (
 	"io"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -525,6 +526,16 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...uint3
 			to:        to,
 		})
 		totalFiles++
+	}
+
+	// Sort each slice by "from" and "to"
+	for hashRange := range filesByHashRange {
+		sort.Slice(filesByHashRange[hashRange], func(i, j int) bool {
+			if filesByHashRange[hashRange][i].from != filesByHashRange[hashRange][j].from {
+				return filesByHashRange[hashRange][i].from < filesByHashRange[hashRange][j].from
+			}
+			return filesByHashRange[hashRange][i].to < filesByHashRange[hashRange][j].to
+		})
 	}
 
 	return totalFiles, filesByHashRange, nil
