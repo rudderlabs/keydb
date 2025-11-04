@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.4](https://github.com/rudderlabs/keydb/compare/v1.2.3...v1.2.4) (2025-11-04)
+
+
+### Miscellaneous
+
+* apply security best practices from step security ([#83](https://github.com/rudderlabs/keydb/issues/83)) ([9ee793e](https://github.com/rudderlabs/keydb/commit/9ee793eef3d014e3a0cc77cd3a454c5c8c429dc7))
+* apply security best practices from step security ([#86](https://github.com/rudderlabs/keydb/issues/86)) ([7fca11b](https://github.com/rudderlabs/keydb/commit/7fca11b3f79b0a2c63e9f78d24b3af10293c9490))
+
 ## [1.2.3](https://github.com/rudderlabs/keydb/compare/v1.2.2...v1.2.3) (2025-10-16)
 
 
