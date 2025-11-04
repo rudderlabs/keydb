@@ -4,6 +4,8 @@ All the rules below are not optional and must be followed to the letter.
 
 # Go Rules
 
+NEVER use `go build`, use `go run` instead.
+
 ## rudder-go-kit
 
 https://github.com/rudderlabs/rudder-go-kit opinionated library for rudderstack. Should be used for all Golang projects,
