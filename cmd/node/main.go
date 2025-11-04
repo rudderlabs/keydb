@@ -104,6 +104,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	if len(nodeAddresses) == 0 {
 		return fmt.Errorf("no node addresses provided")
 	}
+	degradedNodes := conf.GetReloadableStringVar("", "degradedNodes")
 
 	nodeConfig := node.Config{
 		NodeID:          uint32(nodeID),
@@ -116,7 +117,20 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		GarbageCollectionInterval: conf.GetDuration("gcInterval", // node.DefaultGarbageCollectionInterval will be used
 			0, time.Nanosecond,
 		),
-		Addresses:                 strings.Split(nodeAddresses, ","),
+		Addresses: strings.Split(nodeAddresses, ","),
+		DegradedNodes: func() []bool {
+			raw := degradedNodes.Load()
+			v := strings.Split(raw, ",")
+			b := make([]bool, len(v))
+			for i, s := range v {
+				var err error
+				b[i], err = strconv.ParseBool(s)
+				if err != nil {
+					log.Warnn("Failed to parse degraded node", logger.NewStringField("v", raw), obskit.Error(err))
+				}
+			}
+			return b
+		},
 		LogTableStructureDuration: conf.GetDuration("logTableStructureDuration", 10, time.Minute),
 		BackupFolderName:          conf.GetString("KUBE_NAMESPACE", ""),
 	}

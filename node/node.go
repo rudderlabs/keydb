@@ -69,6 +69,9 @@ type Config struct {
 	// Addresses is a list of node addresses that this node will advertise to clients
 	Addresses []string
 
+	// DegradedNodes is a list of nodes that are considered degraded and should not be used for reads and writes.
+	DegradedNodes func() []bool
+
 	// logTableStructureDuration defines the duration for which the table structure is logged
 	LogTableStructureDuration time.Duration
 
@@ -542,7 +545,7 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...uint3
 }
 
 // Get implements the Get RPC method
-func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
+func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
