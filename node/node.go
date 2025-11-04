@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/rudderlabs/keydb/internal/cache/badger"
@@ -69,6 +71,9 @@ type Config struct {
 	// Addresses is a list of node addresses that this node will advertise to clients
 	Addresses []string
 
+	// DegradedMode indicates if this node is in degraded mode (not serving GET/PUT traffic)
+	DegradedMode bool
+
 	// logTableStructureDuration defines the duration for which the table structure is logged
 	LogTableStructureDuration time.Duration
 
@@ -82,12 +87,13 @@ type Service struct {
 
 	config Config
 
-	// mu protects cache, scaling, lastSnapshotTime and hasher
+	// mu protects cache, scaling, lastSnapshotTime, hasher and degradedNodes
 	mu               sync.RWMutex
 	cache            Cache
 	scaling          bool
 	lastSnapshotTime time.Time
 	hasher           *hash.Hash
+	degradedNodes    map[string]bool // tracks which node addresses are in degraded mode
 
 	now            func() time.Time
 	maxFilesToList int64
@@ -186,6 +192,7 @@ func NewService(
 		storage:        storage,
 		maxFilesToList: config.MaxFilesToList,
 		hasher:         hash.New(config.ClusterSize, config.TotalHashRanges),
+		degradedNodes:  make(map[string]bool),
 		stats:          stat,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
@@ -246,6 +253,9 @@ func NewService(
 
 	service.waitGroup.Add(1)
 	go service.logCacheLevels(ctx)
+
+	service.waitGroup.Add(1)
+	go service.discoverPeerDegradedStatus(ctx)
 
 	return service, nil
 }
@@ -314,6 +324,99 @@ func (s *Service) logCacheLevels(ctx context.Context) {
 			)
 		}
 	}
+}
+
+// discoverPeerDegradedStatus periodically queries peer nodes to discover which are in degraded mode
+func (s *Service) discoverPeerDegradedStatus(ctx context.Context) {
+	defer s.waitGroup.Done()
+
+	// Discovery interval - check peers every 30 seconds
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	// Run discovery immediately on startup, then periodically
+	s.updatePeerDegradedStatus(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.updatePeerDegradedStatus(ctx)
+		}
+	}
+}
+
+// updatePeerDegradedStatus queries all peer nodes and updates the degradedNodes map
+func (s *Service) updatePeerDegradedStatus(ctx context.Context) {
+	s.mu.RLock()
+	addresses := s.config.Addresses
+	s.mu.RUnlock()
+
+	for _, addr := range addresses {
+		// Query this peer node
+		degraded, err := s.queryPeerDegradedStatus(ctx, addr)
+		if err != nil {
+			s.logger.Warnn("Failed to query peer degraded status",
+				logger.NewStringField("address", addr),
+				obskit.Error(err),
+			)
+			continue
+		}
+
+		// Update the degraded nodes map
+		s.mu.Lock()
+		if degraded {
+			s.degradedNodes[addr] = true
+		} else {
+			delete(s.degradedNodes, addr)
+		}
+		s.mu.Unlock()
+	}
+}
+
+// queryPeerDegradedStatus connects to a peer node and queries its degraded status
+func (s *Service) queryPeerDegradedStatus(ctx context.Context, addr string) (bool, error) {
+	// Create a context with timeout for the connection
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Create gRPC connection
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return false, fmt.Errorf("creating connection to %s: %w", addr, err)
+	}
+	defer func() {
+		if closeErr := conn.Close(); closeErr != nil {
+			s.logger.Warnn("Error closing peer connection",
+				logger.NewStringField("address", addr),
+				obskit.Error(closeErr),
+			)
+		}
+	}()
+
+	// Create client and query node info
+	client := pb.NewNodeServiceClient(conn)
+	resp, err := client.GetNodeInfo(queryCtx, &pb.GetNodeInfoRequest{})
+	if err != nil {
+		return false, fmt.Errorf("querying node info from %s: %w", addr, err)
+	}
+
+	return resp.DegradedMode, nil
+}
+
+// getNonDegradedAddresses returns the list of node addresses excluding degraded nodes
+// Caller must hold s.mu read lock
+func (s *Service) getNonDegradedAddresses() []string {
+	addresses := make([]string, 0, len(s.config.Addresses))
+	for _, addr := range s.config.Addresses {
+		if !s.degradedNodes[addr] {
+			addresses = append(addresses, addr)
+		}
+	}
+	return addresses
 }
 
 func (s *Service) getCurrentRanges() map[uint32]struct{} {
@@ -548,7 +651,12 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 
 	response := &pb.GetResponse{
 		ClusterSize:    s.config.ClusterSize,
-		NodesAddresses: s.config.Addresses,
+		NodesAddresses: s.getNonDegradedAddresses(),
+	}
+
+	if s.config.DegradedMode {
+		response.ErrorCode = pb.ErrorCode_DEGRADED
+		return response, nil
 	}
 
 	if s.scaling {
@@ -600,7 +708,12 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 	resp := &pb.PutResponse{
 		Success:        false,
 		ClusterSize:    s.config.ClusterSize,
-		NodesAddresses: s.config.Addresses,
+		NodesAddresses: s.getNonDegradedAddresses(),
+	}
+
+	if s.config.DegradedMode {
+		resp.ErrorCode = pb.ErrorCode_DEGRADED
+		return resp, nil
 	}
 
 	if s.scaling {
@@ -669,9 +782,10 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 	return &pb.GetNodeInfoResponse{
 		NodeId:                s.config.NodeID,
 		ClusterSize:           s.config.ClusterSize,
-		NodesAddresses:        s.config.Addresses,
+		NodesAddresses:        s.getNonDegradedAddresses(),
 		HashRanges:            hashRanges,
 		LastSnapshotTimestamp: uint64(s.lastSnapshotTime.Unix()),
+		DegradedMode:          s.config.DegradedMode,
 	}, nil
 }
 

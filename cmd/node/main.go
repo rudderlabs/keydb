@@ -117,6 +117,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			0, time.Nanosecond,
 		),
 		Addresses:                 strings.Split(nodeAddresses, ","),
+		DegradedMode:              conf.GetBool("degradedMode", false),
 		LogTableStructureDuration: conf.GetDuration("logTableStructureDuration", 10, time.Minute),
 		BackupFolderName:          conf.GetString("KUBE_NAMESPACE", ""),
 	}
@@ -129,6 +130,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewIntField("totalHashRanges", int64(nodeConfig.TotalHashRanges)),
 		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
 		logger.NewIntField("noOfAddresses", int64(len(nodeConfig.Addresses))),
+		logger.NewBoolField("degradedMode", nodeConfig.DegradedMode),
 	)
 
 	service, err := node.NewService(ctx, nodeConfig, cloudStorage, conf, stat, log.Child("service"))
