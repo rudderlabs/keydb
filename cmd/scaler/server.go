@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,13 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+)
+
+const (
+	totalSnapshotsToLoadMetricName     = "scaler_total_snapshots_to_load"
+	currentSnapshotsToLoadMetricName   = "scaler_current_snapshots_loaded"
+	totalSnapshotsToCreateMetricName   = "scaler_total_snapshots_to_create"
+	currentSnapshotsToCreateMetricName = "scaler_current_snapshots_created"
 )
 
 type scalerClient interface {
@@ -223,11 +231,27 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Initialize metrics
+	nodeIDStr := strconv.FormatInt(int64(req.NodeID), 10)
+	totalSnapshotsToLoad := s.stat.NewTaggedStat(totalSnapshotsToLoadMetricName, stats.GaugeType, stats.Tags{
+		"nodeId": nodeIDStr,
+	})
+	totalSnapshotsToLoad.Observe(float64(len(req.HashRanges)))
+	defer totalSnapshotsToLoad.Observe(0)
+
+	currentSnapshotsLoaded := s.stat.NewTaggedStat(currentSnapshotsToLoadMetricName, stats.GaugeType, stats.Tags{
+		"nodeId": nodeIDStr,
+	})
+	currentSnapshotsLoaded.Observe(0)
+
 	// Load snapshots from cloud storage
 	if err := s.scaler.LoadSnapshots(r.Context(), req.NodeID, req.MaxConcurrency, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// Update metrics after successful load
+	currentSnapshotsLoaded.Observe(float64(len(req.HashRanges)))
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
@@ -794,9 +818,27 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 func (s *httpServer) createSnapshotsWithProgress(
 	ctx context.Context, nodeID uint32, fullSync, disableSequential bool, hashRanges []uint32,
 ) error {
+	// Initialize metrics
+	nodeIDStr := strconv.FormatInt(int64(nodeID), 10)
+	totalSnapshotsToCreate := s.stat.NewTaggedStat(totalSnapshotsToCreateMetricName, stats.GaugeType, stats.Tags{
+		"nodeId": nodeIDStr,
+	})
+	totalSnapshotsToCreate.Observe(float64(len(hashRanges)))
+	defer totalSnapshotsToCreate.Observe(0)
+
+	currentSnapshotsCreated := s.stat.NewTaggedStat(currentSnapshotsToCreateMetricName, stats.GaugeType, stats.Tags{
+		"nodeId": nodeIDStr,
+	})
+	currentSnapshotsCreated.Observe(0)
+
 	if disableSequential || len(hashRanges) == 0 {
 		// Call with all hash ranges at once (existing behavior)
-		return s.scaler.CreateSnapshots(ctx, nodeID, fullSync, hashRanges...)
+		err := s.scaler.CreateSnapshots(ctx, nodeID, fullSync, hashRanges...)
+		if err != nil {
+			return err
+		}
+		currentSnapshotsCreated.Observe(float64(len(hashRanges)))
+		return nil
 	}
 
 	// Call CreateSnapshots once for each hash range
@@ -811,6 +853,9 @@ func (s *httpServer) createSnapshotsWithProgress(
 		if err := s.scaler.CreateSnapshots(ctx, nodeID, fullSync, hashRange); err != nil {
 			return fmt.Errorf("creating snapshot for hash range %d: %w", hashRange, err)
 		}
+
+		// Update progress metric
+		currentSnapshotsCreated.Observe(float64(i + 1))
 	}
 
 	return nil
