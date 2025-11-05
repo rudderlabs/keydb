@@ -1566,7 +1566,7 @@ func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, rp scaler.Retry
 
 	addr := fmt.Sprintf(":%d", freePort)
 
-	opServer := newHTTPServer(c, op, addr, log)
+	opServer := newHTTPServer(c, op, addr, stats.NOP, log)
 	go func() {
 		err := opServer.Start(context.Background())
 		if !errors.Is(err, http.ErrServerClosed) {
