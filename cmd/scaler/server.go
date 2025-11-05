@@ -18,6 +18,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
@@ -38,14 +39,18 @@ type httpServer struct {
 	client *client.Client
 	scaler scalerClient
 	server *http.Server
+	stat   stats.Stats
 	logger logger.Logger
 }
 
 // newHTTPServer creates a new HTTP server
-func newHTTPServer(client *client.Client, scaler *scaler.Client, addr string, log logger.Logger) *httpServer {
+func newHTTPServer(
+	client *client.Client, scaler *scaler.Client, addr string, stat stats.Stats, log logger.Logger,
+) *httpServer {
 	s := &httpServer{
 		client: client,
 		scaler: scaler,
+		stat:   stat,
 		logger: log,
 	}
 

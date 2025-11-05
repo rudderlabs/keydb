@@ -16,8 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rudderlabs/keydb/release"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
@@ -26,6 +24,7 @@ import (
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/node"
 	pb "github.com/rudderlabs/keydb/proto"
+	"github.com/rudderlabs/keydb/release"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	_ "github.com/rudderlabs/rudder-go-kit/maxprocs"
