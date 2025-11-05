@@ -1873,7 +1873,7 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	}, node1Conf)
 
 	// Step 4: Update degradedNodes - mark node 1 as degraded
-	degradedNodes = append(degradedNodes, true)
+	degradedNodes = append(degradedNodes, true) //nolint:makezero
 
 	// Verify that node 1 is in degraded mode
 	resp, err := node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
@@ -1939,7 +1939,9 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
-	require.Len(t, infoResponse.NodesAddresses, 2, "Both nodes should be in NodesAddresses after node1 is no longer degraded")
+	require.Len(t, infoResponse.NodesAddresses, 2,
+		"Both nodes should be in NodesAddresses after node1 is no longer degraded",
+	)
 	require.Contains(t, infoResponse.NodesAddresses, node0Address)
 	require.Contains(t, infoResponse.NodesAddresses, node1Address)
 
