@@ -551,10 +551,10 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 
 	response := &pb.GetResponse{
 		ClusterSize:    s.config.ClusterSize,
-		NodesAddresses: s.config.Addresses,
+		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.scaling {
+	if s.isDegraded() || s.scaling {
 		s.metrics.errScalingCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_SCALING
 		return response, nil
@@ -603,10 +603,10 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 	resp := &pb.PutResponse{
 		Success:        false,
 		ClusterSize:    s.config.ClusterSize,
-		NodesAddresses: s.config.Addresses,
+		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.scaling {
+	if s.isDegraded() || s.scaling {
 		s.metrics.errScalingCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_SCALING
 		return resp, nil
@@ -649,7 +649,7 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 }
 
 // GetNodeInfo implements the GetNodeInfo RPC method
-func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (*pb.GetNodeInfoResponse, error) {
+func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*pb.GetNodeInfoResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -672,7 +672,7 @@ func (s *Service) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (
 	return &pb.GetNodeInfoResponse{
 		NodeId:                s.config.NodeID,
 		ClusterSize:           s.config.ClusterSize,
-		NodesAddresses:        s.config.Addresses,
+		NodesAddresses:        s.getNonDegradedAddresses(),
 		HashRanges:            hashRanges,
 		LastSnapshotTimestamp: uint64(s.lastSnapshotTime.Unix()),
 	}, nil
@@ -1011,6 +1011,43 @@ func (s *Service) GetKeysByHashRange(keys []string) (map[uint32][]string, error)
 
 func (s *Service) GetKeysByHashRangeWithIndexes(keys []string) (map[uint32][]string, map[string]int, error) {
 	return s.hasher.GetKeysByHashRangeWithIndexes(keys, s.config.NodeID)
+}
+
+// isDegraded checks if the current node is in degraded mode
+func (s *Service) isDegraded() bool {
+	if s.config.DegradedNodes == nil {
+		return false
+	}
+	degradedNodes := s.config.DegradedNodes()
+	if len(degradedNodes) == 0 {
+		return false
+	}
+	if int(s.config.NodeID) >= len(degradedNodes) {
+		s.logger.Warn("Node ID out of range for degraded nodes list",
+			logger.NewIntField("nodeId", int64(s.config.NodeID)),
+			logger.NewIntField("degradedNodes", int64(len(degradedNodes))),
+		)
+		return false
+	}
+	return degradedNodes[s.config.NodeID]
+}
+
+// getNonDegradedAddresses returns the list of node addresses excluding degraded nodes
+func (s *Service) getNonDegradedAddresses() []string {
+	if s.config.DegradedNodes == nil {
+		return s.config.Addresses
+	}
+	degradedNodes := s.config.DegradedNodes()
+	if len(degradedNodes) == 0 {
+		return s.config.Addresses
+	}
+	nonDegraded := make([]string, 0, len(s.config.Addresses))
+	for i, addr := range s.config.Addresses {
+		if i >= len(degradedNodes) || !degradedNodes[i] {
+			nonDegraded = append(nonDegraded, addr)
+		}
+	}
+	return nonDegraded
 }
 
 func (s *Service) getSnapshotFilenamePrefix() string {
