@@ -1847,14 +1847,20 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	}, node0Address)
 
 	// Step 2: Add keys via Put and verify them via Get
+	// Add enough keys to ensure distribution across hash ranges
+	// Based on hash distribution with clusterSize=2, totalHashRanges=3:
+	// key1, key2, key3 → node0; key4, key5, key6, key7, key8 → will distribute across nodes
 	_ = s.Do("/put", PutRequest{
-		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"}, TTL: testTTL,
 	}, true)
 
 	body := s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4"},
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
 	})
-	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+	require.JSONEq(t,
+		`{"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		body,
+	)
 
 	// Step 3: Create a second node
 	node1Conf := newConf()
@@ -1905,11 +1911,28 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	// Step 6: mark node 1 as non-degraded
 	degradedNodes[1] = false
 
-	// Verify that node 1 now accepts requests
-	resp, err = node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1", "key2", "key3", "key4"}})
+	// Verify that node 1 now accepts requests and has loaded snapshots correctly
+	// Node1 owns hash range 2, which contains key4 and other keys
+	// Let's determine which keys belong to node1's hash range
+	h := hash.New(2, totalHashRanges)
+	allKeys := []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"}
+	var node1Keys []string
+	for _, key := range allKeys {
+		if h.GetNodeNumber(key) == 1 {
+			node1Keys = append(node1Keys, key)
+		}
+	}
+	require.Greater(t, len(node1Keys), 0, "Node 1 should own at least one key")
+	t.Logf("Node 1 owns %d keys: %v", len(node1Keys), node1Keys)
+
+	// Query node1 directly for keys that belong to its hash range
+	resp, err = node1.Get(ctx, &pb.GetRequest{Keys: node1Keys})
 	require.NoError(t, err)
 	require.NotEqual(t, pb.ErrorCode_SCALING, resp.ErrorCode, "Node 1 should not be in degraded mode")
-	t.Logf("resp: %v", resp.Exists) // TODO why is this empty?
+	require.Len(t, resp.Exists, len(node1Keys), "Node 1 should return results for all its keys")
+	for _, exists := range resp.Exists {
+		require.True(t, exists, "All keys belonging to node1 should exist after loading snapshots")
+	}
 
 	// Verify that now both nodes appear in NodesAddresses
 	body = s.Do("/info", InfoRequest{NodeID: 0})
@@ -1921,22 +1944,31 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	require.Contains(t, infoResponse.NodesAddresses, node1Address)
 
 	// Step 7: Verify that the cluster is scaled and Get and Put are now served by both nodes
-	// Verify data is accessible via scaler
+	// Verify all existing data is accessible via scaler
 	body = s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key4"},
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
 	})
-	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+	require.JSONEq(t,
+		`{"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		body,
+	)
 
 	// Test Put with new keys now that both nodes are operational
 	_ = s.Do("/put", PutRequest{
-		Keys: []string{"key5", "key6", "key7"}, TTL: testTTL,
+		Keys: []string{"key9", "key10", "key11"}, TTL: testTTL,
 	}, true)
 
-	// Verify all keys are accessible
+	// Verify all keys including new ones are accessible
 	body = s.Do("/get", GetRequest{
-		Keys: []string{"key1", "key2", "key3", "key5", "key6", "key7"},
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "key10", "key11"},
 	})
-	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key5":true,"key6":true,"key7":true}`, body)
+	require.JSONEq(t,
+		`{
+			"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,
+			"key7":true,"key8":true,"key9":true,"key10":true,"key11":true
+		}`,
+		body,
+	)
 
 	cancel()
 	node0.Close()
