@@ -66,7 +66,6 @@ func TestScaleUpAndDown(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx0, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -99,7 +98,6 @@ func TestScaleUpAndDown(t *testing.T) {
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx1, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -114,7 +112,6 @@ func TestScaleUpAndDown(t *testing.T) {
 		HashRanges: hash.New(2, totalHashRanges).GetNodeHashRangesList(1),
 	}, true)
 	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0, 1}}, true)
-	_ = s.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0, 1}}, true)
 
 	// Test node info 0
 	body = s.Do("/info", InfoRequest{NodeID: 0})
@@ -164,7 +161,6 @@ func TestScaleUpAndDown(t *testing.T) {
 	}, true)
 	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{Addresses: []string{node0Address}}, true)
 	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0}}, true)
-	_ = s.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0}}, true)
 
 	// Get node info again
 	body = s.Do("/info", InfoRequest{
@@ -216,7 +212,6 @@ func TestAutoScale(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -243,7 +238,6 @@ func TestAutoScale(t *testing.T) {
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -367,7 +361,6 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf, withProxy(proxy))
@@ -398,7 +391,6 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -515,7 +507,6 @@ func TestAutoScaleTransientError(t *testing.T) {
 	node0.createSnapshotsReturnError.Store(true)
 	node1.loadSnapshotsReturnError.Store(true)
 	node0.scaleReturnError.Store(true)
-	node0.scaleCompleteReturnError.Store(true)
 	done := make(chan struct{})
 	go func() {
 		close(done)
@@ -544,12 +535,6 @@ func TestAutoScaleTransientError(t *testing.T) {
 		return node0.scaleCalls.Load() >= waitForRetries // wait for at least 10 retries
 	}, 10*time.Second, time.Millisecond, "Calls %d", node0.scaleCalls.Load())
 	node0.scaleReturnError.Store(false)
-
-	t.Logf("Waiting for at least %d retries to be done on ScaleComplete", waitForRetries)
-	require.Eventuallyf(t, func() bool {
-		return node0.scaleCompleteCalls.Load() >= waitForRetries // wait for at least 10 retries
-	}, 10*time.Second, time.Millisecond, "Calls %d", node0.scaleCompleteCalls.Load())
-	node0.scaleCompleteReturnError.Store(false)
 
 	<-done
 
@@ -590,7 +575,6 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -674,7 +658,6 @@ func TestAutoHealing(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -744,7 +727,6 @@ func TestHashRangeMovements(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -976,9 +958,9 @@ func TestHashRangeMovements(t *testing.T) {
 		newNodeConf := newConf()
 		_, newNodeAddress := getService(newNodeCtx, t, cloudStorage, node.Config{
 			NodeID:           1,
-			ClusterSize:      2,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
+			Addresses:        []string{node0Address},
 		}, newNodeConf)
 
 		s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address, newNodeAddress)
@@ -1092,7 +1074,6 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -1201,7 +1182,6 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -1209,7 +1189,6 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	node1Conf := newConf()
 	_, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -1322,7 +1301,6 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	node0Conf := newConf()
 	_, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -1330,7 +1308,6 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	node1Conf := newConf()
 	_, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -1629,9 +1606,6 @@ type mockNodeServiceServer struct {
 	scaleCalls       atomic.Uint64
 	scaleReturnError atomic.Bool
 
-	scaleCompleteCalls       atomic.Uint64
-	scaleCompleteReturnError atomic.Bool
-
 	createSnapshotsCalls       atomic.Uint64
 	createSnapshotsReturnError atomic.Bool
 
@@ -1646,17 +1620,6 @@ func (m *mockNodeServiceServer) Scale(_ context.Context, _ *pb.ScaleRequest) (*p
 		return nil, errors.New("scale mock error on " + m.identifier)
 	}
 	return &pb.ScaleResponse{Success: true}, nil
-}
-
-func (m *mockNodeServiceServer) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
-	*pb.ScaleCompleteResponse, error,
-) {
-	m.t.Logf("mockNodeServiceServer.ScaleComplete called on %s", m.identifier)
-	defer m.scaleCompleteCalls.Add(1)
-	if m.scaleCompleteReturnError.Load() {
-		return nil, errors.New("scale complete mock error on " + m.identifier)
-	}
-	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
 
 func (m *mockNodeServiceServer) CreateSnapshots(_ context.Context, _ *pb.CreateSnapshotsRequest) (
@@ -1737,7 +1700,6 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:          0,
-		ClusterSize:     2,
 		TotalHashRanges: totalHashRanges,
 		DegradedNodes: func() []bool {
 			return degradedNodes
@@ -1747,7 +1709,6 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:          1,
-		ClusterSize:     2,
 		TotalHashRanges: totalHashRanges,
 		Addresses:       []string{node0Address},
 		DegradedNodes: func() []bool {
@@ -1836,7 +1797,6 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:          0,
-		ClusterSize:     1,
 		TotalHashRanges: totalHashRanges,
 		DegradedNodes:   func() []bool { return degradedNodes },
 	}, node0Conf)
@@ -1866,7 +1826,6 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:          1,
-		ClusterSize:     2,
 		TotalHashRanges: totalHashRanges,
 		Addresses:       []string{node0Address},
 		DegradedNodes:   func() []bool { return degradedNodes },
@@ -1888,10 +1847,13 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 
 	// Verify scale up worked - check node info
 	// Note: While node1 is degraded, NodesAddresses will only include non-degraded nodes
+	// and ClusterSize will be 1 (only non-degraded nodes count)
 	body = s.Do("/info", InfoRequest{NodeID: 0})
 	infoResponse := pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
-	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.EqualValues(t, 1, infoResponse.ClusterSize,
+		"ClusterSize should be 1 because node1 is degraded",
+	)
 	require.Len(t, infoResponse.NodesAddresses, 1,
 		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
 	)
@@ -1901,7 +1863,9 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	body = s.Do("/info", InfoRequest{NodeID: 1})
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
-	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.EqualValues(t, 1, infoResponse.ClusterSize,
+		"ClusterSize should be 1 because node1 is degraded",
+	)
 	require.Len(t, infoResponse.NodesAddresses, 1,
 		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
 	)

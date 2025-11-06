@@ -52,10 +52,9 @@ type Service struct {
 
 	config Config
 
-	// mu protects cache, scaling, lastSnapshotTime and hasher
+	// mu protects cache, lastSnapshotTime and hasher
 	mu               sync.RWMutex
 	cache            Cache
-	scaling          bool
 	lastSnapshotTime time.Time
 	hasher           *hash.Hash
 
@@ -241,11 +240,6 @@ func (s *Service) garbageCollection(ctx context.Context) {
 			func() {
 				s.mu.Lock() // TODO this might affect scaling operations
 				defer s.mu.Unlock()
-
-				if s.scaling {
-					s.logger.Warnn("Skipping garbage collection while scaling")
-					return
-				}
 
 				start := time.Now()
 				s.logger.Infon("Running garbage collection")
@@ -521,7 +515,7 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.isDegraded() || s.scaling {
+	if s.isDegraded() {
 		s.metrics.errScalingCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_SCALING
 		return response, nil
@@ -573,7 +567,7 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.isDegraded() || s.scaling {
+	if s.isDegraded() {
 		s.metrics.errScalingCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_SCALING
 		return resp, nil
@@ -646,7 +640,7 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 }
 
 // Scale implements the Scale RPC method
-func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
+func (s *Service) Scale(_ context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -654,16 +648,6 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	log.Infon("Scale request received")
 
 	previousClusterSize := s.config.getClusterSize()
-
-	if s.scaling {
-		log.Infon("Scaling operation already in progress")
-		return &pb.ScaleResponse{
-			Success:             false,
-			ErrorMessage:        "scaling operation already in progress",
-			PreviousClusterSize: previousClusterSize,
-			NewClusterSize:      previousClusterSize,
-		}, nil
-	}
 
 	// Validate new cluster size
 	if len(req.NodesAddresses) == 0 {
@@ -680,33 +664,11 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	// We don't check if the cluster size is already at the desired size to allow for auto-healing
 	// and to force the node to load the desired snapshots from S3.
 
-	// Set scaling flag
-	s.scaling = true
-
 	// Update cluster size
 	s.config.Addresses = req.NodesAddresses
 	newClusterSize := uint32(len(s.config.Addresses))
 
-	// Update hash instance
-	s.hasher = hash.New(newClusterSize, s.config.TotalHashRanges)
-
-	// Reinitialize caches for the new cluster size
-	if err := s.initCaches(ctx, false, 0); err != nil { // Revert to previous cluster size on error
-		log.Errorn("Failed to initialize caches", obskit.Error(err))
-		s.hasher = hash.New(previousClusterSize, s.config.TotalHashRanges)
-		s.scaling = false
-		return &pb.ScaleResponse{
-			Success:             false,
-			ErrorMessage:        fmt.Sprintf("failed to initialize caches: %v", err),
-			PreviousClusterSize: previousClusterSize,
-			NewClusterSize:      previousClusterSize,
-		}, nil
-	}
-
-	// WARNING: We don't clear the scaling flag here.
-	// The scaling flag will be cleared when the ScaleComplete RPC is called.
-
-	log.Infon("Scale phase 1 of 2 completed successfully",
+	log.Infon("Scale completed successfully, you can now update the degraded nodes list",
 		logger.NewIntField("previousClusterSize", int64(previousClusterSize)),
 		logger.NewIntField("newClusterSize", int64(newClusterSize)),
 	)
@@ -716,18 +678,6 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 		PreviousClusterSize: previousClusterSize,
 		NewClusterSize:      newClusterSize,
 	}, nil
-}
-
-// ScaleComplete implements the ScaleComplete RPC method
-func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// No need to check the s.scaling value, let's be optimistic and go ahead here for auto-healing purposes
-	s.scaling = false
-	s.logger.Infon("Scale phase 2 of 2 completed successfully")
-
-	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
 
 // LoadSnapshots forces the node to load all snapshots from cloud storage
@@ -763,15 +713,6 @@ func (s *Service) CreateSnapshots(
 	defer s.mu.RUnlock()
 
 	s.logger.Infon("Create snapshots request received")
-
-	if s.scaling {
-		s.logger.Warnn("Skipping snapshots while scaling")
-		return &pb.CreateSnapshotsResponse{
-			Success:      false,
-			ErrorMessage: "scaling operation in progress",
-			NodeId:       s.config.NodeID,
-		}, nil
-	}
 
 	// Create snapshots for all hash ranges this node handles
 	if err := s.createSnapshots(ctx, req.FullSync, req.HashRange...); err != nil {
@@ -975,6 +916,18 @@ func (s *Service) GetKeysByHashRange(keys []string) (map[uint32][]string, error)
 
 func (s *Service) GetKeysByHashRangeWithIndexes(keys []string) (map[uint32][]string, map[string]int, error) {
 	return s.hasher.GetKeysByHashRangeWithIndexes(keys, s.config.NodeID)
+}
+
+func (s *Service) DegradedNodesChanged() {
+	// Update hash instance
+	newClusterSize := s.config.getClusterSize()
+	s.hasher = hash.New(newClusterSize, s.config.TotalHashRanges)
+
+	// Reinitialize caches for the new cluster size
+	if err := s.initCaches(context.Background(), false, 0); err != nil { // Revert to previous cluster size on error
+		s.logger.Errorn("Failed to initialize caches", obskit.Error(err))
+		panic(err)
+	}
 }
 
 // isDegraded checks if the current node is in degraded mode

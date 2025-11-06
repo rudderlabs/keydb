@@ -25,9 +25,6 @@ service NodeService {
 
   // Scale changes the number of nodes in the cluster
   rpc Scale(ScaleRequest) returns (ScaleResponse) {}
-
-  // ScaleComplete is used by the scaler to notify all nodes that the scale is complete and they can now start serving traffic again
-  rpc ScaleComplete(ScaleCompleteRequest) returns (ScaleCompleteResponse) {}
 }
 
 // NodeService message definitions
@@ -123,10 +120,4 @@ message ScaleResponse {
   uint32 previous_cluster_size = 2;
   uint32 new_cluster_size = 3;
   string error_message = 4; // Error message if the operation failed
-}
-
-message ScaleCompleteRequest {}
-
-message ScaleCompleteResponse {
-  bool success = 1;
 }

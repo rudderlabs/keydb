@@ -238,12 +238,6 @@ func (m *mockNodeServiceServer) Scale(ctx context.Context, req *proto.ScaleReque
 	return &proto.ScaleResponse{Success: true}, nil
 }
 
-func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *proto.ScaleCompleteRequest) (
-	*proto.ScaleCompleteResponse, error,
-) {
-	return &proto.ScaleCompleteResponse{Success: true}, nil
-}
-
 func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.CreateSnapshotsRequest) (
 	*proto.CreateSnapshotsResponse, error,
 ) {

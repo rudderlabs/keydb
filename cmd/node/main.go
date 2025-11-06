@@ -21,7 +21,6 @@ import (
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
-	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/node"
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/keydb/release"
@@ -32,6 +31,10 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+)
+
+const (
+	degradedNodesConfKey = "degradedNodes"
 )
 
 var podNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
@@ -103,11 +106,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	if len(nodeAddresses) == 0 {
 		return fmt.Errorf("no node addresses provided")
 	}
-	degradedNodes := conf.GetReloadableStringVar("", "degradedNodes")
+	degradedNodes := conf.GetReloadableStringVar("", degradedNodesConfKey)
 
 	nodeConfig := node.Config{
 		NodeID:          uint32(nodeID),
-		ClusterSize:     uint32(conf.GetInt("clusterSize", 1)),
 		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", node.DefaultTotalHashRanges)),
 		MaxFilesToList:  conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
 		SnapshotInterval: conf.GetDuration("snapshotInterval",
@@ -129,7 +131,6 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 				b[i], err = strconv.ParseBool(s)
 				if err != nil {
 					log.Warnn("Failed to parse degraded node", logger.NewStringField("v", raw), obskit.Error(err))
-					return nil
 				}
 			}
 			return b
@@ -142,7 +143,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
 		logger.NewIntField("nodeId", int64(nodeConfig.NodeID)),
-		logger.NewIntField("clusterSize", int64(nodeConfig.ClusterSize)),
+		logger.NewIntField("clusterSize", int64(len(nodeConfig.Addresses))),
 		logger.NewIntField("totalHashRanges", int64(nodeConfig.TotalHashRanges)),
 		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
 		logger.NewIntField("noOfAddresses", int64(len(nodeConfig.Addresses))),
@@ -152,6 +153,12 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	if err != nil {
 		return fmt.Errorf("failed to create node service: %w", err)
 	}
+
+	degradedNodesObserver := &configObserver{
+		key: degradedNodesConfKey,
+		f:   service.DegradedNodesChanged,
+	}
+	conf.RegisterObserver(degradedNodesObserver)
 
 	var wg sync.WaitGroup
 	defer func() {
@@ -229,10 +236,9 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	h := hash.New(nodeConfig.ClusterSize, nodeConfig.TotalHashRanges)
 	log.Infon("Starting node",
 		logger.NewStringField("addresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
-		logger.NewIntField("hashRanges", int64(len(h.GetNodeHashRanges(nodeConfig.NodeID)))),
+		logger.NewStringField("degradedNodes", degradedNodes.Load()),
 	)
 
 	wg.Add(1)
@@ -272,3 +278,16 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return err
 	}
 }
+
+type configObserver struct {
+	key string
+	f   func()
+}
+
+func (c *configObserver) OnReloadableConfigChange(key string, _, _ any) {
+	if key == c.key {
+		c.f()
+	}
+}
+
+func (c *configObserver) OnNonReloadableConfigChange(_ string) {}

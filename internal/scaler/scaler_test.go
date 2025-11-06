@@ -41,9 +41,8 @@ func TestExecuteScalingWithRollback_Success(t *testing.T) {
 func TestExecuteScalingWithRollback_FailureWithRollback(t *testing.T) {
 	// Counters for tracking calls
 	var (
-		scaleCalls         int
-		scaleCompleteCalls int
-		mu                 sync.Mutex
+		scaleCalls int
+		mu         sync.Mutex
 	)
 
 	// Setup mock gRPC server
@@ -53,12 +52,6 @@ func TestExecuteScalingWithRollback_FailureWithRollback(t *testing.T) {
 			scaleCalls++
 			mu.Unlock()
 			return &pb.ScaleResponse{Success: true}, nil
-		},
-		func(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
-			mu.Lock()
-			scaleCompleteCalls++
-			mu.Unlock()
-			return &pb.ScaleCompleteResponse{Success: true}, nil
 		},
 	)
 	defer cleanup()
@@ -92,7 +85,6 @@ func TestExecuteScalingWithRollback_FailureWithRollback(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Equal(t, 1, scaleCalls)
-	require.Equal(t, 2, scaleCompleteCalls)
 }
 
 func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
@@ -100,9 +92,6 @@ func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
 	addr, cleanup := startMockNodeService(t,
 		func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
 			return nil, errors.New("scale error")
-		},
-		func(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error) {
-			return &pb.ScaleCompleteResponse{Success: true}, nil
 		},
 	)
 	defer cleanup()
@@ -235,8 +224,7 @@ func TestOperationRecordingTable(t *testing.T) {
 // mockNodeServiceServer is a mock implementation of the NodeServiceServer
 type mockNodeServiceServer struct {
 	pb.UnimplementedNodeServiceServer
-	scaleFunc         func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error)
-	scaleCompleteFunc func(ctx context.Context, req *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)
+	scaleFunc func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error)
 }
 
 func (m *mockNodeServiceServer) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
@@ -246,19 +234,9 @@ func (m *mockNodeServiceServer) Scale(ctx context.Context, req *pb.ScaleRequest)
 	return &pb.ScaleResponse{Success: true}, nil
 }
 
-func (m *mockNodeServiceServer) ScaleComplete(ctx context.Context, req *pb.ScaleCompleteRequest) (
-	*pb.ScaleCompleteResponse, error,
-) {
-	if m.scaleCompleteFunc != nil {
-		return m.scaleCompleteFunc(ctx, req)
-	}
-	return &pb.ScaleCompleteResponse{Success: true}, nil
-}
-
 // startMockNodeService starts a mock gRPC server
 func startMockNodeService(t *testing.T,
-	scaleFunc func(context.Context, *pb.ScaleRequest) (*pb.ScaleResponse, error),
-	scaleCompleteFunc func(context.Context, *pb.ScaleCompleteRequest) (*pb.ScaleCompleteResponse, error)) (
+	scaleFunc func(context.Context, *pb.ScaleRequest) (*pb.ScaleResponse, error)) (
 	string, func(),
 ) {
 	t.Helper()
@@ -268,8 +246,7 @@ func startMockNodeService(t *testing.T,
 
 	grpcServer := grpc.NewServer()
 	mockServer := &mockNodeServiceServer{
-		scaleFunc:         scaleFunc,
-		scaleCompleteFunc: scaleCompleteFunc,
+		scaleFunc: scaleFunc,
 	}
 	pb.RegisterNodeServiceServer(grpcServer, mockServer)
 

@@ -52,7 +52,6 @@ func TestSimple(t *testing.T) {
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -85,7 +84,6 @@ func TestSimple(t *testing.T) {
 		node0Conf = newConf()
 		node0, node0Address = getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -141,7 +139,6 @@ func TestLoadSnapshotsMaxConcurrency(t *testing.T) {
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -178,7 +175,6 @@ func TestLoadSnapshotsMaxConcurrency(t *testing.T) {
 		node0Conf = newConf()
 		node0, node0Address = getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -236,7 +232,6 @@ func TestScaleUpAndDown(t *testing.T) {
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -261,7 +256,6 @@ func TestScaleUpAndDown(t *testing.T) {
 		node1Conf := newConf()
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
-			ClusterSize:      2,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
@@ -269,7 +263,6 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
-		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1}))
 
 		respNode0, err := op.GetNodeInfo(ctx, 0)
 		require.NoError(t, err)
@@ -295,7 +288,6 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, node0.hasher.GetNodeHashRangesList(0)...))
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
-		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
 
 		respNode0, err = op.GetNodeInfo(ctx, 0)
 		require.NoError(t, err)
@@ -336,7 +328,6 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -362,7 +353,6 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		node1Conf := newConf()
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           1,
-			ClusterSize:      2,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
@@ -370,7 +360,6 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
-		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1}))
 
 		require.Equal(t, 1, c.ClusterSize(), "The client should still believe that the cluster size is 1")
 		exists, err = c.Get(context.Background(), keys)
@@ -383,7 +372,6 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		node2Conf := newConf()
 		node2, node2Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           2,
-			ClusterSize:      3,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address, node1Address},
@@ -391,7 +379,6 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address, node2Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 2, 0, node2.hasher.GetNodeHashRangesList(2)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1, 2}))
-		require.NoError(t, op.ScaleComplete(ctx, []uint32{0, 1, 2}))
 
 		// Verify that the client's cluster size is still 2 (not updated yet)
 		require.Equal(t, 2, c.ClusterSize())
@@ -427,7 +414,6 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		}
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
-		require.NoError(t, op.ScaleComplete(ctx, []uint32{0}))
 
 		exists, err = c.Get(ctx, allKeys)
 		require.NoError(t, err)
@@ -470,7 +456,6 @@ func TestIncrementalSnapshots(t *testing.T) {
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -514,7 +499,6 @@ func TestIncrementalSnapshots(t *testing.T) {
 		node0Conf = newConf()
 		node0, node0Address = getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -580,7 +564,6 @@ func TestSelectedSnapshots(t *testing.T) {
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -621,7 +604,6 @@ func TestSelectedSnapshots(t *testing.T) {
 		node0Conf = newConf()
 		node0, node0Address = getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -746,7 +728,6 @@ func TestListSnapshotsSorting(t *testing.T) {
 		node0Conf := newConf()
 		node0, _ := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
-			ClusterSize:      1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
@@ -849,7 +830,6 @@ func TestDegradedMode(t *testing.T) {
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:          0,
-			ClusterSize:     2,
 			TotalHashRanges: totalHashRanges,
 			DegradedNodes: func() []bool {
 				return degradedNodes
@@ -859,7 +839,6 @@ func TestDegradedMode(t *testing.T) {
 		node1Conf := newConf()
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:          1,
-			ClusterSize:     2,
 			TotalHashRanges: totalHashRanges,
 			Addresses:       []string{node0Address},
 			DegradedNodes: func() []bool {

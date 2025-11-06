@@ -32,7 +32,6 @@ const (
 
 type scalerClient interface {
 	Scale(ctx context.Context, nodeIDs []uint32) error
-	ScaleComplete(ctx context.Context, nodeIDs []uint32) error
 	UpdateClusterData(addresses ...string) error
 	CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error
 	LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint32, hashRanges ...uint32) error
@@ -77,7 +76,6 @@ func newHTTPServer(
 	mux.Post("/createSnapshots", s.handleCreateSnapshots)
 	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
 	mux.Post("/scale", s.handleScale)
-	mux.Post("/scaleComplete", s.handleScaleComplete)
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
 	mux.Post("/autoScale", s.handleAutoScale)
 	mux.Post("/hashRangeMovements", s.handleHashRangeMovements)
@@ -277,33 +275,6 @@ func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	// Scale cluster
 	if err := s.scaler.Scale(r.Context(), req.NodeIDs); err != nil {
 		http.Error(w, fmt.Sprintf("Error scaling cluster: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Write response
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"success":true}`))
-}
-
-// handleScaleComplete handles POST /scaleComplete requests
-func (s *httpServer) handleScaleComplete(w http.ResponseWriter, r *http.Request) {
-	// Parse request body
-	var req ScaleCompleteRequest
-	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// Validate request
-	if len(req.NodeIDs) == 0 {
-		http.Error(w, "No node IDs provided", http.StatusBadRequest)
-		return
-	}
-
-	// Complete scale operation
-	if err := s.scaler.ScaleComplete(r.Context(), req.NodeIDs); err != nil {
-		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -645,19 +616,13 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 		nodeIDs[i] = i
 	}
 
-	s.logger.Infon("Starting scale complete operation")
+	s.logger.Infon("Starting scale operation")
 
 	if err := s.scaler.Scale(ctx, nodeIDs); err != nil {
 		return fmt.Errorf("scaling nodes: %w", err)
 	}
 
 	s.logger.Infon("Scale command sent to all nodes")
-
-	if err := s.scaler.ScaleComplete(ctx, nodeIDs); err != nil {
-		return fmt.Errorf("completing scale operation: %w", err)
-	}
-
-	s.logger.Infon("Scale complete command sent to all nodes")
 
 	return nil
 }
