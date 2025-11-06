@@ -46,39 +46,6 @@ const (
 // file format is hr_<hash_range>_s_<from_timestamp>_<to_timestamp>.snapshot
 var snapshotFilenameRegex = regexp.MustCompile(`^.+/hr_(\d+)_s_(\d+)_(\d+).snapshot$`)
 
-// Config holds the configuration for a node
-type Config struct {
-	// NodeID is the ID of this node (0-based)
-	NodeID uint32
-
-	// ClusterSize is the total number of nodes in the cluster
-	ClusterSize uint32
-
-	// TotalHashRanges is the total number of hash ranges
-	TotalHashRanges uint32
-
-	// MaxFilesToList specifies the maximum number of files that can be listed in a single operation.
-	MaxFilesToList int64
-
-	// SnapshotInterval is the interval for creating snapshots (in seconds)
-	SnapshotInterval time.Duration
-
-	// GarbageCollectionInterval defines the duration between automatic GC operation per cache
-	GarbageCollectionInterval time.Duration
-
-	// Addresses is a list of node addresses that this node will advertise to clients
-	Addresses []string
-
-	// DegradedNodes is a list of nodes that are considered degraded and should not be used for reads and writes.
-	DegradedNodes func() []bool
-
-	// logTableStructureDuration defines the duration for which the table structure is logged
-	LogTableStructureDuration time.Duration
-
-	// backupFolderName is the name of the folder in the S3 bucket where snapshots are stored
-	BackupFolderName string
-}
-
 // Service implements the NodeService gRPC service
 type Service struct {
 	pb.UnimplementedNodeServiceServer
@@ -188,7 +155,7 @@ func NewService(
 		config:         config,
 		storage:        storage,
 		maxFilesToList: config.MaxFilesToList,
-		hasher:         hash.New(config.ClusterSize, config.TotalHashRanges),
+		hasher:         hash.New(config.getClusterSize(), config.TotalHashRanges),
 		stats:          stat,
 		logger: log.Withn(
 			logger.NewIntField("nodeId", int64(config.NodeID)),
@@ -550,7 +517,7 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 	defer s.mu.RUnlock()
 
 	response := &pb.GetResponse{
-		ClusterSize:    s.config.ClusterSize,
+		ClusterSize:    s.config.getClusterSize(),
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
@@ -602,7 +569,7 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 
 	resp := &pb.PutResponse{
 		Success:        false,
-		ClusterSize:    s.config.ClusterSize,
+		ClusterSize:    s.config.getClusterSize(),
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
@@ -671,7 +638,7 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 
 	return &pb.GetNodeInfoResponse{
 		NodeId:                s.config.NodeID,
-		ClusterSize:           s.config.ClusterSize,
+		ClusterSize:           s.config.getClusterSize(),
 		NodesAddresses:        s.getNonDegradedAddresses(),
 		HashRanges:            hashRanges,
 		LastSnapshotTimestamp: uint64(s.lastSnapshotTime.Unix()),
@@ -686,13 +653,15 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	log := s.logger.Withn(logger.NewIntField("newClusterSize", int64(len(req.NodesAddresses))))
 	log.Infon("Scale request received")
 
+	previousClusterSize := s.config.getClusterSize()
+
 	if s.scaling {
 		log.Infon("Scaling operation already in progress")
 		return &pb.ScaleResponse{
 			Success:             false,
 			ErrorMessage:        "scaling operation already in progress",
-			PreviousClusterSize: s.config.ClusterSize,
-			NewClusterSize:      s.config.ClusterSize,
+			PreviousClusterSize: previousClusterSize,
+			NewClusterSize:      previousClusterSize,
 		}, nil
 	}
 
@@ -702,8 +671,8 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 		return &pb.ScaleResponse{
 			Success:             false,
 			ErrorMessage:        "new cluster size must be greater than 0",
-			PreviousClusterSize: s.config.ClusterSize,
-			NewClusterSize:      s.config.ClusterSize,
+			PreviousClusterSize: previousClusterSize,
+			NewClusterSize:      previousClusterSize,
 		}, nil
 	}
 
@@ -714,21 +683,17 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 	// Set scaling flag
 	s.scaling = true
 
-	// Save the previous cluster size
-	previousClusterSize := s.config.ClusterSize
-
 	// Update cluster size
-	s.config.ClusterSize = uint32(len(req.NodesAddresses))
 	s.config.Addresses = req.NodesAddresses
+	newClusterSize := uint32(len(s.config.Addresses))
 
 	// Update hash instance
-	s.hasher = hash.New(s.config.ClusterSize, s.config.TotalHashRanges)
+	s.hasher = hash.New(newClusterSize, s.config.TotalHashRanges)
 
 	// Reinitialize caches for the new cluster size
 	if err := s.initCaches(ctx, false, 0); err != nil { // Revert to previous cluster size on error
 		log.Errorn("Failed to initialize caches", obskit.Error(err))
-		s.config.ClusterSize = previousClusterSize
-		s.hasher = hash.New(s.config.ClusterSize, s.config.TotalHashRanges)
+		s.hasher = hash.New(previousClusterSize, s.config.TotalHashRanges)
 		s.scaling = false
 		return &pb.ScaleResponse{
 			Success:             false,
@@ -743,12 +708,13 @@ func (s *Service) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleRes
 
 	log.Infon("Scale phase 1 of 2 completed successfully",
 		logger.NewIntField("previousClusterSize", int64(previousClusterSize)),
+		logger.NewIntField("newClusterSize", int64(newClusterSize)),
 	)
 
 	return &pb.ScaleResponse{
 		Success:             true,
 		PreviousClusterSize: previousClusterSize,
-		NewClusterSize:      s.config.ClusterSize,
+		NewClusterSize:      newClusterSize,
 	}, nil
 }
 
@@ -759,9 +725,7 @@ func (s *Service) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
 
 	// No need to check the s.scaling value, let's be optimistic and go ahead here for auto-healing purposes
 	s.scaling = false
-	s.logger.Infon("Scale phase 2 of 2 completed successfully",
-		logger.NewIntField("newClusterSize", int64(s.config.ClusterSize)),
-	)
+	s.logger.Infon("Scale phase 2 of 2 completed successfully")
 
 	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
