@@ -112,6 +112,9 @@ func TestScaleUpAndDown(t *testing.T) {
 		HashRanges: hash.New(2, totalHashRanges).GetNodeHashRangesList(1),
 	}, true)
 	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0, 1}}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
 
 	// Test node info 0
 	body = s.Do("/info", InfoRequest{NodeID: 0})
@@ -161,6 +164,9 @@ func TestScaleUpAndDown(t *testing.T) {
 	}, true)
 	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{Addresses: []string{node0Address}}, true)
 	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0}}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
 
 	// Get node info again
 	body = s.Do("/info", InfoRequest{
@@ -248,6 +254,9 @@ func TestAutoScale(t *testing.T) {
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, node1Address},
 	}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
 
 	// Verify scale up worked - check node info
 	body = s.Do("/info", InfoRequest{NodeID: 0})
@@ -301,6 +310,8 @@ func TestAutoScale(t *testing.T) {
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
 	}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
@@ -461,6 +472,8 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
 	}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
@@ -1845,6 +1858,10 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 		NewNodesAddresses: []string{node0Address, node1Address},
 	}, true)
 
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
+
 	// Verify scale up worked - check node info
 	// Note: While node1 is degraded, NodesAddresses will only include non-degraded nodes
 	// and ClusterSize will be 1 (only non-degraded nodes count)
@@ -1858,7 +1875,9 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
 	)
 	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
-	require.ElementsMatch(t, []uint32{0, 1}, infoResponse.HashRanges)
+	require.ElementsMatch(t, []uint32{0, 1, 2}, infoResponse.HashRanges,
+		"node0 should handle all hash ranges when node1 is degraded",
+	)
 
 	body = s.Do("/info", InfoRequest{NodeID: 1})
 	infoResponse = pb.GetNodeInfoResponse{}
@@ -1874,6 +1893,10 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 
 	// Step 6: mark node 1 as non-degraded
 	degradedNodes[1] = false
+
+	// Trigger hasher reinitialization after degraded nodes change
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
 
 	// Verify that node 1 now accepts requests and has loaded snapshots correctly
 	// Node1 owns hash range 2, which contains key4 and other keys

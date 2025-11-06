@@ -919,6 +919,15 @@ func (s *Service) GetKeysByHashRangeWithIndexes(keys []string) (map[uint32][]str
 }
 
 func (s *Service) DegradedNodesChanged() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// If this node is degraded, skip hasher reinitialization since it won't serve traffic
+	if s.isDegraded() {
+		s.logger.Infon("Node is degraded, skipping hasher reinitialization")
+		return
+	}
+
 	// Update hash instance
 	newClusterSize := s.config.getClusterSize()
 	s.hasher = hash.New(newClusterSize, s.config.TotalHashRanges)

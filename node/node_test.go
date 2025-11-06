@@ -263,6 +263,8 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
+		node0.DegradedNodesChanged()
+		node1.DegradedNodesChanged()
 
 		respNode0, err := op.GetNodeInfo(ctx, 0)
 		require.NoError(t, err)
@@ -288,6 +290,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, node0.hasher.GetNodeHashRangesList(0)...))
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
+		node0.DegradedNodesChanged()
 
 		respNode0, err = op.GetNodeInfo(ctx, 0)
 		require.NoError(t, err)
@@ -360,6 +363,8 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
+		node0.DegradedNodesChanged()
+		node1.DegradedNodesChanged()
 
 		require.Equal(t, 1, c.ClusterSize(), "The client should still believe that the cluster size is 1")
 		exists, err = c.Get(context.Background(), keys)
@@ -379,6 +384,9 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address, node2Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 2, 0, node2.hasher.GetNodeHashRangesList(2)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1, 2}))
+		node0.DegradedNodesChanged()
+		node1.DegradedNodesChanged()
+		node2.DegradedNodesChanged()
 
 		// Verify that the client's cluster size is still 2 (not updated yet)
 		require.Equal(t, 2, c.ClusterSize())
@@ -414,6 +422,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		}
 		require.NoError(t, op.UpdateClusterData(node0Address))
 		require.NoError(t, op.Scale(ctx, []uint32{0}))
+		node0.DegradedNodesChanged()
 
 		exists, err = c.Get(ctx, allKeys)
 		require.NoError(t, err)
