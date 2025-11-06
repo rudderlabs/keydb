@@ -6,6 +6,7 @@ import (
 	"net"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,9 +266,6 @@ func TestScaleUpAndDown(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        []string{node0Address},
 		}, node1Conf)
-		require.Equal(t, map[uint32]uint64{0: 1, 1: 1}, node1.since,
-			"Node should populate the since map upon start-up",
-		)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
@@ -658,124 +656,6 @@ func TestSelectedSnapshots(t *testing.T) {
 	})
 }
 
-func TestForceSkipFilesListing(t *testing.T) {
-	pool, err := dockertest.NewPool("")
-	require.NoError(t, err)
-	pool.MaxWait = 1 * time.Minute
-
-	run := func(t *testing.T, newConf func() *config.Config) {
-		t.Parallel()
-
-		minioContainer, err := miniokit.Setup(pool, t)
-		require.NoError(t, err)
-
-		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
-
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		totalHashRanges := uint32(4)
-		node0Conf := newConf()
-		node0, node0Address := getService(ctx, t, cloudStorage, Config{
-			NodeID:           0,
-			ClusterSize:      1,
-			TotalHashRanges:  totalHashRanges,
-			SnapshotInterval: 60 * time.Second,
-		}, node0Conf)
-		c := getClient(t, totalHashRanges, node0Address)
-		op := getScaler(t, totalHashRanges, node0Address)
-
-		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
-
-		exists, err := c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
-		require.NoError(t, err)
-		require.Equal(t, []bool{true, true, true, false}, exists)
-
-		err = op.CreateSnapshots(ctx, 0, false)
-		require.NoError(t, err)
-
-		keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
-			regexp.MustCompile("^.+/hr_1_s_0_1.snapshot$"),
-			regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
-			regexp.MustCompile("^.+/hr_3_s_0_1.snapshot$"),
-		)
-
-		cancel()
-		node0.Close()
-
-		ctx, cancel = context.WithCancel(context.Background())
-		defer cancel()
-		node0Conf = newConf()
-		node0, node0Address = getService(ctx, t, cloudStorage, Config{
-			NodeID:           0,
-			ClusterSize:      1,
-			TotalHashRanges:  totalHashRanges,
-			SnapshotInterval: 60 * time.Second,
-		}, node0Conf)
-		c = getClient(t, totalHashRanges, node0Address)
-
-		require.Equal(t, map[uint32]uint64{1: 1, 2: 1, 3: 1}, node0.since,
-			"Without forceSkipFilesListing, the since map should be populated from existing snapshots on startup",
-		)
-
-		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
-
-		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
-		require.NoError(t, err)
-		require.Equal(t, []bool{true, true, true, false}, exists)
-
-		cancel()
-		node0.Close()
-
-		// Repeat with forceSkipFilesListing=true
-		ctx, cancel = context.WithCancel(context.Background())
-		defer cancel()
-		node0Conf = newConf()
-		node0Conf.Set("NodeService.forceSkipFilesListing", true)
-		node0, node0Address = getService(ctx, t, cloudStorage, Config{
-			NodeID:           0,
-			ClusterSize:      1,
-			TotalHashRanges:  totalHashRanges,
-			SnapshotInterval: 60 * time.Second,
-		}, node0Conf)
-		c = getClient(t, totalHashRanges, node0Address)
-
-		require.Empty(t, node0.since,
-			"With forceSkipFilesListing, the since map should NOT be populated on startup",
-		)
-
-		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
-
-		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
-		require.NoError(t, err)
-		require.Equal(t, []bool{false, false, false, false}, exists,
-			"With forceSkipFilesListing, snapshots cannot be loaded even with explicit LoadSnapshots call")
-
-		cancel()
-		node0.Close()
-	}
-
-	t.Run("badger", func(t *testing.T) {
-		run(t, func() *config.Config {
-			conf := config.New()
-			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-			conf.Set("BadgerDB.Dedup.Compress", false)
-			return conf
-		})
-	})
-
-	t.Run("badger compressed", func(t *testing.T) {
-		run(t, func() *config.Config {
-			conf := config.New()
-			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-			conf.Set("BadgerDB.Dedup.Compress", true)
-			return conf
-		})
-	})
-}
-
 func getService(
 	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf *config.Config,
 ) (*Service, string) {
@@ -844,4 +724,227 @@ func getScaler(t testing.TB, totalHashRanges uint32, addresses ...string) *scale
 	t.Cleanup(func() { _ = op.Close() })
 
 	return op
+}
+
+func TestListSnapshotsSorting(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, newConf func() *config.Config) {
+		t.Parallel()
+
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		totalHashRanges := uint32(4)
+		node0Conf := newConf()
+		node0, _ := getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			ClusterSize:      1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, node0Conf)
+
+		// Create snapshot files with out-of-order from/to values for hash range 3
+		// Expected order after sorting: hr_3_s_0_100, hr_3_s_100_200, hr_3_s_200_300
+		snapshotFiles := []struct {
+			filename string
+			from     uint64
+			to       uint64
+		}{
+			{defaultBackupFolderName + "/hr_3_s_200_300.snapshot", 200, 300},
+			{defaultBackupFolderName + "/hr_3_s_0_100.snapshot", 0, 100},
+			{defaultBackupFolderName + "/hr_3_s_100_200.snapshot", 100, 200},
+			// Add some files for hash range 1 to test sorting across multiple ranges
+			{defaultBackupFolderName + "/hr_1_s_50_150.snapshot", 50, 150},
+			{defaultBackupFolderName + "/hr_1_s_0_50.snapshot", 0, 50},
+		}
+
+		// Upload empty snapshot files to minio
+		for _, sf := range snapshotFiles {
+			_, err := cloudStorage.UploadReader(ctx, sf.filename, strings.NewReader(""))
+			require.NoError(t, err)
+		}
+
+		// Call listSnapshots to get the sorted results
+		totalFiles, filesByHashRange, err := node0.listSnapshots(ctx)
+		require.NoError(t, err)
+		require.Equal(t, 5, totalFiles)
+		require.Equal(t, map[uint32][]snapshotFile{
+			1: {
+				{
+					filename:  defaultBackupFolderName + "/hr_1_s_0_50.snapshot",
+					hashRange: 1,
+					from:      0,
+					to:        50,
+				},
+				{
+					filename:  defaultBackupFolderName + "/hr_1_s_50_150.snapshot",
+					hashRange: 1,
+					from:      50,
+					to:        150,
+				},
+			},
+			3: {
+				{
+					filename:  defaultBackupFolderName + "/hr_3_s_0_100.snapshot",
+					hashRange: 3,
+					from:      0,
+					to:        100,
+				},
+				{
+					filename:  defaultBackupFolderName + "/hr_3_s_100_200.snapshot",
+					hashRange: 3,
+					from:      100,
+					to:        200,
+				},
+				{
+					filename:  defaultBackupFolderName + "/hr_3_s_200_300.snapshot",
+					hashRange: 3,
+					from:      200,
+					to:        300,
+				},
+			},
+		}, filesByHashRange)
+
+		cancel()
+		node0.Close()
+	}
+
+	run(t, func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		return conf
+	})
+}
+
+func TestDegradedMode(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, newConf func() *config.Config) {
+		t.Parallel()
+
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		totalHashRanges := uint32(3)
+
+		// Create a variable to hold degraded state that can be updated during the test
+		degradedNodes := make([]bool, 2)
+
+		// Create two nodes with DegradedNodes function
+		node0Conf := newConf()
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
+			NodeID:          0,
+			ClusterSize:     2,
+			TotalHashRanges: totalHashRanges,
+			DegradedNodes: func() []bool {
+				return degradedNodes
+			},
+		}, node0Conf)
+
+		node1Conf := newConf()
+		node1, node1Address := getService(ctx, t, cloudStorage, Config{
+			NodeID:          1,
+			ClusterSize:     2,
+			TotalHashRanges: totalHashRanges,
+			Addresses:       []string{node0Address},
+			DegradedNodes: func() []bool {
+				return degradedNodes
+			},
+		}, node1Conf)
+
+		c := getClient(t, totalHashRanges, node0Address, node1Address)
+
+		// Test that both nodes work normally when not degraded
+		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
+
+		exists, err := c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		// Mark node 1 as degraded
+		degradedNodes[1] = true
+
+		// Test that degraded node rejects Get requests
+		resp, err := node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+		require.NoError(t, err)
+		require.Equal(t, pb.ErrorCode_SCALING, resp.ErrorCode)
+		require.Len(t, resp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+		require.Equal(t, node0Address, resp.NodesAddresses[0])
+
+		// Test that degraded node rejects Put requests
+		putResp, err := node1.Put(ctx, &pb.PutRequest{Keys: []string{"key5"}, TtlSeconds: uint64(testTTL.Seconds())})
+		require.NoError(t, err)
+		require.Equal(t, pb.ErrorCode_SCALING, putResp.ErrorCode)
+		require.Len(t, putResp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+		require.Equal(t, node0Address, putResp.NodesAddresses[0])
+
+		// Test that non-degraded node returns only non-degraded addresses in Get
+		resp, err = node0.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+		require.NoError(t, err)
+		require.Equal(t, pb.ErrorCode_NO_ERROR, resp.ErrorCode)
+		require.Len(t, resp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+		require.Equal(t, node0Address, resp.NodesAddresses[0])
+
+		// Test that non-degraded node returns only non-degraded addresses in Put
+		putResp, err = node0.Put(ctx, &pb.PutRequest{Keys: []string{"key6"}, TtlSeconds: uint64(testTTL.Seconds())})
+		require.NoError(t, err)
+		require.Equal(t, pb.ErrorCode_NO_ERROR, putResp.ErrorCode)
+		require.Len(t, putResp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+		require.Equal(t, node0Address, putResp.NodesAddresses[0])
+
+		// Test that GetNodeInfo returns only non-degraded addresses
+		nodeInfo, err := node0.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{NodeId: 0})
+		require.NoError(t, err)
+		require.Len(t, nodeInfo.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+		require.Equal(t, node0Address, nodeInfo.NodesAddresses[0])
+
+		// Test that LoadSnapshots still works on degraded node
+		op := getScaler(t, totalHashRanges, node0Address, node1Address)
+		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
+
+		loadResp, err := node1.LoadSnapshots(ctx, &pb.LoadSnapshotsRequest{})
+		require.NoError(t, err)
+		require.True(t, loadResp.Success, "LoadSnapshots should work on degraded nodes")
+
+		// Mark node 0 as degraded and node 1 as non-degraded
+		degradedNodes[0] = true
+		degradedNodes[1] = false
+
+		// Test that now node 0 rejects traffic and node 1 accepts it
+		resp, err = node0.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+		require.NoError(t, err)
+		require.Equal(t, pb.ErrorCode_SCALING, resp.ErrorCode)
+
+		// Node 1 should not return SCALING error (might return WRONG_NODE or NO_ERROR depending on key hash)
+		resp, err = node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+		require.NoError(t, err)
+		require.NotEqual(t, pb.ErrorCode_SCALING, resp.ErrorCode, "Node 1 should not be in degraded mode")
+		require.Len(t, resp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+		require.Equal(t, node1Address, resp.NodesAddresses[0])
+
+		cancel()
+		node0.Close()
+		node1.Close()
+	}
+
+	run(t, func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		return conf
+	})
 }

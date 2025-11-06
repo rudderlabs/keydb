@@ -1566,7 +1566,7 @@ func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, rp scaler.Retry
 
 	addr := fmt.Sprintf(":%d", freePort)
 
-	opServer := newHTTPServer(c, op, addr, log)
+	opServer := newHTTPServer(c, op, addr, stats.NOP, log)
 	go func() {
 		err := opServer.Start(context.Background())
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -1706,4 +1706,273 @@ func startMockNodeService(t testing.TB, identifier string) *mockNodeServiceServe
 	})
 
 	return mockServer
+}
+
+func TestDegradedModeDuringScaling(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	totalHashRanges := uint32(3)
+
+	// Create a variable to hold degraded state that can be updated during the test
+	degradedNodes := make([]bool, 2)
+
+	// Create two nodes with DegradedNodes function
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:          0,
+		ClusterSize:     2,
+		TotalHashRanges: totalHashRanges,
+		DegradedNodes: func() []bool {
+			return degradedNodes
+		},
+	}, node0Conf)
+
+	node1Conf := newConf()
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:          1,
+		ClusterSize:     2,
+		TotalHashRanges: totalHashRanges,
+		Addresses:       []string{node0Address},
+		DegradedNodes: func() []bool {
+			return degradedNodes
+		},
+	}, node1Conf)
+
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address, node1Address)
+
+	// Test Put some initial data
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+	}, true)
+
+	// Test Get to verify data exists
+	body := s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+
+	// Mark node 1 as degraded
+	degradedNodes[1] = true
+
+	// Verify that node 1 rejects Get requests
+	resp, err := node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+	require.NoError(t, err)
+	require.Equal(t, pb.ErrorCode_SCALING, resp.ErrorCode)
+	require.Len(t, resp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+	require.Equal(t, node0Address, resp.NodesAddresses[0])
+
+	// Verify that node 1 rejects Put requests
+	putResp, err := node1.Put(ctx, &pb.PutRequest{Keys: []string{"key5"}, TtlSeconds: uint64(5 * 60)})
+	require.NoError(t, err)
+	require.Equal(t, pb.ErrorCode_SCALING, putResp.ErrorCode)
+	require.Len(t, putResp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+	require.Equal(t, node0Address, putResp.NodesAddresses[0])
+
+	// Verify that GetNodeInfo returns only non-degraded addresses
+	nodeInfo, err := node0.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{NodeId: 0})
+	require.NoError(t, err)
+	require.Len(t, nodeInfo.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+	require.Equal(t, node0Address, nodeInfo.NodesAddresses[0])
+
+	// Mark node 1 as non-degraded again
+	degradedNodes[1] = false
+
+	// Verify that node 1 now accepts requests (should not return SCALING error)
+	resp, err = node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+	require.NoError(t, err)
+	require.NotEqual(t, pb.ErrorCode_SCALING, resp.ErrorCode, "Node 1 should not be in degraded mode")
+	require.Len(t, resp.NodesAddresses, 2, "All non-degraded nodes should be in NodesAddresses")
+
+	cancel()
+	node0.Close()
+	node1.Close()
+}
+
+func TestScaleUpInDegradedMode(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	totalHashRanges := uint32(3)
+
+	// Create a variable to hold degraded state that can be updated during the test
+	degradedNodes := make([]bool, 1)
+
+	// Step 1: Create a cluster with 1 node
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:          0,
+		ClusterSize:     1,
+		TotalHashRanges: totalHashRanges,
+		DegradedNodes:   func() []bool { return degradedNodes },
+	}, node0Conf)
+
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address)
+
+	// Step 2: Add keys via Put and verify them via Get
+	// Add enough keys to ensure distribution across hash ranges
+	// Based on hash distribution with clusterSize=2, totalHashRanges=3:
+	// key1, key2, key3 → node0; key4, key5, key6, key7, key8 → will distribute across nodes
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"}, TTL: testTTL,
+	}, true)
+
+	body := s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+	})
+	require.JSONEq(t,
+		`{"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		body,
+	)
+
+	// Step 3: Create a second node
+	node1Conf := newConf()
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:          1,
+		ClusterSize:     2,
+		TotalHashRanges: totalHashRanges,
+		Addresses:       []string{node0Address},
+		DegradedNodes:   func() []bool { return degradedNodes },
+	}, node1Conf)
+
+	// Step 4: Update degradedNodes - mark node 1 as degraded
+	degradedNodes = append(degradedNodes, true) //nolint:makezero
+
+	// Verify that node 1 is in degraded mode
+	resp, err := node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+	require.NoError(t, err)
+	require.Equal(t, pb.ErrorCode_SCALING, resp.ErrorCode)
+
+	// Step 5: Use /autoScale to scale the cluster while node1 is degraded
+	_ = s.Do("/autoScale", AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address},
+		NewNodesAddresses: []string{node0Address, node1Address},
+	}, true)
+
+	// Verify scale up worked - check node info
+	// Note: While node1 is degraded, NodesAddresses will only include non-degraded nodes
+	body = s.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse := pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 1,
+		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
+	)
+	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
+	require.ElementsMatch(t, []uint32{0, 1}, infoResponse.HashRanges)
+
+	body = s.Do("/info", InfoRequest{NodeID: 1})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 1,
+		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
+	)
+	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
+	require.ElementsMatch(t, []uint32{2}, infoResponse.HashRanges)
+
+	// Step 6: mark node 1 as non-degraded
+	degradedNodes[1] = false
+
+	// Verify that node 1 now accepts requests and has loaded snapshots correctly
+	// Node1 owns hash range 2, which contains key4 and other keys
+	// Let's determine which keys belong to node1's hash range
+	h := hash.New(2, totalHashRanges)
+	allKeys := []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"}
+	var node1Keys []string
+	for _, key := range allKeys {
+		if h.GetNodeNumber(key) == 1 {
+			node1Keys = append(node1Keys, key)
+		}
+	}
+	require.Greater(t, len(node1Keys), 0, "Node 1 should own at least one key")
+	t.Logf("Node 1 owns %d keys: %v", len(node1Keys), node1Keys)
+
+	// Query node1 directly for keys that belong to its hash range
+	resp, err = node1.Get(ctx, &pb.GetRequest{Keys: node1Keys})
+	require.NoError(t, err)
+	require.NotEqual(t, pb.ErrorCode_SCALING, resp.ErrorCode, "Node 1 should not be in degraded mode")
+	require.Len(t, resp.Exists, len(node1Keys), "Node 1 should return results for all its keys")
+	for _, exists := range resp.Exists {
+		require.True(t, exists, "All keys belonging to node1 should exist after loading snapshots")
+	}
+
+	// Verify that now both nodes appear in NodesAddresses
+	body = s.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 2,
+		"Both nodes should be in NodesAddresses after node1 is no longer degraded",
+	)
+	require.Contains(t, infoResponse.NodesAddresses, node0Address)
+	require.Contains(t, infoResponse.NodesAddresses, node1Address)
+
+	// Step 7: Verify that the cluster is scaled and Get and Put are now served by both nodes
+	// Verify all existing data is accessible via scaler
+	body = s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+	})
+	require.JSONEq(t,
+		`{"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		body,
+	)
+
+	// Test Put with new keys now that both nodes are operational
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"key9", "key10", "key11"}, TTL: testTTL,
+	}, true)
+
+	// Verify all keys including new ones are accessible
+	body = s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "key10", "key11"},
+	})
+	require.JSONEq(t,
+		`{
+			"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,
+			"key7":true,"key8":true,"key9":true,"key10":true,"key11":true
+		}`,
+		body,
+	)
+
+	cancel()
+	node0.Close()
+	node1.Close()
 }

@@ -16,15 +16,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rudderlabs/keydb/release"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/node"
 	pb "github.com/rudderlabs/keydb/proto"
+	"github.com/rudderlabs/keydb/release"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	_ "github.com/rudderlabs/rudder-go-kit/maxprocs"
@@ -103,6 +103,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	if len(nodeAddresses) == 0 {
 		return fmt.Errorf("no node addresses provided")
 	}
+	degradedNodes := conf.GetReloadableStringVar("", "degradedNodes")
 
 	nodeConfig := node.Config{
 		NodeID:          uint32(nodeID),
@@ -115,7 +116,24 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		GarbageCollectionInterval: conf.GetDuration("gcInterval", // node.DefaultGarbageCollectionInterval will be used
 			0, time.Nanosecond,
 		),
-		Addresses:                 strings.Split(nodeAddresses, ","),
+		Addresses: strings.Split(nodeAddresses, ","),
+		DegradedNodes: func() []bool {
+			raw := strings.TrimSpace(degradedNodes.Load())
+			if raw == "" {
+				return nil
+			}
+			v := strings.Split(raw, ",")
+			b := make([]bool, len(v))
+			for i, s := range v {
+				var err error
+				b[i], err = strconv.ParseBool(s)
+				if err != nil {
+					log.Warnn("Failed to parse degraded node", logger.NewStringField("v", raw), obskit.Error(err))
+					return nil
+				}
+			}
+			return b
+		},
 		LogTableStructureDuration: conf.GetDuration("logTableStructureDuration", 10, time.Minute),
 		BackupFolderName:          conf.GetString("KUBE_NAMESPACE", ""),
 	}
@@ -157,8 +175,31 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		}
 	}()
 
-	// create a gRPC server with latency interceptors
+	// Configure gRPC server keepalive parameters
+	grpcKeepaliveMinTime := conf.GetDuration("grpc.keepalive.minTime", 10, time.Second)
+	grpcKeepalivePermitWithoutStream := conf.GetBool("grpc.keepalive.permitWithoutStream", true)
+	grpcKeepaliveTime := conf.GetDuration("grpc.keepalive.time", 60, time.Second)
+	grpcKeepaliveTimeout := conf.GetDuration("grpc.keepalive.timeout", 20, time.Second)
+
+	log.Infon("gRPC server keepalive configuration",
+		logger.NewDurationField("enforcementMinTime", grpcKeepaliveMinTime),
+		logger.NewBoolField("enforcementPermitWithoutStream", grpcKeepalivePermitWithoutStream),
+		logger.NewDurationField("serverTime", grpcKeepaliveTime),
+		logger.NewDurationField("serverTimeout", grpcKeepaliveTimeout),
+	)
+
+	// create a gRPC server with latency interceptors and keepalive parameters
 	server := grpc.NewServer(
+		// Keepalive enforcement policy - controls what the server requires from clients
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             grpcKeepaliveMinTime,
+			PermitWithoutStream: grpcKeepalivePermitWithoutStream,
+		}),
+		// Keepalive parameters - controls server's own keepalive behavior
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    grpcKeepaliveTime,
+			Timeout: grpcKeepaliveTimeout,
+		}),
 		// Unary interceptor to record latency for unary RPCs
 		grpc.UnaryInterceptor(
 			func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (
