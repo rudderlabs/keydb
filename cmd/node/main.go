@@ -118,7 +118,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		),
 		Addresses: strings.Split(nodeAddresses, ","),
 		DegradedNodes: func() []bool {
-			raw := degradedNodes.Load()
+			raw := strings.TrimSpace(degradedNodes.Load())
+			if raw == "" {
+				return nil
+			}
 			v := strings.Split(raw, ",")
 			b := make([]bool, len(v))
 			for i, s := range v {
@@ -126,6 +129,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 				b[i], err = strconv.ParseBool(s)
 				if err != nil {
 					log.Warnn("Failed to parse degraded node", logger.NewStringField("v", raw), obskit.Error(err))
+					return nil
 				}
 			}
 			return b
