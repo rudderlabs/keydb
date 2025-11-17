@@ -57,24 +57,24 @@ func BenchmarkConnectionPoolSizeNoConcurrency(b *testing.B) {
 // BenchmarkConcurrentRequests benchmarks concurrent requests with different pool sizes
 /*
 BenchmarkConcurrentRequests
-BenchmarkConcurrentRequests/PoolSize_1_Delays_0s-24         	   54345	     19527 ns/op	     51210 requests/sec	     54345 total_requests
-BenchmarkConcurrentRequests/PoolSize_1_Delays_5ms-24        	    4195	    242681 ns/op	      4121 requests/sec	      4195 total_requests
-BenchmarkConcurrentRequests/PoolSize_1_Delays_10ms-24       	    2647	    450333 ns/op	      2221 requests/sec	      2647 total_requests
-BenchmarkConcurrentRequests/PoolSize_5_Delays_0s-24         	   57218	     21053 ns/op	     47500 requests/sec	     57218 total_requests
-BenchmarkConcurrentRequests/PoolSize_5_Delays_5ms-24        	    5101	    239094 ns/op	      4182 requests/sec	      5101 total_requests
-BenchmarkConcurrentRequests/PoolSize_5_Delays_10ms-24       	    2660	    447879 ns/op	      2233 requests/sec	      2660 total_requests
-BenchmarkConcurrentRequests/PoolSize_10_Delays_0s-24        	   55064	     21236 ns/op	     47089 requests/sec	     55064 total_requests
-BenchmarkConcurrentRequests/PoolSize_10_Delays_5ms-24       	    5004	    238139 ns/op	      4199 requests/sec	      5004 total_requests
-BenchmarkConcurrentRequests/PoolSize_10_Delays_10ms-24      	    2300	    444404 ns/op	      2250 requests/sec	      2300 total_requests
-BenchmarkConcurrentRequests/PoolSize_20_Delays_0s-24        	  154706	      7374 ns/op	    135616 requests/sec	    154706 total_requests
-BenchmarkConcurrentRequests/PoolSize_20_Delays_5ms-24       	    4126	    246476 ns/op	      4057 requests/sec	      4126 total_requests
-BenchmarkConcurrentRequests/PoolSize_20_Delays_10ms-24      	    2232	    450412 ns/op	      2220 requests/sec	      2232 total_requests
-BenchmarkConcurrentRequests/PoolSize_50_Delays_0s-24        	  196645	      5858 ns/op	    170719 requests/sec	    196645 total_requests
-BenchmarkConcurrentRequests/PoolSize_50_Delays_5ms-24       	    4378	    243105 ns/op	      4113 requests/sec	      4378 total_requests
-BenchmarkConcurrentRequests/PoolSize_50_Delays_10ms-24      	    2282	    453753 ns/op	      2204 requests/sec	      2282 total_requests
-BenchmarkConcurrentRequests/PoolSize_100_Delays_0s-24       	  219207	      5291 ns/op	    189009 requests/sec	    219207 total_requests
-BenchmarkConcurrentRequests/PoolSize_100_Delays_5ms-24      	    4339	    237152 ns/op	      4217 requests/sec	      4339 total_requests
-BenchmarkConcurrentRequests/PoolSize_100_Delays_10ms-24     	    2271	    449967 ns/op	      2222 requests/sec	      2271 total_requests
+BenchmarkConcurrentRequests/PoolSize_1_Delays_0s-24         	   54345	     19527 ns/op	     51210 requests/sec
+BenchmarkConcurrentRequests/PoolSize_1_Delays_5ms-24        	    4195	    242681 ns/op	      4121 requests/sec
+BenchmarkConcurrentRequests/PoolSize_1_Delays_10ms-24       	    2647	    450333 ns/op	      2221 requests/sec
+BenchmarkConcurrentRequests/PoolSize_5_Delays_0s-24         	   57218	     21053 ns/op	     47500 requests/sec
+BenchmarkConcurrentRequests/PoolSize_5_Delays_5ms-24        	    5101	    239094 ns/op	      4182 requests/sec
+BenchmarkConcurrentRequests/PoolSize_5_Delays_10ms-24       	    2660	    447879 ns/op	      2233 requests/sec
+BenchmarkConcurrentRequests/PoolSize_10_Delays_0s-24        	   55064	     21236 ns/op	     47089 requests/sec
+BenchmarkConcurrentRequests/PoolSize_10_Delays_5ms-24       	    5004	    238139 ns/op	      4199 requests/sec
+BenchmarkConcurrentRequests/PoolSize_10_Delays_10ms-24      	    2300	    444404 ns/op	      2250 requests/sec
+BenchmarkConcurrentRequests/PoolSize_20_Delays_0s-24        	  154706	      7374 ns/op	    135616 requests/sec
+BenchmarkConcurrentRequests/PoolSize_20_Delays_5ms-24       	    4126	    246476 ns/op	      4057 requests/sec
+BenchmarkConcurrentRequests/PoolSize_20_Delays_10ms-24      	    2232	    450412 ns/op	      2220 requests/sec
+BenchmarkConcurrentRequests/PoolSize_50_Delays_0s-24        	  196645	      5858 ns/op	    170719 requests/sec
+BenchmarkConcurrentRequests/PoolSize_50_Delays_5ms-24       	    4378	    243105 ns/op	      4113 requests/sec
+BenchmarkConcurrentRequests/PoolSize_50_Delays_10ms-24      	    2282	    453753 ns/op	      2204 requests/sec
+BenchmarkConcurrentRequests/PoolSize_100_Delays_0s-24       	  219207	      5291 ns/op	    189009 requests/sec
+BenchmarkConcurrentRequests/PoolSize_100_Delays_5ms-24      	    4339	    237152 ns/op	      4217 requests/sec
+BenchmarkConcurrentRequests/PoolSize_100_Delays_10ms-24     	    2271	    449967 ns/op	      2222 requests/sec
 PASS
 */
 func BenchmarkConcurrentRequests(b *testing.B) {
