@@ -56,8 +56,9 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	clientConfig := client.Config{
-		Addresses:       strings.Split(nodeAddresses, ","),
-		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
+		Addresses:          strings.Split(nodeAddresses, ","),
+		TotalHashRanges:    uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
+		ConnectionPoolSize: conf.GetInt("connectionPoolSize", 0),
 		RetryPolicy: client.RetryPolicy{
 			Disabled:        conf.GetBool("retryPolicy.disabled", false),
 			InitialInterval: conf.GetDuration("retryPolicy.initialInterval", 0, time.Second),

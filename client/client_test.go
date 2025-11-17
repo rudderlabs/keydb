@@ -284,20 +284,24 @@ func createTestClientWithServers(t *testing.T, addresses []string) (*Client, fun
 
 	require.NoError(t, err)
 
-	// Override connections with bufconn connections
+	// Override connection pools with bufconn connections
 	client.mu.Lock()
-	for i := range client.connections {
-		_ = client.connections[i].Close()
+	// Close existing pools
+	for i := range client.pools {
+		_ = client.pools[i].Close()
 	}
 
+	// Create new pools with bufconn connections
 	for i, addr := range addresses {
-		conn, err := grpc.NewClient(addr,
+		// Create a simple pool with one connection for testing
+		opts := []grpc.DialOption{
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		)
+		}
+
+		pool, err := NewConnectionPool(context.Background(), i, addr, 1, opts, logger.NOP)
 		require.NoError(t, err)
 
-		client.connections[i] = conn
-		client.clients[i] = proto.NewNodeServiceClient(conn)
+		client.pools[i] = pool
 	}
 	client.mu.Unlock()
 
