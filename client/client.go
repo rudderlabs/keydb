@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
-	"google.golang.org/api/option"
-	gtransport "google.golang.org/api/transport/grpc"
 	"google.golang.org/grpc"
 	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
@@ -107,7 +105,7 @@ type Client struct {
 	hash *hash.Hash
 
 	// pools is a map of node index to gRPC connection pool
-	pools map[int]gtransport.ConnPool
+	pools map[int]*connectionPool
 
 	// mu protects pools, clusterSize and hash
 	mu sync.RWMutex
@@ -190,7 +188,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 	clusterSize := uint32(len(config.Addresses))
 	client := &Client{
 		config:      config,
-		pools:       make(map[int]gtransport.ConnPool),
+		pools:       make(map[int]*connectionPool),
 		clusterSize: clusterSize,
 		hash:        hash.New(clusterSize, config.TotalHashRanges),
 		logger:      log,
@@ -206,10 +204,10 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 
 	client.initMetrics()
 
-	// Create connection pools for all nodes using gRPC's DialPool
-	ctx := context.Background()
+	// Create connection pools for all nodes
+	dialOpts := client.getGrpcDialOptions()
 	for i, addr := range config.Addresses {
-		pool, err := client.createPool(ctx, addr)
+		pool, err := newConnectionPool(addr, config.ConnectionPoolSize, dialOpts)
 		if err != nil {
 			// Close all pools on error
 			_ = client.Close()
@@ -259,12 +257,12 @@ func (c *Client) Close() error {
 
 	var lastErr error
 	for i, pool := range c.pools {
-		if err := pool.Close(); err != nil {
+		if err := pool.close(); err != nil {
 			lastErr = fmt.Errorf("closing connection pool for node %d: %w", i, err)
 		}
 	}
 
-	c.pools = make(map[int]gtransport.ConnPool)
+	c.pools = make(map[int]*connectionPool)
 	c.clusterSize = 0
 
 	return lastErr
@@ -329,7 +327,7 @@ func (c *Client) get(
 			}
 
 			// Get a connection from the pool (round-robin)
-			conn := pool.Conn()
+			conn := pool.getConn()
 			client := pb.NewNodeServiceClient(conn)
 
 			// Create the request
@@ -482,7 +480,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 			}
 
 			// Get a connection from the pool (round-robin)
-			conn := pool.Conn()
+			conn := pool.getConn()
 			client := pb.NewNodeServiceClient(conn)
 
 			// Create the request
@@ -612,16 +610,16 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 	if newClusterSize < oldClusterSize {
 		for i := int(newClusterSize); i < int(oldClusterSize); i++ {
 			if pool, ok := c.pools[i]; ok {
-				_ = pool.Close() // Ignore errors during close
+				_ = pool.close() // Ignore errors during close
 				delete(c.pools, i)
 			}
 		}
 	} else { // we get here if newClusterSize > oldClusterSize
 		// The cluster is bigger, create new connection pools
-		ctx := context.Background()
+		dialOpts := c.getGrpcDialOptions()
 		for i := int(oldClusterSize); i < int(newClusterSize); i++ {
 			addr := nodesAddresses[i]
-			pool, err := c.createPool(ctx, addr)
+			pool, err := newConnectionPool(addr, c.config.ConnectionPoolSize, dialOpts)
 			if err != nil {
 				return fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
 			}
@@ -677,15 +675,50 @@ func (c *Client) getGrpcDialOptions() []grpc.DialOption {
 	}
 }
 
-// createPool creates a gRPC connection with proper keepalive and retry configuration
-func (c *Client) createPool(ctx context.Context, addr string) (gtransport.ConnPool, error) {
-	grpcDialOpts := c.getGrpcDialOptions()
-	opts := make([]option.ClientOption, 0, len(grpcDialOpts)+3)
-	opts = append(opts, option.WithEndpoint(addr))
-	opts = append(opts, option.WithoutAuthentication())
-	opts = append(opts, option.WithGRPCConnectionPool(c.config.ConnectionPoolSize))
-	for _, dialOpt := range grpcDialOpts {
-		opts = append(opts, option.WithGRPCDialOption(dialOpt))
+// connectionPool manages multiple gRPC connections for round-robin load balancing
+type connectionPool struct {
+	connections []*grpc.ClientConn
+	next        atomic.Uint32
+}
+
+// newConnectionPool creates a new connection pool with the specified number of connections
+func newConnectionPool(addr string, size int, dialOpts []grpc.DialOption) (*connectionPool, error) {
+	if size <= 0 {
+		return nil, fmt.Errorf("pool size must be positive, got %d", size)
 	}
-	return gtransport.DialPool(ctx, opts...)
+
+	pool := &connectionPool{
+		connections: make([]*grpc.ClientConn, size),
+	}
+
+	for i := 0; i < size; i++ {
+		conn, err := grpc.NewClient(addr, dialOpts...)
+		if err != nil {
+			// Close any connections we've already created
+			for j := 0; j < i; j++ {
+				_ = pool.connections[j].Close()
+			}
+			return nil, fmt.Errorf("creating connection %d/%d: %w", i+1, size, err)
+		}
+		pool.connections[i] = conn
+	}
+
+	return pool, nil
+}
+
+// getConn returns the next connection in round-robin fashion
+func (p *connectionPool) getConn() *grpc.ClientConn {
+	n := p.next.Add(1)
+	return p.connections[(int(n)-1)%len(p.connections)]
+}
+
+// close closes all connections in the pool
+func (p *connectionPool) close() error {
+	var lastErr error
+	for i, conn := range p.connections {
+		if err := conn.Close(); err != nil {
+			lastErr = fmt.Errorf("closing connection %d/%d: %w", i+1, len(p.connections), err)
+		}
+	}
+	return lastErr
 }

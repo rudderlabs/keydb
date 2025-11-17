@@ -54,74 +54,14 @@ func BenchmarkConnectionPoolSizeNoConcurrency(b *testing.B) {
 	}
 }
 
-// BenchmarkConcurrentRequests benchmarks concurrent requests with different pool sizes
-/*
-BenchmarkConcurrentRequests
-BenchmarkConcurrentRequests/PoolSize_1_Delays_0s-24         	   54345	     19527 ns/op	     51210 requests/sec
-BenchmarkConcurrentRequests/PoolSize_1_Delays_5ms-24        	    4195	    242681 ns/op	      4121 requests/sec
-BenchmarkConcurrentRequests/PoolSize_1_Delays_10ms-24       	    2647	    450333 ns/op	      2221 requests/sec
-BenchmarkConcurrentRequests/PoolSize_5_Delays_0s-24         	   57218	     21053 ns/op	     47500 requests/sec
-BenchmarkConcurrentRequests/PoolSize_5_Delays_5ms-24        	    5101	    239094 ns/op	      4182 requests/sec
-BenchmarkConcurrentRequests/PoolSize_5_Delays_10ms-24       	    2660	    447879 ns/op	      2233 requests/sec
-BenchmarkConcurrentRequests/PoolSize_10_Delays_0s-24        	   55064	     21236 ns/op	     47089 requests/sec
-BenchmarkConcurrentRequests/PoolSize_10_Delays_5ms-24       	    5004	    238139 ns/op	      4199 requests/sec
-BenchmarkConcurrentRequests/PoolSize_10_Delays_10ms-24      	    2300	    444404 ns/op	      2250 requests/sec
-BenchmarkConcurrentRequests/PoolSize_20_Delays_0s-24        	  154706	      7374 ns/op	    135616 requests/sec
-BenchmarkConcurrentRequests/PoolSize_20_Delays_5ms-24       	    4126	    246476 ns/op	      4057 requests/sec
-BenchmarkConcurrentRequests/PoolSize_20_Delays_10ms-24      	    2232	    450412 ns/op	      2220 requests/sec
-BenchmarkConcurrentRequests/PoolSize_50_Delays_0s-24        	  196645	      5858 ns/op	    170719 requests/sec
-BenchmarkConcurrentRequests/PoolSize_50_Delays_5ms-24       	    4378	    243105 ns/op	      4113 requests/sec
-BenchmarkConcurrentRequests/PoolSize_50_Delays_10ms-24      	    2282	    453753 ns/op	      2204 requests/sec
-BenchmarkConcurrentRequests/PoolSize_100_Delays_0s-24       	  219207	      5291 ns/op	    189009 requests/sec
-BenchmarkConcurrentRequests/PoolSize_100_Delays_5ms-24      	    4339	    237152 ns/op	      4217 requests/sec
-BenchmarkConcurrentRequests/PoolSize_100_Delays_10ms-24     	    2271	    449967 ns/op	      2222 requests/sec
-PASS
-*/
-func BenchmarkConcurrentRequests(b *testing.B) {
-	poolSizes := []int{1, 5, 10, 20, 50, 100}
-	processingDelays := []time.Duration{0, 5 * time.Millisecond, 10 * time.Millisecond}
-
-	for _, poolSize := range poolSizes {
-		for _, processingDelay := range processingDelays {
-			b.Run(fmt.Sprintf("PoolSize_%d_Delays_%s", poolSize, processingDelay), func(b *testing.B) {
-				server, listener, address, mockServer := setupBenchmarkServer(processingDelay)
-				defer server.Stop()
-				defer func() { _ = listener.Close() }()
-
-				client := createBenchmarkClient(b, poolSize, address)
-				defer func() { _ = client.Close() }()
-
-				ctx := context.Background()
-				keys := []string{"key1", "key2", "key3", "key4", "key5", "key6"}
-
-				b.ResetTimer()
-				b.ReportAllocs()
-				b.RunParallel(func(pb *testing.PB) {
-					for pb.Next() {
-						_, err := client.Get(ctx, keys)
-						if err != nil {
-							b.Errorf("Get failed: %v", err)
-						}
-					}
-				})
-
-				b.StopTimer()
-				totalRequests := mockServer.GetRequestCount()
-				b.ReportMetric(float64(totalRequests), "total_requests")
-				b.ReportMetric(float64(totalRequests)/b.Elapsed().Seconds(), "requests/sec")
-			})
-		}
-	}
-}
-
 // BenchmarkPoolSizeVsThroughput measures throughput with different pool sizes
 /*
-BenchmarkPoolSizeVsThroughput/PoolSize_1-24         	      118999 requests/sec	    120000 total_requests
-BenchmarkPoolSizeVsThroughput/PoolSize_5-24         	      206456 requests/sec	    240000 total_requests
-BenchmarkPoolSizeVsThroughput/PoolSize_10-24        	      213345 requests/sec	    240000 total_requests
-BenchmarkPoolSizeVsThroughput/PoolSize_20-24        	      208512 requests/sec	    240000 total_requests
-BenchmarkPoolSizeVsThroughput/PoolSize_50-24        	      199104 requests/sec	    210000 total_requests
-BenchmarkPoolSizeVsThroughput/PoolSize_100-24       	      197046 requests/sec	    220000 total_requests
+BenchmarkPoolSizeVsThroughput/PoolSize_1-24         	      147250 requests/sec	    160000 total_requests
+BenchmarkPoolSizeVsThroughput/PoolSize_5-24         	      289117 requests/sec	    330000 total_requests
+BenchmarkPoolSizeVsThroughput/PoolSize_10-24        	      286234 requests/sec	    320000 total_requests
+BenchmarkPoolSizeVsThroughput/PoolSize_20-24        	      261507 requests/sec	    310000 total_requests
+BenchmarkPoolSizeVsThroughput/PoolSize_50-24        	      260443 requests/sec	    300000 total_requests
+BenchmarkPoolSizeVsThroughput/PoolSize_100-24       	      258778 requests/sec	    300000 total_requests
 */
 func BenchmarkPoolSizeVsThroughput(b *testing.B) {
 	numOfRoutines := 10_000
