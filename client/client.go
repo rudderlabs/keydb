@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
+	"google.golang.org/api/option"
+	gtransport "google.golang.org/api/transport/grpc"
 	"google.golang.org/grpc"
 	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
@@ -104,8 +106,8 @@ type Client struct {
 	// hash is the hash instance used for consistent hashing
 	hash *hash.Hash
 
-	// pools is a map of node index to connection pool
-	pools map[int]*ConnectionPool
+	// pools is a map of node index to gRPC connection pool
+	pools map[int]gtransport.ConnPool
 
 	// mu protects pools, clusterSize and hash
 	mu sync.RWMutex
@@ -188,7 +190,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 	clusterSize := uint32(len(config.Addresses))
 	client := &Client{
 		config:      config,
-		pools:       make(map[int]*ConnectionPool),
+		pools:       make(map[int]gtransport.ConnPool),
 		clusterSize: clusterSize,
 		hash:        hash.New(clusterSize, config.TotalHashRanges),
 		logger:      log,
@@ -204,17 +206,14 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 
 	client.initMetrics()
 
-	// Create connection options for all pools
-	connOpts := client.getConnectionOptions()
-
-	// Create connection pools for all nodes
+	// Create connection pools for all nodes using gRPC's DialPool
 	ctx := context.Background()
 	for i, addr := range config.Addresses {
-		pool, err := NewConnectionPool(ctx, i, addr, config.ConnectionPoolSize, connOpts, log)
+		pool, err := client.createPool(ctx, addr)
 		if err != nil {
 			// Close all pools on error
 			_ = client.Close()
-			return nil, fmt.Errorf("creating connection pool for node %d at %s: %w", i, addr, err)
+			return nil, fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
 		}
 
 		client.pools[i] = pool
@@ -253,7 +252,7 @@ func (c *Client) initMetrics() {
 	})
 }
 
-// Close closes all connection pools
+// Close will terminate all connection pools
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -265,7 +264,7 @@ func (c *Client) Close() error {
 		}
 	}
 
-	c.pools = make(map[int]*ConnectionPool)
+	c.pools = make(map[int]gtransport.ConnPool)
 	c.clusterSize = 0
 
 	return lastErr
@@ -329,20 +328,9 @@ func (c *Client) get(
 				return fmt.Errorf("no connection pool for node %d", nodeID)
 			}
 
-			// Get a connection from the pool
-			pc, err := pool.Get(gCtx)
-			if err != nil {
-				cancel()
-				return fmt.Errorf("getting connection from pool for node %d: %w", nodeID, err)
-			}
-			defer func() {
-				if putErr := pool.Put(pc); putErr != nil {
-					c.logger.Warnn("returning connection to pool",
-						logger.NewIntField("nodeId", int64(nodeID)),
-						obskit.Error(putErr),
-					)
-				}
-			}()
+			// Get a connection from the pool (round-robin)
+			conn := pool.Conn()
+			client := pb.NewNodeServiceClient(conn)
 
 			// Create the request
 			req := &pb.GetRequest{Keys: nodeKeys}
@@ -358,7 +346,7 @@ func (c *Client) get(
 				if attempt > 1 {
 					c.metrics.getReqRetries.Increment()
 				}
-				resp, respErr = pc.client.Get(gCtx, req)
+				resp, respErr = client.Get(gCtx, req)
 				if resp != nil && c.clusterSize != resp.ClusterSize {
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
@@ -391,16 +379,16 @@ func (c *Client) get(
 						logger.NewIntField("nodeId", int64(nodeID)),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
-						logger.NewStringField("canonicalTarget", pc.conn.CanonicalTarget()),
-						logger.NewStringField("connState", pc.conn.GetState().String()),
+						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
 						obskit.Error(respErr))
 				} else if resp != nil {
 					c.logger.Warnn("get keys from node",
 						logger.NewIntField("nodeId", int64(nodeID)),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
-						logger.NewStringField("canonicalTarget", pc.conn.CanonicalTarget()),
-						logger.NewStringField("connState", pc.conn.GetState().String()),
+						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
 						obskit.Error(errors.New(resp.ErrorCode.String())))
 				} else {
 					cancel()
@@ -493,20 +481,9 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 				return fmt.Errorf("no connection pool for node %d", nodeID)
 			}
 
-			// Get a connection from the pool
-			pc, err := pool.Get(gCtx)
-			if err != nil {
-				cancel()
-				return fmt.Errorf("getting connection from pool for node %d: %w", nodeID, err)
-			}
-			defer func() {
-				if putErr := pool.Put(pc); putErr != nil {
-					c.logger.Warnn("returning connection to pool",
-						logger.NewIntField("nodeId", int64(nodeID)),
-						obskit.Error(putErr),
-					)
-				}
-			}()
+			// Get a connection from the pool (round-robin)
+			conn := pool.Conn()
+			client := pb.NewNodeServiceClient(conn)
 
 			// Create the request
 			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: uint64(ttl.Seconds())}
@@ -522,7 +499,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 				if attempt > 1 {
 					c.metrics.putReqRetries.Increment()
 				}
-				resp, respErr = pc.client.Put(gCtx, req)
+				resp, respErr = client.Put(gCtx, req)
 				if resp != nil && c.clusterSize != resp.ClusterSize {
 					hasClusterSizeChanged.Store(resp.NodesAddresses)
 					cancel()
@@ -555,16 +532,16 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 						logger.NewIntField("nodeID", int64(nodeID)),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
-						logger.NewStringField("canonicalTarget", pc.conn.CanonicalTarget()),
-						logger.NewStringField("connState", pc.conn.GetState().String()),
+						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
 						obskit.Error(respErr))
 				} else if resp != nil {
 					c.logger.Warnn("put keys in node",
 						logger.NewIntField("nodeID", int64(nodeID)),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
-						logger.NewStringField("canonicalTarget", pc.conn.CanonicalTarget()),
-						logger.NewStringField("connState", pc.conn.GetState().String()),
+						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
 						obskit.Error(errors.New(resp.ErrorCode.String())))
 				} else {
 					cancel()
@@ -631,9 +608,6 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 	// Update hash instance with new cluster size
 	c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
 
-	// Get connection options for creating new pools
-	connOpts := c.getConnectionOptions()
-
 	// If cluster is smaller, close connection pools that are not needed
 	if newClusterSize < oldClusterSize {
 		for i := int(newClusterSize); i < int(oldClusterSize); i++ {
@@ -644,13 +618,12 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 		}
 	} else { // we get here if newClusterSize > oldClusterSize
 		// The cluster is bigger, create new connection pools
-		// But we can only do this if we have addresses for the new nodes
 		ctx := context.Background()
 		for i := int(oldClusterSize); i < int(newClusterSize); i++ {
 			addr := nodesAddresses[i]
-			pool, err := NewConnectionPool(ctx, i, addr, c.config.ConnectionPoolSize, connOpts, c.logger)
+			pool, err := c.createPool(ctx, addr)
 			if err != nil {
-				return fmt.Errorf("creating connection pool for node %d at %s: %w", i, addr, err)
+				return fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
 			}
 
 			c.pools[i] = pool
@@ -671,8 +644,8 @@ func (c *Client) getNextBackoffFunc() func() time.Duration {
 	}
 }
 
-// getConnectionOptions returns the gRPC dial options for creating connections
-func (c *Client) getConnectionOptions() []grpc.DialOption {
+// getGrpcDialOptions returns the gRPC dial options for creating connections
+func (c *Client) getGrpcDialOptions() []grpc.DialOption {
 	// Configure keepalive parameters to detect dead connections
 	kacp := keepalive.ClientParameters{
 		Time:                c.config.GrpcConfig.KeepAliveTime,
@@ -704,7 +677,15 @@ func (c *Client) getConnectionOptions() []grpc.DialOption {
 	}
 }
 
-// createConnection creates a gRPC connection with proper keepalive and retry configuration
-func (c *Client) createConnection(addr string) (*grpc.ClientConn, error) {
-	return grpc.NewClient(addr, c.getConnectionOptions()...)
+// createPool creates a gRPC connection with proper keepalive and retry configuration
+func (c *Client) createPool(ctx context.Context, addr string) (gtransport.ConnPool, error) {
+	grpcDialOpts := c.getGrpcDialOptions()
+	opts := make([]option.ClientOption, 0, len(grpcDialOpts)+3)
+	opts = append(opts, option.WithEndpoint(addr))
+	opts = append(opts, option.WithoutAuthentication())
+	opts = append(opts, option.WithGRPCConnectionPool(c.config.ConnectionPoolSize))
+	for _, dialOpt := range grpcDialOpts {
+		opts = append(opts, option.WithGRPCDialOption(dialOpt))
+	}
+	return gtransport.DialPool(ctx, opts...)
 }

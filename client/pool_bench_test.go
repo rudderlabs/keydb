@@ -105,7 +105,6 @@ func createBenchmarkClient(b *testing.B, poolSize int, address string) *Client {
 		ConnectionPoolSize: poolSize,
 		RetryPolicy:        RetryPolicy{Disabled: true},
 	}, logger.NOP, WithStats(stats.NOP))
-
 	if err != nil {
 		b.Fatalf("failed to create client: %v", err)
 	}
@@ -124,10 +123,10 @@ func BenchmarkConnectionPoolSize(b *testing.B) {
 		b.Run(fmt.Sprintf("PoolSize_%d", poolSize), func(b *testing.B) {
 			server, listener, address, mockServer := setupBenchmarkServer(processingDelay)
 			defer server.Stop()
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 
 			client := createBenchmarkClient(b, poolSize, address)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			ctx := context.Background()
 			keys := []string{"key1", "key2", "key3"}
@@ -159,10 +158,10 @@ func BenchmarkConcurrentRequests(b *testing.B) {
 		b.Run(fmt.Sprintf("PoolSize_%d_Concurrent_%d", poolSize, concurrentClients), func(b *testing.B) {
 			server, listener, address, mockServer := setupBenchmarkServer(processingDelay)
 			defer server.Stop()
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 
 			client := createBenchmarkClient(b, poolSize, address)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			ctx := context.Background()
 			keys := []string{"key1", "key2", "key3"}
@@ -197,10 +196,10 @@ func BenchmarkPoolSizeVsThroughput(b *testing.B) {
 		b.Run(fmt.Sprintf("PoolSize_%d", poolSize), func(b *testing.B) {
 			server, listener, address, mockServer := setupBenchmarkServer(processingDelay)
 			defer server.Stop()
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 
 			client := createBenchmarkClient(b, poolSize, address)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			ctx := context.Background()
 			keys := []string{"key1", "key2", "key3", "key4", "key5"}
@@ -251,10 +250,10 @@ func BenchmarkPoolSizeVsLatency(b *testing.B) {
 		b.Run(fmt.Sprintf("PoolSize_%d_Load_%d", poolSize, concurrentRequests), func(b *testing.B) {
 			server, listener, address, _ := setupBenchmarkServer(processingDelay)
 			defer server.Stop()
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 
 			client := createBenchmarkClient(b, poolSize, address)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			ctx := context.Background()
 			keys := []string{"key1", "key2", "key3"}
@@ -292,24 +291,24 @@ func BenchmarkPoolSizeVsLatency(b *testing.B) {
 			// Calculate statistics
 			if len(latencies) > 0 {
 				var sum time.Duration
-				var max time.Duration
-				min := latencies[0]
+				var maxLatency time.Duration
+				minLatency := latencies[0]
 
 				for _, lat := range latencies {
 					sum += lat
-					if lat > max {
-						max = lat
+					if lat > maxLatency {
+						maxLatency = lat
 					}
-					if lat < min {
-						min = lat
+					if lat < minLatency {
+						minLatency = lat
 					}
 				}
 
 				avg := sum / time.Duration(len(latencies))
 
 				b.ReportMetric(float64(avg.Milliseconds()), "avg_latency_ms")
-				b.ReportMetric(float64(min.Milliseconds()), "min_latency_ms")
-				b.ReportMetric(float64(max.Milliseconds()), "max_latency_ms")
+				b.ReportMetric(float64(minLatency.Milliseconds()), "min_latency_ms")
+				b.ReportMetric(float64(maxLatency.Milliseconds()), "max_latency_ms")
 			}
 		})
 	}
@@ -334,10 +333,10 @@ func BenchmarkGetOperations(b *testing.B) {
 		b.Run(name, func(b *testing.B) {
 			server, listener, address, mockServer := setupBenchmarkServer(processingDelay)
 			defer server.Stop()
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 
 			client := createBenchmarkClient(b, bm.poolSize, address)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			ctx := context.Background()
 			keys := []string{"key1", "key2", "key3"}
@@ -378,10 +377,10 @@ func BenchmarkPutOperations(b *testing.B) {
 		b.Run(fmt.Sprintf("PoolSize_%d", poolSize), func(b *testing.B) {
 			server, listener, address, mockServer := setupBenchmarkServer(processingDelay)
 			defer server.Stop()
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 
 			client := createBenchmarkClient(b, poolSize, address)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			ctx := context.Background()
 			keys := []string{"key1", "key2", "key3"}
@@ -415,10 +414,10 @@ func BenchmarkPoolExhaustion(b *testing.B) {
 		b.Run(fmt.Sprintf("PoolSize_%d", poolSize), func(b *testing.B) {
 			server, listener, address, _ := setupBenchmarkServer(processingDelay)
 			defer server.Stop()
-			defer listener.Close()
+			defer func() { _ = listener.Close() }()
 
 			client := createBenchmarkClient(b, poolSize, address)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			// Create context with timeout
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)

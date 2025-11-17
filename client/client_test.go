@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
@@ -291,16 +290,10 @@ func createTestClientWithServers(t *testing.T, addresses []string) (*Client, fun
 		_ = client.pools[i].Close()
 	}
 
-	// Create new pools with bufconn connections
+	// Create new pools with bufconn connections using gRPC's DialPool
 	for i, addr := range addresses {
-		// Create a simple pool with one connection for testing
-		opts := []grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-		}
-
-		pool, err := NewConnectionPool(context.Background(), i, addr, 1, opts, logger.NOP)
+		pool, err := client.createPool(context.Background(), addr)
 		require.NoError(t, err)
-
 		client.pools[i] = pool
 	}
 	client.mu.Unlock()
