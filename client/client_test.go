@@ -293,7 +293,7 @@ func createTestClientWithServers(t *testing.T, addresses []string) (*Client, fun
 	// Create new pools with bufconn connections
 	dialOpts := client.getGrpcDialOptions()
 	for i, addr := range addresses {
-		pool, err := newConnectionPool(addr, client.config.ConnectionPoolSize, dialOpts)
+		pool, err := newConnectionPool(addr, client.config.ConnectionPoolSize, dialOpts...)
 		require.NoError(t, err)
 		client.pools[i] = pool
 	}
