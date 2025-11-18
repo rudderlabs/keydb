@@ -207,7 +207,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 	// Create connection pools for all nodes
 	dialOpts := client.getGrpcDialOptions()
 	for i, addr := range config.Addresses {
-		pool, err := newConnectionPool(addr, config.ConnectionPoolSize, dialOpts)
+		pool, err := newConnectionPool(addr, config.ConnectionPoolSize, dialOpts...)
 		if err != nil {
 			// Close all pools on error
 			_ = client.Close()
@@ -327,8 +327,7 @@ func (c *Client) get(
 			}
 
 			// Get a connection from the pool (round-robin)
-			conn := pool.getConn()
-			client := pb.NewNodeServiceClient(conn)
+			client, conn := pool.getClient()
 
 			// Create the request
 			req := &pb.GetRequest{Keys: nodeKeys}
@@ -480,8 +479,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 			}
 
 			// Get a connection from the pool (round-robin)
-			conn := pool.getConn()
-			client := pb.NewNodeServiceClient(conn)
+			client, conn := pool.getClient()
 
 			// Create the request
 			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: uint64(ttl.Seconds())}
@@ -619,7 +617,7 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 		dialOpts := c.getGrpcDialOptions()
 		for i := int(oldClusterSize); i < int(newClusterSize); i++ {
 			addr := nodesAddresses[i]
-			pool, err := newConnectionPool(addr, c.config.ConnectionPoolSize, dialOpts)
+			pool, err := newConnectionPool(addr, c.config.ConnectionPoolSize, dialOpts...)
 			if err != nil {
 				return fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
 			}
@@ -678,17 +676,19 @@ func (c *Client) getGrpcDialOptions() []grpc.DialOption {
 // connectionPool manages multiple gRPC connections for round-robin load balancing
 type connectionPool struct {
 	connections []*grpc.ClientConn
+	clients     []pb.NodeServiceClient
 	next        atomic.Uint32
 }
 
 // newConnectionPool creates a new connection pool with the specified number of connections
-func newConnectionPool(addr string, size int, dialOpts []grpc.DialOption) (*connectionPool, error) {
+func newConnectionPool(addr string, size int, dialOpts ...grpc.DialOption) (*connectionPool, error) {
 	if size <= 0 {
 		return nil, fmt.Errorf("pool size must be positive, got %d", size)
 	}
 
 	pool := &connectionPool{
 		connections: make([]*grpc.ClientConn, size),
+		clients:     make([]pb.NodeServiceClient, size),
 	}
 
 	for i := 0; i < size; i++ {
@@ -701,15 +701,17 @@ func newConnectionPool(addr string, size int, dialOpts []grpc.DialOption) (*conn
 			return nil, fmt.Errorf("creating connection %d/%d: %w", i+1, size, err)
 		}
 		pool.connections[i] = conn
+		pool.clients[i] = pb.NewNodeServiceClient(conn)
 	}
 
 	return pool, nil
 }
 
 // getConn returns the next connection in round-robin fashion
-func (p *connectionPool) getConn() *grpc.ClientConn {
+func (p *connectionPool) getClient() (pb.NodeServiceClient, *grpc.ClientConn) {
 	n := p.next.Add(1)
-	return p.connections[(int(n)-1)%len(p.connections)]
+	i := (int(n) - 1) % len(p.connections)
+	return p.clients[i], p.connections[i]
 }
 
 // close closes all connections in the pool
@@ -720,5 +722,7 @@ func (p *connectionPool) close() error {
 			lastErr = fmt.Errorf("closing connection %d/%d: %w", i+1, len(p.connections), err)
 		}
 	}
+	p.connections = nil
+	p.clients = nil
 	return lastErr
 }
