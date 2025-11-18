@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -126,6 +127,7 @@ type Client struct {
 		putReqLatency  stats.Timer
 		putReqFailures stats.Counter
 		putReqRetries  stats.Counter
+		connectionOps  map[int]map[int]stats.Counter
 	}
 }
 
@@ -203,6 +205,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 	}
 
 	client.initMetrics()
+	client.initConnectionMetrics(config)
 
 	// Create connection pools for all nodes
 	dialOpts := client.getGrpcDialOptions()
@@ -248,6 +251,21 @@ func (c *Client) initMetrics() {
 	c.metrics.putReqRetries = c.stats.NewTaggedStat("keydb_client_req_retries_total", stats.CountType, stats.Tags{
 		"method": "put",
 	})
+}
+
+func (c *Client) initConnectionMetrics(config Config) {
+	c.metrics.connectionOps = make(map[int]map[int]stats.Counter)
+	for i := range config.Addresses {
+		c.metrics.connectionOps[i] = make(map[int]stats.Counter)
+		for j := range config.ConnectionPoolSize {
+			c.metrics.connectionOps[i][j] = c.stats.NewTaggedStat(
+				"keydb_client_connection_ops_total", stats.CountType, stats.Tags{
+					"node": strconv.Itoa(i),
+					"conn": strconv.Itoa(j),
+				},
+			)
+		}
+	}
 }
 
 // Close will terminate all connection pools
@@ -327,7 +345,8 @@ func (c *Client) get(
 			}
 
 			// Get a connection from the pool (round-robin)
-			client, conn := pool.getClient()
+			client, conn, connID := pool.getClient()
+			c.metrics.connectionOps[int(nodeID)][connID].Increment()
 
 			// Create the request
 			req := &pb.GetRequest{Keys: nodeKeys}
@@ -479,7 +498,8 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 			}
 
 			// Get a connection from the pool (round-robin)
-			client, conn := pool.getClient()
+			client, conn, connID := pool.getClient()
+			c.metrics.connectionOps[int(nodeID)][connID].Increment()
 
 			// Create the request
 			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: uint64(ttl.Seconds())}
@@ -610,6 +630,7 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 			if pool, ok := c.pools[i]; ok {
 				_ = pool.close() // Ignore errors during close
 				delete(c.pools, i)
+				delete(c.metrics.connectionOps, i)
 			}
 		}
 	} else { // we get here if newClusterSize > oldClusterSize
@@ -623,6 +644,17 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 			}
 
 			c.pools[i] = pool
+			if c.metrics.connectionOps[i] == nil {
+				c.metrics.connectionOps[i] = make(map[int]stats.Counter)
+				for j := range c.config.ConnectionPoolSize {
+					c.metrics.connectionOps[i][j] = c.stats.NewTaggedStat(
+						"keydb_client_connection_ops_total", stats.CountType, stats.Tags{
+							"node": strconv.Itoa(i),
+							"conn": strconv.Itoa(j),
+						},
+					)
+				}
+			}
 		}
 	}
 
@@ -708,10 +740,10 @@ func newConnectionPool(addr string, size int, dialOpts ...grpc.DialOption) (*con
 }
 
 // getConn returns the next connection in round-robin fashion
-func (p *connectionPool) getClient() (pb.NodeServiceClient, *grpc.ClientConn) {
+func (p *connectionPool) getClient() (pb.NodeServiceClient, *grpc.ClientConn, int) {
 	n := p.next.Add(1)
 	i := (int(n) - 1) % len(p.connections)
-	return p.clients[i], p.connections[i]
+	return p.clients[i], p.connections[i], i
 }
 
 // close closes all connections in the pool
