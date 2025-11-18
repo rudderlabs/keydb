@@ -34,7 +34,11 @@ import (
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
-var podNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
+// legacyPodNameRegex matches single statefulset pod names like keydb-0, keydb-1, etc.
+var legacyPodNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
+
+// podNameRegex matches multi-statefulset pod names with fixed -0 suffix like keydb-0-0, keydb-1-0, etc.
+var podNameRegex = regexp.MustCompile(`^keydb-(\d+)-0$`)
 
 type keyDBResponse interface {
 	GetSuccess() bool
@@ -92,12 +96,25 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	podName := conf.GetString("nodeId", "")
-	if !podNameRegex.MatchString(podName) {
-		return fmt.Errorf("invalid pod name %s", podName)
-	}
-	nodeID, err := strconv.Atoi(podNameRegex.FindStringSubmatch(podName)[1])
-	if err != nil {
-		return fmt.Errorf("failed to parse node ID %q: %w", podName, err)
+	var nodeID int
+
+	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
+	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
+		// Extract the first number as the node ID (e.g., 0 from keydb-0-0)
+		var parseErr error
+		nodeID, parseErr = strconv.Atoi(matches[1])
+		if parseErr != nil {
+			return fmt.Errorf("failed to parse node ID from %q: %w", podName, parseErr)
+		}
+	} else if matches := legacyPodNameRegex.FindStringSubmatch(podName); matches != nil {
+		// Fallback to legacy single statefulset pattern (keydb-0, keydb-1, etc.)
+		var parseErr error
+		nodeID, parseErr = strconv.Atoi(matches[1])
+		if parseErr != nil {
+			return fmt.Errorf("failed to parse node ID from %q: %w", podName, parseErr)
+		}
+	} else {
+		return fmt.Errorf("invalid pod name %s, expected format: keydb-<nodeId>-<podIndex> or keydb-<nodeId>", podName)
 	}
 	nodeAddresses := conf.GetString("nodeAddresses", "")
 	if len(nodeAddresses) == 0 {
