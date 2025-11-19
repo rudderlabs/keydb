@@ -171,7 +171,7 @@ func NewService(
 		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
 
-	statsTags := stats.Tags{"nodeID": strconv.Itoa(int(config.NodeID))}
+	statsTags := stats.Tags{"nodeID": strconv.FormatInt(config.NodeID, 10)}
 	service.metrics.errScalingCounter = stat.NewTaggedStat("keydb_err_scaling_count", stats.CountType, statsTags)
 	service.metrics.errWrongNodeCounter = stat.NewTaggedStat("keydb_err_wrong_node_count", stats.CountType, statsTags)
 	service.metrics.errInternalCounter = stat.NewTaggedStat("keydb_err_internal_count", stats.CountType, statsTags)
@@ -304,8 +304,8 @@ func (s *Service) initCaches(
 
 	for r := range currentRanges {
 		statsTags := stats.Tags{
-			"nodeID":    strconv.Itoa(int(s.config.NodeID)),
-			"hashRange": strconv.Itoa(int(r)),
+			"nodeID":    strconv.FormatInt(s.config.NodeID, 10),
+			"hashRange": strconv.FormatInt(r, 10),
 		}
 		s.metrics.getKeysCounters[r] = s.stats.NewTaggedStat("keydb_get_keys_count", stats.CountType, statsTags)
 		s.metrics.putKeysCounter[r] = s.stats.NewTaggedStat("keydb_put_keys_count", stats.CountType, statsTags)
