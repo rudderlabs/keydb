@@ -123,7 +123,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
 	require.ElementsMatch(t, []int64{0, 1}, infoResponse.HashRanges)
-	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
+	require.Greater(t, infoResponse.LastSnapshotTimestamp, int64(0))
 
 	// Test node info 1
 	body = s.Do("/info", InfoRequest{NodeID: 1})
@@ -132,7 +132,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
 	require.ElementsMatch(t, []int64{2}, infoResponse.HashRanges)
-	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
+	require.Greater(t, infoResponse.LastSnapshotTimestamp, int64(0))
 
 	// Get again now that the cluster is made of two nodes
 	body = s.Do("/get", GetRequest{
@@ -177,7 +177,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.EqualValues(t, 1, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 1)
 	require.ElementsMatch(t, []int64{0, 1, 2}, infoResponse.HashRanges)
-	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
+	require.Greater(t, infoResponse.LastSnapshotTimestamp, int64(0))
 
 	// Close node1 before doing a GET to make sure node1 won't pick that request
 	cancel1()
@@ -1622,7 +1622,8 @@ type mockNodeServiceServer struct {
 	createSnapshotsCalls       atomic.Uint64
 	createSnapshotsReturnError atomic.Bool
 
-	loadSnapshotsCalls       atomic.Uint64
+	loadSnapshotsCalls atomic.Uint64
+
 	loadSnapshotsReturnError atomic.Bool
 }
 

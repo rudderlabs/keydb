@@ -697,6 +697,8 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 		}, nil
 	}
 
+	s.lastSnapshotTime = time.Now()
+
 	s.logger.Infon("Successfully loaded snapshots from cloud storage")
 
 	return &pb.LoadSnapshotsResponse{
