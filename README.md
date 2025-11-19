@@ -311,10 +311,17 @@ scaling operations. This helps prevent data inconsistencies when nodes restart d
    # New nodes (node 2, 3) - start in degraded mode
    export KEYDB_DEGRADED_NODES="false,false,true,true"
    ```
-2. **Run `/autoScale`**: The scaler removes degraded mode and updates all node configurations in memory
+2. **Run `/autoScale`**: The scaler moves the data between the old and new nodes and makes sure all nodes have all the
+   nodes' addresses updated.
 3. **Second devops PR**: Update persistent config to remove degraded mode permanently
 
 This approach ensures that if any old node restarts during scaling, it won't use incorrect cluster size configurations.
+
+**WARNING:** 
+* Degrading an active node will redistribute the hash range that it was previously responsible for.
+* Marking a new node as non-degraded before it could download the relevant snapshots, will make the node serve requests
+  without the relevant data. This could lead to data inconsistencies. Whereas it could be a strategy to start serving
+  traffic to a new node before it has downloaded all the relevant snapshots, it could lead to inconsistencies.
 
 ### Alternative Scaling Methods
 * You can simply merge a devops PR with the desired cluster size and restart the nodes
