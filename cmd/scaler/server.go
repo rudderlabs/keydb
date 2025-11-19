@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,12 +19,19 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+)
+
+const (
+	totalSnapshotsToLoadMetricName     = "scaler_total_snapshots_to_load"
+	currentSnapshotsToLoadMetricName   = "scaler_current_snapshots_loaded"
+	totalSnapshotsToCreateMetricName   = "scaler_total_snapshots_to_create"
+	currentSnapshotsToCreateMetricName = "scaler_current_snapshots_created"
 )
 
 type scalerClient interface {
 	Scale(ctx context.Context, nodeIDs []uint32) error
-	ScaleComplete(ctx context.Context, nodeIDs []uint32) error
 	UpdateClusterData(addresses ...string) error
 	CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error
 	LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint32, hashRanges ...uint32) error
@@ -38,14 +46,18 @@ type httpServer struct {
 	client *client.Client
 	scaler scalerClient
 	server *http.Server
+	stat   stats.Stats
 	logger logger.Logger
 }
 
 // newHTTPServer creates a new HTTP server
-func newHTTPServer(client *client.Client, scaler *scaler.Client, addr string, log logger.Logger) *httpServer {
+func newHTTPServer(
+	client *client.Client, scaler *scaler.Client, addr string, stat stats.Stats, log logger.Logger,
+) *httpServer {
 	s := &httpServer{
 		client: client,
 		scaler: scaler,
+		stat:   stat,
 		logger: log,
 	}
 
@@ -64,7 +76,6 @@ func newHTTPServer(client *client.Client, scaler *scaler.Client, addr string, lo
 	mux.Post("/createSnapshots", s.handleCreateSnapshots)
 	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
 	mux.Post("/scale", s.handleScale)
-	mux.Post("/scaleComplete", s.handleScaleComplete)
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
 	mux.Post("/autoScale", s.handleAutoScale)
 	mux.Post("/hashRangeMovements", s.handleHashRangeMovements)
@@ -195,7 +206,10 @@ func (s *httpServer) handleCreateSnapshots(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Create snapshot
-	if err := s.scaler.CreateSnapshots(r.Context(), req.NodeID, req.FullSync, req.HashRanges...); err != nil {
+	err := s.createSnapshotsWithProgress(
+		r.Context(), req.NodeID, req.FullSync, req.DisableCreateSnapshotsSequentially, req.HashRanges,
+	)
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Error creating snapshot: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -215,11 +229,27 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Initialize metrics
+	nodeIDStr := strconv.FormatInt(int64(req.NodeID), 10)
+	totalSnapshotsToLoad := s.stat.NewTaggedStat(totalSnapshotsToLoadMetricName, stats.GaugeType, stats.Tags{
+		"nodeId": nodeIDStr,
+	})
+	totalSnapshotsToLoad.Observe(float64(len(req.HashRanges)))
+	defer totalSnapshotsToLoad.Observe(0)
+
+	currentSnapshotsLoaded := s.stat.NewTaggedStat(currentSnapshotsToLoadMetricName, stats.GaugeType, stats.Tags{
+		"nodeId": nodeIDStr,
+	})
+	currentSnapshotsLoaded.Observe(0)
+
 	// Load snapshots from cloud storage
 	if err := s.scaler.LoadSnapshots(r.Context(), req.NodeID, req.MaxConcurrency, req.HashRanges...); err != nil {
 		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// Update metrics after successful load
+	currentSnapshotsLoaded.Observe(float64(len(req.HashRanges)))
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
@@ -245,33 +275,6 @@ func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
 	// Scale cluster
 	if err := s.scaler.Scale(r.Context(), req.NodeIDs); err != nil {
 		http.Error(w, fmt.Sprintf("Error scaling cluster: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Write response
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"success":true}`))
-}
-
-// handleScaleComplete handles POST /scaleComplete requests
-func (s *httpServer) handleScaleComplete(w http.ResponseWriter, r *http.Request) {
-	// Parse request body
-	var req ScaleCompleteRequest
-	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// Validate request
-	if len(req.NodeIDs) == 0 {
-		http.Error(w, "No node IDs provided", http.StatusBadRequest)
-		return
-	}
-
-	// Complete scale operation
-	if err := s.scaler.ScaleComplete(r.Context(), req.NodeIDs); err != nil {
-		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -335,11 +338,13 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 		err = s.handleScaleUp(
 			r.Context(), req.OldNodesAddresses, req.NewNodesAddresses,
 			req.FullSync, req.SkipCreateSnapshots, loadSnapshotsMaxConcurrency,
+			req.DisableCreateSnapshotsSequentially,
 		)
 	} else if newClusterSize < oldClusterSize {
 		err = s.handleScaleDown(
 			r.Context(), req.OldNodesAddresses, req.NewNodesAddresses,
 			req.FullSync, req.SkipCreateSnapshots, loadSnapshotsMaxConcurrency,
+			req.DisableCreateSnapshotsSequentially,
 		)
 	} else {
 		// Auto-healing: propagate cluster addresses to all nodes for consistency
@@ -360,6 +365,7 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 func (s *httpServer) handleScaleUp(
 	ctx context.Context, oldAddresses, newAddresses []string,
 	fullSync, skipCreateSnapshots bool, loadSnapshotsMaxConcurrency uint32,
+	disableCreateSnapshotsSequentially bool,
 ) error {
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
@@ -405,7 +411,9 @@ func (s *httpServer) handleScaleUp(
 				}
 				group.Go(func() error {
 					createSnapshotsStart := time.Now()
-					err := s.scaler.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...)
+					err := s.createSnapshotsWithProgress(
+						gCtx, sourceNodeID, fullSync, disableCreateSnapshotsSequentially, hashRanges,
+					)
 					if err != nil {
 						return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
 							sourceNodeID, hashRanges, err,
@@ -468,6 +476,7 @@ func (s *httpServer) handleScaleUp(
 func (s *httpServer) handleScaleDown(
 	ctx context.Context, oldAddresses, newAddresses []string,
 	fullSync, skipCreateSnapshots bool, loadSnapshotsMaxConcurrency uint32,
+	disableCreateSnapshotsSequentially bool,
 ) error {
 	oldClusterSize := uint32(len(oldAddresses))
 	newClusterSize := uint32(len(newAddresses))
@@ -504,7 +513,10 @@ func (s *httpServer) handleScaleDown(
 				}
 				group.Go(func() error {
 					createSnapshotsStart := time.Now()
-					if err := s.scaler.CreateSnapshots(gCtx, sourceNodeID, fullSync, hashRanges...); err != nil {
+					err := s.createSnapshotsWithProgress(
+						gCtx, sourceNodeID, fullSync, disableCreateSnapshotsSequentially, hashRanges,
+					)
+					if err != nil {
 						return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
 							sourceNodeID, hashRanges, err,
 						)
@@ -604,19 +616,13 @@ func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uin
 		nodeIDs[i] = i
 	}
 
-	s.logger.Infon("Starting scale complete operation")
+	s.logger.Infon("Starting scale operation")
 
 	if err := s.scaler.Scale(ctx, nodeIDs); err != nil {
 		return fmt.Errorf("scaling nodes: %w", err)
 	}
 
 	s.logger.Infon("Scale command sent to all nodes")
-
-	if err := s.scaler.ScaleComplete(ctx, nodeIDs); err != nil {
-		return fmt.Errorf("completing scale operation: %w", err)
-	}
-
-	s.logger.Infon("Scale complete command sent to all nodes")
 
 	return nil
 }
@@ -709,7 +715,9 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 				// Call CreateSnapshots once per node with all hash ranges
 				group.Go(func() error {
 					start := time.Now()
-					err := s.scaler.CreateSnapshots(gCtx, sourceNodeID, req.FullSync, hashRanges...)
+					err := s.createSnapshotsWithProgress(
+						gCtx, sourceNodeID, req.FullSync, req.DisableCreateSnapshotsSequentially, hashRanges,
+					)
 					if err != nil {
 						return fmt.Errorf("creating snapshots for node %d: %w", sourceNodeID, err)
 					}
@@ -768,6 +776,54 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+// createSnapshotsWithProgress creates snapshots either sequentially (one at a time) or in batch
+// depending on the disableSequential flag
+func (s *httpServer) createSnapshotsWithProgress(
+	ctx context.Context, nodeID uint32, fullSync, disableSequential bool, hashRanges []uint32,
+) error {
+	// Initialize metrics
+	nodeIDStr := strconv.FormatInt(int64(nodeID), 10)
+	totalSnapshotsToCreate := s.stat.NewTaggedStat(totalSnapshotsToCreateMetricName, stats.GaugeType, stats.Tags{
+		"nodeId": nodeIDStr,
+	})
+	totalSnapshotsToCreate.Observe(float64(len(hashRanges)))
+	defer totalSnapshotsToCreate.Observe(0)
+
+	currentSnapshotsCreated := s.stat.NewTaggedStat(currentSnapshotsToCreateMetricName, stats.GaugeType, stats.Tags{
+		"nodeId": nodeIDStr,
+	})
+	currentSnapshotsCreated.Observe(0)
+
+	if disableSequential || len(hashRanges) == 0 {
+		// Call with all hash ranges at once (existing behavior)
+		err := s.scaler.CreateSnapshots(ctx, nodeID, fullSync, hashRanges...)
+		if err != nil {
+			return err
+		}
+		currentSnapshotsCreated.Observe(float64(len(hashRanges)))
+		return nil
+	}
+
+	// Call CreateSnapshots once for each hash range
+	for i, hashRange := range hashRanges {
+		s.logger.Infon("Creating snapshot",
+			logger.NewIntField("nodeId", int64(nodeID)),
+			logger.NewIntField("hashRange", int64(hashRange)),
+			logger.NewIntField("progress", int64(i+1)),
+			logger.NewIntField("total", int64(len(hashRanges))),
+		)
+
+		if err := s.scaler.CreateSnapshots(ctx, nodeID, fullSync, hashRange); err != nil {
+			return fmt.Errorf("creating snapshot for hash range %d: %w", hashRange, err)
+		}
+
+		// Update progress metric
+		currentSnapshotsCreated.Observe(float64(i + 1))
+	}
+
+	return nil
 }
 
 // handleLastOperation handles GET /lastOperation requests
