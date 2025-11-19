@@ -302,7 +302,7 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 				hr, err := strconv.ParseUint(hashRangeStr, 10, 32)
 				if err != nil {
 					c.logger.Warnn("Skipping key with invalid hash range",
-						logger.NewIntField("expected", int64(hashRange)),
+						logger.NewIntField("expected", hashRange),
 						logger.NewStringField("actual", hashRangeStr),
 						logger.NewStringField("key", string(kv.Key)))
 					continue // Skip keys with invalid hash range
@@ -311,7 +311,7 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 				if int64(hr) != hashRange {
 					// if this happens stream.Prefix is not used correctly
 					c.logger.Warnn("Skipping key different hash range",
-						logger.NewIntField("expected", int64(hashRange)),
+						logger.NewIntField("expected", hashRange),
 						logger.NewIntField("actual", int64(hr)),
 						logger.NewStringField("key", string(kv.Key)))
 					continue

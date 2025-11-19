@@ -277,7 +277,7 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID int64) (*pb.GetNodeInfo
 		}
 
 		c.logger.Warnn("Cannot get node info",
-			logger.NewIntField("nodeID", int64(nodeID)),
+			logger.NewIntField("nodeID", nodeID),
 			logger.NewIntField("attempt", attempt),
 			logger.NewDurationField("retryDelay", retryDelay),
 			logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -342,7 +342,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID int64, fullSync boo
 
 		if err != nil {
 			c.logger.Warnn("Cannot create snapshots",
-				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("nodeID", nodeID),
 				logger.NewIntField("attempt", attempt),
 				logger.NewDurationField("retryDelay", retryDelay),
 				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -350,7 +350,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID int64, fullSync boo
 				obskit.Error(err))
 		} else if resp != nil {
 			c.logger.Warnn("Create snapshots unsuccessful",
-				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("nodeID", nodeID),
 				logger.NewIntField("attempt", attempt),
 				logger.NewBoolField("success", resp.Success),
 				logger.NewDurationField("retryDelay", retryDelay),
@@ -419,7 +419,7 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64
 
 		if err != nil {
 			c.logger.Warnn("Cannot load snapshots",
-				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("nodeID", nodeID),
 				logger.NewIntField("attempt", attempt),
 				logger.NewDurationField("retryDelay", retryDelay),
 				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -427,7 +427,7 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64
 				obskit.Error(err))
 		} else if resp != nil {
 			c.logger.Warnn("Load snapshots unsuccessful",
-				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("nodeID", nodeID),
 				logger.NewIntField("attempt", attempt),
 				logger.NewBoolField("success", resp.Success),
 				logger.NewDurationField("retryDelay", retryDelay),
@@ -501,7 +501,7 @@ func (c *Client) Scale(ctx context.Context, nodeIDs []int64) error {
 				}
 
 				c.logger.Warnn("Cannot scale node",
-					logger.NewIntField("nodeID", int64(nodeID)),
+					logger.NewIntField("nodeID", nodeID),
 					logger.NewIntField("attempt", attempt),
 					logger.NewDurationField("retryDelay", retryDelay),
 					logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -536,8 +536,8 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 	defer c.mu.Unlock()
 
 	c.logger.Infon("Updating to new cluster size",
-		logger.NewIntField("oldClusterSize", int64(c.clusterSize)),
-		logger.NewIntField("newClusterSize", int64(int64(len(nodesAddresses)))),
+		logger.NewIntField("oldClusterSize", c.clusterSize),
+		logger.NewIntField("newClusterSize", int64(len(nodesAddresses))),
 		logger.NewStringField("nodesAddresses", strings.Join(nodesAddresses, ",")),
 	)
 

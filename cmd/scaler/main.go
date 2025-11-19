@@ -116,7 +116,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}()
 
 	log.Infon("Starting scaler",
-		logger.NewIntField("totalHashRanges", int64(clientConfig.TotalHashRanges)),
+		logger.NewIntField("totalHashRanges", clientConfig.TotalHashRanges),
 		logger.NewBoolField("retryPolicyDisabled", clientConfig.RetryPolicy.Disabled),
 		logger.NewDurationField("retryPolicyInitialInterval", clientConfig.RetryPolicy.InitialInterval),
 		logger.NewFloatField("retryPolicyMultiplier", clientConfig.RetryPolicy.Multiplier),

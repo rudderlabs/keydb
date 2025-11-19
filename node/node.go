@@ -157,8 +157,8 @@ func NewService(
 		hasher:         hash.New(config.getClusterSize(), config.TotalHashRanges),
 		stats:          stat,
 		logger: log.Withn(
-			logger.NewIntField("nodeId", int64(config.NodeID)),
-			logger.NewIntField("totalHashRanges", int64(config.TotalHashRanges)),
+			logger.NewIntField("nodeId", config.NodeID),
+			logger.NewIntField("totalHashRanges", config.TotalHashRanges),
 			logger.NewStringField("snapshotInterval", config.SnapshotInterval.String()),
 			logger.NewStringField("garbageCollectionInterval", config.GarbageCollectionInterval.String()),
 			logger.NewIntField("maxFilesToList", config.MaxFilesToList),
@@ -337,7 +337,7 @@ func (s *Service) initCaches(
 		defer close(loadDone)
 		for sn := range readers {
 			s.logger.Infon("Loading downloaded snapshots",
-				logger.NewIntField("range", int64(sn.hashRange)),
+				logger.NewIntField("range", sn.hashRange),
 				logger.NewStringField("filename", sn.filename),
 				logger.NewIntField("totalFiles", int64(totalFiles)),
 				logger.NewFloatField("loadingPercentage",
@@ -356,7 +356,7 @@ func (s *Service) initCaches(
 	for r := range filesByHashRange {
 		snapshotFiles := filesByHashRange[r]
 		if len(snapshotFiles) == 0 {
-			s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", int64(r)))
+			s.logger.Infon("Skipping range while initializing caches", logger.NewIntField("range", r))
 			continue
 		}
 
@@ -371,7 +371,7 @@ func (s *Service) initCaches(
 				err := s.storage.Download(gCtx, buf, snapshotFile.filename)
 				if err != nil {
 					if errors.Is(err, filemanager.ErrKeyNotFound) {
-						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", int64(r)))
+						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", r))
 						return nil
 					}
 					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
@@ -478,7 +478,7 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...int64
 		}
 
 		s.logger.Debugn("Found snapshot file",
-			logger.NewIntField("hashRange", int64(hashRange)),
+			logger.NewIntField("hashRange", hashRange),
 			logger.NewStringField("filename", file.Key),
 			logger.NewIntField("from", int64(from)),
 			logger.NewIntField("to", int64(to)),
@@ -669,8 +669,8 @@ func (s *Service) Scale(_ context.Context, req *pb.ScaleRequest) (*pb.ScaleRespo
 	newClusterSize := int64(len(s.config.Addresses))
 
 	log.Infon("Scale completed successfully, you can now update the degraded nodes list",
-		logger.NewIntField("previousClusterSize", int64(previousClusterSize)),
-		logger.NewIntField("newClusterSize", int64(newClusterSize)),
+		logger.NewIntField("previousClusterSize", previousClusterSize),
+		logger.NewIntField("newClusterSize", newClusterSize),
 	)
 
 	return &pb.ScaleResponse{
@@ -860,7 +860,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			return fmt.Errorf("invalid writer type %T for hash range: %d", w, hashRange)
 		}
 		if !hasData[hashRange] {
-			log.Infon("No data to upload for hash range", logger.NewIntField("hashRange", int64(hashRange)))
+			log.Infon("No data to upload for hash range", logger.NewIntField("hashRange", hashRange))
 			continue // no data to upload
 		}
 
@@ -868,7 +868,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 		log.Infon("Uploading snapshot file",
 			logger.NewIntField("from", int64(since[hashRange])),
 			logger.NewIntField("to", int64(newSince)),
-			logger.NewIntField("hashRange", int64(hashRange)),
+			logger.NewIntField("hashRange", hashRange),
 			logger.NewStringField("filename", filename),
 		)
 
@@ -887,19 +887,19 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 				filesToBeDeletedLogField := logger.NewStringField("filenames", strings.Join(filesToBeDeleted, ","))
 
 				log.Infon("Deleting old snapshot files",
-					filesToBeDeletedLogField, logger.NewIntField("hashRange", int64(hashRange)),
+					filesToBeDeletedLogField, logger.NewIntField("hashRange", hashRange),
 				)
 
 				err = s.storage.Delete(ctx, filesToBeDeleted)
 				if err != nil {
 					log.Errorn("Failed to delete old snapshot files",
-						filesToBeDeletedLogField, logger.NewIntField("hashRange", int64(hashRange)), obskit.Error(err),
+						filesToBeDeletedLogField, logger.NewIntField("hashRange", hashRange), obskit.Error(err),
 					)
 					return fmt.Errorf("failed to delete old snapshot files: %w", err)
 				}
 			} else {
 				log.Infon("No old snapshots files to be deleted",
-					logger.NewIntField("hashRange", int64(hashRange)),
+					logger.NewIntField("hashRange", hashRange),
 				)
 			}
 		}
@@ -950,7 +950,7 @@ func (s *Service) isDegraded() bool {
 	}
 	if int(s.config.NodeID) >= len(degradedNodes) {
 		s.logger.Warnn("Node ID out of range for degraded nodes list",
-			logger.NewIntField("nodeId", int64(s.config.NodeID)),
+			logger.NewIntField("nodeId", s.config.NodeID),
 			logger.NewIntField("degradedNodes", int64(len(degradedNodes))),
 		)
 		return false

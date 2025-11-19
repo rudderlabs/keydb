@@ -392,7 +392,7 @@ func (c *Client) get(
 
 				if respErr != nil {
 					c.logger.Errorn("get keys from node",
-						logger.NewIntField("nodeId", int64(nodeID)),
+						logger.NewIntField("nodeId", nodeID),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
 						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -400,7 +400,7 @@ func (c *Client) get(
 						obskit.Error(respErr))
 				} else if resp != nil {
 					c.logger.Warnn("get keys from node",
-						logger.NewIntField("nodeId", int64(nodeID)),
+						logger.NewIntField("nodeId", nodeID),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
 						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -545,7 +545,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 
 				if respErr != nil {
 					c.logger.Errorn("put keys in node",
-						logger.NewIntField("nodeID", int64(nodeID)),
+						logger.NewIntField("nodeID", nodeID),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
 						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -553,7 +553,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 						obskit.Error(respErr))
 				} else if resp != nil {
 					c.logger.Warnn("put keys in node",
-						logger.NewIntField("nodeID", int64(nodeID)),
+						logger.NewIntField("nodeID", nodeID),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
 						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -612,8 +612,8 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 	}
 
 	c.logger.Infon("Detected new cluster size",
-		logger.NewIntField("oldClusterSize", int64(c.clusterSize)),
-		logger.NewIntField("newClusterSize", int64(newClusterSize)),
+		logger.NewIntField("oldClusterSize", c.clusterSize),
+		logger.NewIntField("newClusterSize", newClusterSize),
 		logger.NewStringField("nodesAddresses", fmt.Sprintf("%+v", nodesAddresses)),
 	)
 

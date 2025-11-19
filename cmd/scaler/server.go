@@ -230,7 +230,7 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Initialize metrics
-	nodeIDStr := strconv.FormatInt(int64(req.NodeID), 10)
+	nodeIDStr := strconv.FormatInt(req.NodeID, 10)
 	totalSnapshotsToLoad := s.stat.NewTaggedStat(totalSnapshotsToLoadMetricName, stats.GaugeType, stats.Tags{
 		"nodeId": nodeIDStr,
 	})
@@ -420,7 +420,7 @@ func (s *httpServer) handleScaleUp(
 						)
 					}
 					log.Infon("Node snapshots created",
-						logger.NewIntField("nodeId", int64(sourceNodeID)),
+						logger.NewIntField("nodeId", sourceNodeID),
 						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 						logger.NewStringField("duration", time.Since(createSnapshotsStart).String()),
 					)
@@ -455,7 +455,7 @@ func (s *httpServer) handleScaleUp(
 					)
 				}
 				log.Infon("Node snapshots loaded",
-					logger.NewIntField("nodeId", int64(nodeID)),
+					logger.NewIntField("nodeId", nodeID),
 					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 					logger.NewStringField("duration", time.Since(loadSnapshotsStart).String()),
 				)
@@ -522,7 +522,7 @@ func (s *httpServer) handleScaleDown(
 						)
 					}
 					log.Infon("Node snapshots created",
-						logger.NewIntField("nodeId", int64(sourceNodeID)),
+						logger.NewIntField("nodeId", sourceNodeID),
 						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 						logger.NewStringField("duration", time.Since(createSnapshotsStart).String()),
 					)
@@ -557,7 +557,7 @@ func (s *httpServer) handleScaleDown(
 					)
 				}
 				log.Infon("Node snapshots loaded",
-					logger.NewIntField("nodeId", int64(nodeID)),
+					logger.NewIntField("nodeId", nodeID),
 					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 					logger.NewStringField("duration", time.Since(loadSnapshotsStart).String()),
 				)
@@ -659,13 +659,13 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 	}
 
 	log := s.logger.Withn(
-		logger.NewIntField("oldClusterSize", int64(req.OldClusterSize)),
-		logger.NewIntField("newClusterSize", int64(req.NewClusterSize)),
-		logger.NewIntField("totalHashRanges", int64(req.TotalHashRanges)),
+		logger.NewIntField("oldClusterSize", req.OldClusterSize),
+		logger.NewIntField("newClusterSize", req.NewClusterSize),
+		logger.NewIntField("totalHashRanges", req.TotalHashRanges),
 		logger.NewBoolField("upload", req.Upload),
 		logger.NewBoolField("download", req.Download),
 		logger.NewBoolField("fullSync", req.FullSync),
-		logger.NewIntField("loadSnapshotsMaxConcurrency", int64(req.LoadSnapshotsMaxConcurrency)),
+		logger.NewIntField("loadSnapshotsMaxConcurrency", req.LoadSnapshotsMaxConcurrency),
 	)
 	log.Infon("Received hash range movements request")
 
@@ -704,7 +704,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 	// If upload=true, send CreateSnapshots requests to old nodes that are losing hash ranges
 	if req.Upload {
 		log.Infon("Upload of hash ranges is enabled",
-			logger.NewIntField("totalHashRanges", int64(req.TotalHashRanges)),
+			logger.NewIntField("totalHashRanges", req.TotalHashRanges),
 		)
 
 		ctx := r.Context()
@@ -722,7 +722,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 						return fmt.Errorf("creating snapshots for node %d: %w", sourceNodeID, err)
 					}
 					log.Infon("Node snapshots created",
-						logger.NewIntField("nodeId", int64(sourceNodeID)),
+						logger.NewIntField("nodeId", sourceNodeID),
 						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 						logger.NewStringField("duration", time.Since(start).String()),
 					)
@@ -740,7 +740,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 
 	if req.Download {
 		log.Infon("Download of hash ranges is enabled",
-			logger.NewIntField("totalHashRanges", int64(req.TotalHashRanges)),
+			logger.NewIntField("totalHashRanges", req.TotalHashRanges),
 		)
 
 		ctx := r.Context()
@@ -755,7 +755,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 					return fmt.Errorf("loading snapshots for node %d: %w", destinationNodeID, err)
 				}
 				log.Infon("Node snapshots loaded",
-					logger.NewIntField("nodeId", int64(destinationNodeID)),
+					logger.NewIntField("nodeId", destinationNodeID),
 					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 					logger.NewStringField("duration", time.Since(start).String()),
 				)
@@ -784,7 +784,7 @@ func (s *httpServer) createSnapshotsWithProgress(
 	ctx context.Context, nodeID int64, fullSync, disableSequential bool, hashRanges []int64,
 ) error {
 	// Initialize metrics
-	nodeIDStr := strconv.FormatInt(int64(nodeID), 10)
+	nodeIDStr := strconv.FormatInt(nodeID, 10)
 	totalSnapshotsToCreate := s.stat.NewTaggedStat(totalSnapshotsToCreateMetricName, stats.GaugeType, stats.Tags{
 		"nodeId": nodeIDStr,
 	})
@@ -809,8 +809,8 @@ func (s *httpServer) createSnapshotsWithProgress(
 	// Call CreateSnapshots once for each hash range
 	for i, hashRange := range hashRanges {
 		s.logger.Infon("Creating snapshot",
-			logger.NewIntField("nodeId", int64(nodeID)),
-			logger.NewIntField("hashRange", int64(hashRange)),
+			logger.NewIntField("nodeId", nodeID),
+			logger.NewIntField("hashRange", hashRange),
 			logger.NewIntField("progress", int64(i+1)),
 			logger.NewIntField("total", int64(len(hashRanges))),
 		)

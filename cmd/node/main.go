@@ -145,9 +145,9 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	port := conf.GetInt("port", 50051)
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
-		logger.NewIntField("nodeId", int64(nodeConfig.NodeID)),
+		logger.NewIntField("nodeId", nodeConfig.NodeID),
 		logger.NewIntField("clusterSize", int64(len(nodeConfig.Addresses))),
-		logger.NewIntField("totalHashRanges", int64(nodeConfig.TotalHashRanges)),
+		logger.NewIntField("totalHashRanges", nodeConfig.TotalHashRanges),
 		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
 		logger.NewIntField("noOfAddresses", int64(len(nodeConfig.Addresses))),
 	)
