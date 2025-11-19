@@ -933,7 +933,7 @@ func (s *Service) DegradedNodesChanged() {
 	s.hasher = hash.New(newClusterSize, s.config.TotalHashRanges)
 
 	// Reinitialize caches for the new cluster size
-	if err := s.initCaches(context.Background(), false, 0); err != nil { // Revert to previous cluster size on error
+	if err := s.initCaches(context.Background(), false, 0); err != nil {
 		s.logger.Errorn("Failed to initialize caches", obskit.Error(err))
 		panic(err)
 	}
