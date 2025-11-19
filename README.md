@@ -407,5 +407,6 @@ For a comprehensive list of available settings you can refer to the constructor 
 * Pre-downloads are not supported yet
   * We might need to create a `checkpoints` table to store what snapshots file a node has already loaded, so that we can
     skip them during a scaling operation
-* Scaling can take extra resources, so before scaling we might need to increase the resources on the nodes
-  * Increasing resources on the nodes would cause a restart, same as VPA
+* Scaling operations require additional resources
+  * For deployments with VPA enabled, resources can be automatically adjusted in-place (though restarts may still occur depending on configuration)
+  * For deployments without VPA, resources must be manually increased before scaling, which will cause a restart

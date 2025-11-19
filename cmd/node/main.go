@@ -33,11 +33,17 @@ import (
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
+var (
+	// legacyPodNameRegex matches single statefulset pod names like keydb-0, keydb-1, etc.
+	legacyPodNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
+
+	// podNameRegex matches multi-statefulset pod names with fixed -0 suffix like keydb-0-0, keydb-1-0, etc.
+	podNameRegex = regexp.MustCompile(`^keydb-(\d+)-0$`)
+)
+
 const (
 	degradedNodesConfKey = "degradedNodes"
 )
-
-var podNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
 
 type keyDBResponse interface {
 	GetSuccess() bool
@@ -95,12 +101,9 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	podName := conf.GetString("nodeId", "")
-	if !podNameRegex.MatchString(podName) {
-		return fmt.Errorf("invalid pod name %s", podName)
-	}
-	nodeID, err := strconv.Atoi(podNameRegex.FindStringSubmatch(podName)[1])
+	nodeID, err := getNodeID(podName)
 	if err != nil {
-		return fmt.Errorf("failed to parse node ID %q: %w", podName, err)
+		return err
 	}
 	nodeAddresses := conf.GetString("nodeAddresses", "")
 	if len(nodeAddresses) == 0 {
@@ -277,6 +280,31 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	case err := <-serverErrCh:
 		return err
 	}
+}
+
+// getNodeID extracts the node ID from a pod name.
+// Supports both multi-statefulset format (keydb-{nodeId}-0) and legacy format (keydb-{nodeId}).
+func getNodeID(podName string) (int, error) {
+	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
+	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
+		// Extract the first number as the node ID (e.g., 0 from keydb-0-0)
+		nodeID, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
+		}
+		return nodeID, nil
+	}
+
+	// Fallback to legacy single statefulset pattern (keydb-0, keydb-1, etc.)
+	if matches := legacyPodNameRegex.FindStringSubmatch(podName); matches != nil {
+		nodeID, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
+		}
+		return nodeID, nil
+	}
+
+	return 0, fmt.Errorf("invalid pod name %q, expected format: keydb-<nodeId>-0 or keydb-<nodeId>", podName)
 }
 
 type configObserver struct {
