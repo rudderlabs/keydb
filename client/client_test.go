@@ -20,7 +20,7 @@ func TestClient_Get(t *testing.T) {
 	t.Run("successful get", func(t *testing.T) {
 		clusterSize := 3
 
-		client, closer := createTestClient(t, uint32(clusterSize))
+		client, closer := createTestClient(t, int64(clusterSize))
 		defer closer()
 		keys := []string{"key1", "key2", "key3"}
 
@@ -169,7 +169,7 @@ func TestClient_Put(t *testing.T) {
 			putFunc: func(ctx context.Context, req *proto.PutRequest) (*proto.PutResponse, error) {
 				return nil, fmt.Errorf("simulated error")
 			},
-			clusterSize:    uint32(len(addresses)),
+			clusterSize:    int64(len(addresses)),
 			nodesAddresses: addresses,
 		}
 
@@ -190,7 +190,7 @@ type mockNodeServiceServer struct {
 	proto.UnimplementedNodeServiceServer
 	getFunc        func(context.Context, *proto.GetRequest) (*proto.GetResponse, error)
 	putFunc        func(context.Context, *proto.PutRequest) (*proto.PutResponse, error)
-	clusterSize    uint32
+	clusterSize    int64
 	nodesAddresses []string
 }
 
@@ -304,7 +304,7 @@ func createTestClientWithServers(t *testing.T, addresses []string) (*Client, fun
 	}
 }
 
-func createTestClient(t *testing.T, clusterSize uint32) (*Client, func()) {
+func createTestClient(t *testing.T, clusterSize int64) (*Client, func()) {
 	t.Helper()
 
 	addresses := make([]string, clusterSize)

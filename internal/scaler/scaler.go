@@ -73,7 +73,7 @@ type Config struct {
 	Addresses []string
 
 	// TotalHashRanges is the total number of hash ranges
-	TotalHashRanges uint32
+	TotalHashRanges int64
 
 	// RetryPolicy defines the retry behavior for failed requests
 	RetryPolicy RetryPolicy
@@ -102,8 +102,8 @@ const (
 // ScalingOperation represents the last scaling operation that can be rolled back
 type ScalingOperation struct {
 	Type           ScalingOperationType   `json:"type"`
-	OldClusterSize uint32                 `json:"old_cluster_size"`
-	NewClusterSize uint32                 `json:"new_cluster_size"`
+	OldClusterSize int64                  `json:"old_cluster_size"`
+	NewClusterSize int64                  `json:"new_cluster_size"`
 	OldAddresses   []string               `json:"old_addresses"`
 	NewAddresses   []string               `json:"new_addresses"`
 	Status         ScalingOperationStatus `json:"status"` // "in_progress", "completed", "failed", "rolled_back"
@@ -114,7 +114,7 @@ type Client struct {
 	config Config
 
 	// clusterSize is the number of nodes in the cluster
-	clusterSize uint32
+	clusterSize int64
 
 	// connections is a map of node index to connection
 	connections map[int]*grpc.ClientConn
@@ -184,7 +184,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		config:      config,
 		connections: make(map[int]*grpc.ClientConn),
 		clients:     make(map[int]pb.NodeServiceClient),
-		clusterSize: uint32(len(config.Addresses)),
+		clusterSize: int64(len(config.Addresses)),
 		logger:      log,
 	}
 
@@ -233,14 +233,14 @@ func (c *Client) ClusterSize() int {
 	return int(c.clusterSize)
 }
 
-func (c *Client) TotalHashRanges() uint32 {
+func (c *Client) TotalHashRanges() int64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.config.TotalHashRanges
 }
 
 // GetNodeInfo returns information about a node
-func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInfoResponse, error) {
+func (c *Client) GetNodeInfo(ctx context.Context, nodeID int64) (*pb.GetNodeInfoResponse, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -277,7 +277,7 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 		}
 
 		c.logger.Warnn("Cannot get node info",
-			logger.NewIntField("nodeID", int64(nodeID)),
+			logger.NewIntField("nodeID", nodeID),
 			logger.NewIntField("attempt", attempt),
 			logger.NewDurationField("retryDelay", retryDelay),
 			logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -297,7 +297,7 @@ func (c *Client) GetNodeInfo(ctx context.Context, nodeID uint32) (*pb.GetNodeInf
 
 // CreateSnapshots forces the creation of snapshots on a node
 // WARNING: This method is meant to be used ONLY by a Scaler!!!
-func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error {
+func (c *Client) CreateSnapshots(ctx context.Context, nodeID int64, fullSync bool, hashRanges ...int64) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -342,7 +342,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 
 		if err != nil {
 			c.logger.Warnn("Cannot create snapshots",
-				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("nodeID", nodeID),
 				logger.NewIntField("attempt", attempt),
 				logger.NewDurationField("retryDelay", retryDelay),
 				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -350,7 +350,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 				obskit.Error(err))
 		} else if resp != nil {
 			c.logger.Warnn("Create snapshots unsuccessful",
-				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("nodeID", nodeID),
 				logger.NewIntField("attempt", attempt),
 				logger.NewBoolField("success", resp.Success),
 				logger.NewDurationField("retryDelay", retryDelay),
@@ -374,7 +374,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bo
 
 // LoadSnapshots forces all nodes to load snapshots from cloud storage
 // This method is meant to be used by a Scaler process only!
-func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint32, hashRanges ...uint32) error {
+func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64, hashRanges ...int64) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -419,7 +419,7 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint3
 
 		if err != nil {
 			c.logger.Warnn("Cannot load snapshots",
-				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("nodeID", nodeID),
 				logger.NewIntField("attempt", attempt),
 				logger.NewDurationField("retryDelay", retryDelay),
 				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -427,7 +427,7 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint3
 				obskit.Error(err))
 		} else if resp != nil {
 			c.logger.Warnn("Load snapshots unsuccessful",
-				logger.NewIntField("nodeID", int64(nodeID)),
+				logger.NewIntField("nodeID", nodeID),
 				logger.NewIntField("attempt", attempt),
 				logger.NewBoolField("success", resp.Success),
 				logger.NewDurationField("retryDelay", retryDelay),
@@ -450,7 +450,7 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint3
 }
 
 // Scale changes the number of nodes in the cluster
-func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
+func (c *Client) Scale(ctx context.Context, nodeIDs []int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -501,7 +501,7 @@ func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
 				}
 
 				c.logger.Warnn("Cannot scale node",
-					logger.NewIntField("nodeID", int64(nodeID)),
+					logger.NewIntField("nodeID", nodeID),
 					logger.NewIntField("attempt", attempt),
 					logger.NewDurationField("retryDelay", retryDelay),
 					logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -536,8 +536,8 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 	defer c.mu.Unlock()
 
 	c.logger.Infon("Updating to new cluster size",
-		logger.NewIntField("oldClusterSize", int64(c.clusterSize)),
-		logger.NewIntField("newClusterSize", int64(uint32(len(nodesAddresses)))),
+		logger.NewIntField("oldClusterSize", c.clusterSize),
+		logger.NewIntField("newClusterSize", int64(len(nodesAddresses))),
 		logger.NewStringField("nodesAddresses", strings.Join(nodesAddresses, ",")),
 	)
 
@@ -559,7 +559,7 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 	}
 
 	c.config.Addresses = nodesAddresses
-	c.clusterSize = uint32(len(nodesAddresses))
+	c.clusterSize = int64(len(nodesAddresses))
 
 	return nil
 }
@@ -567,7 +567,7 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 // RecordOperation records the last scaling operation for potential rollback
 func (c *Client) RecordOperation(
 	opType ScalingOperationType,
-	oldClusterSize, newClusterSize uint32,
+	oldClusterSize, newClusterSize int64,
 	oldAddresses, newAddresses []string,
 ) {
 	c.mu.Lock()
@@ -622,7 +622,7 @@ func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType,
 	oldAddresses, newAddresses []string, fn func() error,
 ) error {
 	// Record the operation
-	c.RecordOperation(opType, uint32(len(oldAddresses)), uint32(len(newAddresses)), oldAddresses, newAddresses)
+	c.RecordOperation(opType, int64(len(oldAddresses)), int64(len(newAddresses)), oldAddresses, newAddresses)
 
 	// Execute the scaling function
 	err := fn()
@@ -670,8 +670,8 @@ func (c *Client) rollbackToOldConfiguration(ctx context.Context, operation *Scal
 	}
 
 	// Scale back to old cluster size
-	oldNodeIDs := make([]uint32, operation.OldClusterSize)
-	for i := uint32(0); i < operation.OldClusterSize; i++ {
+	oldNodeIDs := make([]int64, operation.OldClusterSize)
+	for i := int64(0); i < operation.OldClusterSize; i++ {
 		oldNodeIDs[i] = i
 	}
 

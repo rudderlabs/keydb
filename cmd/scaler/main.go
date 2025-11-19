@@ -57,7 +57,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 
 	clientConfig := client.Config{
 		Addresses:          strings.Split(nodeAddresses, ","),
-		TotalHashRanges:    uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
+		TotalHashRanges:    int64(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
 		ConnectionPoolSize: conf.GetInt("connectionPoolSize", 0),
 		RetryPolicy: client.RetryPolicy{
 			Disabled:        conf.GetBool("retryPolicy.disabled", false),
@@ -87,7 +87,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}()
 	scClient, err := scaler.NewClient(scaler.Config{
 		Addresses:       strings.Split(nodeAddresses, ","),
-		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
+		TotalHashRanges: int64(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
 		RetryPolicy: scaler.RetryPolicy{
 			Disabled:        conf.GetBool("scalerRetryPolicy.disabled", false),
 			InitialInterval: conf.GetDuration("scalerRetryPolicy.initialInterval", 0, time.Second),
@@ -116,7 +116,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}()
 
 	log.Infon("Starting scaler",
-		logger.NewIntField("totalHashRanges", int64(clientConfig.TotalHashRanges)),
+		logger.NewIntField("totalHashRanges", clientConfig.TotalHashRanges),
 		logger.NewBoolField("retryPolicyDisabled", clientConfig.RetryPolicy.Disabled),
 		logger.NewDurationField("retryPolicyInitialInterval", clientConfig.RetryPolicy.InitialInterval),
 		logger.NewFloatField("retryPolicyMultiplier", clientConfig.RetryPolicy.Multiplier),

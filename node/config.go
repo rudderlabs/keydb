@@ -5,10 +5,10 @@ import "time"
 // Config holds the configuration for a node
 type Config struct {
 	// NodeID is the ID of this node (0-based)
-	NodeID uint32
+	NodeID int64
 
 	// TotalHashRanges is the total number of hash ranges
-	TotalHashRanges uint32
+	TotalHashRanges int64
 
 	// MaxFilesToList specifies the maximum number of files that can be listed in a single operation.
 	MaxFilesToList int64
@@ -32,8 +32,8 @@ type Config struct {
 	BackupFolderName string
 }
 
-func (c *Config) getClusterSize() uint32 {
-	l := uint32(len(c.Addresses))
+func (c *Config) getClusterSize() int64 {
+	l := int64(len(c.Addresses))
 	if c.DegradedNodes == nil {
 		return l
 	}

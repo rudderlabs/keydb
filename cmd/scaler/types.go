@@ -17,27 +17,27 @@ type PutRequest struct {
 
 // InfoRequest represents a request to get node info
 type InfoRequest struct {
-	NodeID uint32 `json:"node_id"`
+	NodeID int64 `json:"node_id"`
 }
 
 // CreateSnapshotsRequest represents a request to create snapshots
 type CreateSnapshotsRequest struct {
-	NodeID                             uint32   `json:"node_id"`
-	FullSync                           bool     `json:"full_sync"`
-	HashRanges                         []uint32 `json:"hash_ranges,omitempty"`
-	DisableCreateSnapshotsSequentially bool     `json:"disable_create_snapshots_sequentially,omitempty"`
+	NodeID                             int64   `json:"node_id"`
+	FullSync                           bool    `json:"full_sync"`
+	HashRanges                         []int64 `json:"hash_ranges,omitempty"`
+	DisableCreateSnapshotsSequentially bool    `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 
 // LoadSnapshotsRequest represents a request to load snapshots
 type LoadSnapshotsRequest struct {
-	NodeID         uint32   `json:"node_id"`
-	HashRanges     []uint32 `json:"hash_ranges,omitempty"`
-	MaxConcurrency uint32   `json:"max_concurrency"`
+	NodeID         int64   `json:"node_id"`
+	HashRanges     []int64 `json:"hash_ranges,omitempty"`
+	MaxConcurrency int64   `json:"max_concurrency"`
 }
 
 // ScaleRequest represents a request to scale the cluster
 type ScaleRequest struct {
-	NodeIDs []uint32 `json:"node_ids"`
+	NodeIDs []int64 `json:"node_ids"`
 }
 
 // UpdateClusterDataRequest represents a request to update the cluster size
@@ -63,22 +63,22 @@ type AutoScaleRequest struct {
 	NewNodesAddresses []string `json:"new_nodes_addresses"`
 	// FullSync indicates whether to perform a full synchronization during snapshot creation.
 	// When true, all data will be included in snapshots regardless of incremental changes.
-	FullSync                           bool   `json:"full_sync,omitempty"`
-	SkipCreateSnapshots                bool   `json:"skip_create_snapshots,omitempty"`
-	LoadSnapshotsMaxConcurrency        uint32 `json:"load_snapshots_max_concurrency,omitempty"`
-	DisableCreateSnapshotsSequentially bool   `json:"disable_create_snapshots_sequentially,omitempty"`
+	FullSync                           bool  `json:"full_sync,omitempty"`
+	SkipCreateSnapshots                bool  `json:"skip_create_snapshots,omitempty"`
+	LoadSnapshotsMaxConcurrency        int64 `json:"load_snapshots_max_concurrency,omitempty"`
+	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 
 // HashRangeMovementsRequest represents a request to preview hash range movements
 type HashRangeMovementsRequest struct {
-	OldClusterSize                     uint32 `json:"old_cluster_size"`
-	NewClusterSize                     uint32 `json:"new_cluster_size"`
-	TotalHashRanges                    uint32 `json:"total_hash_ranges"`
-	Upload                             bool   `json:"upload,omitempty"`
-	Download                           bool   `json:"download,omitempty"`
-	FullSync                           bool   `json:"full_sync,omitempty"`
-	LoadSnapshotsMaxConcurrency        uint32 `json:"load_snapshots_max_concurrency,omitempty"`
-	DisableCreateSnapshotsSequentially bool   `json:"disable_create_snapshots_sequentially,omitempty"`
+	OldClusterSize                     int64 `json:"old_cluster_size"`
+	NewClusterSize                     int64 `json:"new_cluster_size"`
+	TotalHashRanges                    int64 `json:"total_hash_ranges"`
+	Upload                             bool  `json:"upload,omitempty"`
+	Download                           bool  `json:"download,omitempty"`
+	FullSync                           bool  `json:"full_sync,omitempty"`
+	LoadSnapshotsMaxConcurrency        int64 `json:"load_snapshots_max_concurrency,omitempty"`
+	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 
 type HashRangeMovementsResponse struct {
@@ -88,9 +88,9 @@ type HashRangeMovementsResponse struct {
 
 // HashRangeMovement represents a single hash range movement
 type HashRangeMovement struct {
-	HashRange uint32 `json:"hash_range"`
-	From      uint32 `json:"from"`
-	To        uint32 `json:"to"`
+	HashRange int64 `json:"hash_range"`
+	From      int64 `json:"from"`
+	To        int64 `json:"to"`
 }
 
 // LastOperationResponse represents the response containing the last operation

@@ -25,14 +25,14 @@ import (
 
 func BenchmarkSingleNode(b *testing.B) {
 	var (
-		totalHashRanges    uint32 = 128
-		warmUpWithKeys            = 1_000_000 // must be divisible by warmUpBatchSize
-		warmUpBatchSize           = 1_000
-		concurrentGetCalls        = 5_000
-		getBatchSize              = 1_000
-		concurrentPutCalls        = 1_000
-		putBatchSize              = 100
-		defaultTTL                = time.Hour
+		totalHashRanges    int64 = 128
+		warmUpWithKeys           = 1_000_000 // must be divisible by warmUpBatchSize
+		warmUpBatchSize          = 1_000
+		concurrentGetCalls       = 5_000
+		getBatchSize             = 1_000
+		concurrentPutCalls       = 1_000
+		putBatchSize             = 100
+		defaultTTL               = time.Hour
 	)
 
 	nodeConfig := node.Config{

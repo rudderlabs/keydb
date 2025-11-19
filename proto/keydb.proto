@@ -37,7 +37,7 @@ message GetRequest {
 // GetResponse contains the retrieved values and cluster information
 message GetResponse {
   repeated bool exists = 1; // This list should be populated in the same order as the "keys" field in GetRequest
-  uint32 cluster_size = 2; // Number of nodes in the cluster
+  int64 cluster_size = 2; // Number of nodes in the cluster
   repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
   ErrorCode error_code = 4; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
 }
@@ -47,14 +47,14 @@ message GetResponse {
 // Then the requests are sent in parallel to all the concerned nodes and put back into a single PutResponse
 message PutRequest {
   repeated string keys = 1;
-  uint64 ttl_seconds = 2;
+  int64 ttl_seconds = 2;
   ErrorCode error_code = 3; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
 }
 
 // PutResponse contains the operation result and cluster information
 message PutResponse {
   bool success = 1;
-  uint32 cluster_size = 2; // Number of nodes in the cluster
+  int64 cluster_size = 2; // Number of nodes in the cluster
   repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
   ErrorCode error_code = 4; // If WRONG_NODE or SCALING is received the client should get the new cluster size via GetNodeInfo and retry
 }
@@ -69,34 +69,34 @@ enum ErrorCode {
 
 // GetNodeInfoRequest to retrieve information about a node
 message GetNodeInfoRequest {
-  uint32 node_id = 1; // ID of the node to get info from
+  int64 node_id = 1; // ID of the node to get info from
 }
 
 // GetNodeInfoResponse contains information about the node and the cluster
 message GetNodeInfoResponse {
-  uint32 node_id = 1; // ID of the node
-  uint32 cluster_size = 2; // Number of nodes in the cluster
+  int64 node_id = 1; // ID of the node
+  int64 cluster_size = 2; // Number of nodes in the cluster
   repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
-  repeated uint32 hash_ranges = 4; // Hash ranges handled by this node
-  uint64 last_snapshot_timestamp = 5; // Unix timestamp of the last snapshot
+  repeated int64 hash_ranges = 4; // Hash ranges handled by this node
+  int64 last_snapshot_timestamp = 5; // Unix timestamp of the last snapshot
 }
 
 // LoadSnapshotsRequest initiates loading snapshots from cloud storage
 message LoadSnapshotsRequest {
-  repeated uint32 hash_range = 1; // repeated means 0 or more values, pass none to load all snapshots handled by that node
-  uint32 max_concurrency = 2; // how many snapshots should be downloaded concurrently and loaded up (affects node memory)
+  repeated int64 hash_range = 1; // repeated means 0 or more values, pass none to load all snapshots handled by that node
+  int64 max_concurrency = 2; // how many snapshots should be downloaded concurrently and loaded up (affects node memory)
 }
 
 // LoadSnapshotsResponse contains the result of the snapshot loading operation
 message LoadSnapshotsResponse {
   bool success = 1;
   string error_message = 2; // Error message if the operation failed
-  uint32 node_id = 3; // ID of the node that processed the request
+  int64 node_id = 3; // ID of the node that processed the request
 }
 
 // CreateSnapshotRequests initiates snapshot creation
 message CreateSnapshotsRequest {
-  repeated uint32 hash_range = 1; // repeated means 0 or more values, pass none to create all snapshots
+  repeated int64 hash_range = 1; // repeated means 0 or more values, pass none to create all snapshots
   bool full_sync = 2; // pass true to force the nodes to create snapshots from scratch (not incremental)
 }
 
@@ -104,7 +104,7 @@ message CreateSnapshotsRequest {
 message CreateSnapshotsResponse {
   bool success = 1;
   string error_message = 2; // Error message if the operation failed
-  uint32 node_id = 3; // ID of the node that processed the request
+  int64 node_id = 3; // ID of the node that processed the request
 }
 
 // ScaleRequest changes the number of nodes in the cluster
@@ -117,7 +117,7 @@ message ScaleRequest {
 // ScaleResponse contains the result of the scaling operation
 message ScaleResponse {
   bool success = 1;
-  uint32 previous_cluster_size = 2;
-  uint32 new_cluster_size = 3;
+  int64 previous_cluster_size = 2;
+  int64 new_cluster_size = 3;
   string error_message = 4; // Error message if the operation failed
 }

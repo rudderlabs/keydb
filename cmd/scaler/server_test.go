@@ -62,7 +62,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	defer cancel0()
 
 	// Create the node service
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx0, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -111,7 +111,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		NodeID:     1,
 		HashRanges: hash.New(2, totalHashRanges).GetNodeHashRangesList(1),
 	}, true)
-	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0, 1}}, true)
+	_ = s.Do("/scale", ScaleRequest{NodeIDs: []int64{0, 1}}, true)
 	// After Scale, trigger hasher reinitialization based on current degraded nodes
 	node0.DegradedNodesChanged()
 	node1.DegradedNodesChanged()
@@ -122,8 +122,8 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
-	require.ElementsMatch(t, []uint32{0, 1}, infoResponse.HashRanges)
-	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
+	require.ElementsMatch(t, []int64{0, 1}, infoResponse.HashRanges)
+	require.Greater(t, infoResponse.LastSnapshotTimestamp, int64(0))
 
 	// Test node info 1
 	body = s.Do("/info", InfoRequest{NodeID: 1})
@@ -131,8 +131,8 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
-	require.ElementsMatch(t, []uint32{2}, infoResponse.HashRanges)
-	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
+	require.ElementsMatch(t, []int64{2}, infoResponse.HashRanges)
+	require.Greater(t, infoResponse.LastSnapshotTimestamp, int64(0))
 
 	// Get again now that the cluster is made of two nodes
 	body = s.Do("/get", GetRequest{
@@ -163,7 +163,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		HashRanges: hash.New(1, totalHashRanges).GetNodeHashRangesList(0),
 	}, true)
 	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{Addresses: []string{node0Address}}, true)
-	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0}}, true)
+	_ = s.Do("/scale", ScaleRequest{NodeIDs: []int64{0}}, true)
 	// After Scale, trigger hasher reinitialization based on current degraded nodes
 	node0.DegradedNodesChanged()
 	node1.DegradedNodesChanged()
@@ -176,8 +176,8 @@ func TestScaleUpAndDown(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 1, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 1)
-	require.ElementsMatch(t, []uint32{0, 1, 2}, infoResponse.HashRanges)
-	require.Greater(t, infoResponse.LastSnapshotTimestamp, uint64(0))
+	require.ElementsMatch(t, []int64{0, 1, 2}, infoResponse.HashRanges)
+	require.Greater(t, infoResponse.LastSnapshotTimestamp, int64(0))
 
 	// Close node1 before doing a GET to make sure node1 won't pick that request
 	cancel1()
@@ -214,7 +214,7 @@ func TestAutoScale(t *testing.T) {
 	defer cancel()
 
 	// Create the node service
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -264,14 +264,14 @@ func TestAutoScale(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
-	require.ElementsMatch(t, []uint32{0, 1}, infoResponse.HashRanges)
+	require.ElementsMatch(t, []int64{0, 1}, infoResponse.HashRanges)
 
 	body = s.Do("/info", InfoRequest{NodeID: 1})
 	infoResponse = pb.GetNodeInfoResponse{}
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 2, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 2)
-	require.ElementsMatch(t, []uint32{2}, infoResponse.HashRanges)
+	require.ElementsMatch(t, []int64{2}, infoResponse.HashRanges)
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
@@ -324,7 +324,7 @@ func TestAutoScale(t *testing.T) {
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
 	require.EqualValues(t, 1, infoResponse.ClusterSize)
 	require.Len(t, infoResponse.NodesAddresses, 1)
-	require.ElementsMatch(t, []uint32{0, 1, 2}, infoResponse.HashRanges)
+	require.ElementsMatch(t, []int64{0, 1, 2}, infoResponse.HashRanges)
 
 	// Verify all data is still accessible after scale down
 	body = s.Do("/get", GetRequest{
@@ -368,7 +368,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	}
 
 	// Create the node service
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -504,7 +504,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 
 func TestAutoScaleTransientError(t *testing.T) {
 	// Create the node service
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0 := startMockNodeService(t, "node0")
 	node1 := startMockNodeService(t, "node1")
 
@@ -584,7 +584,7 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 	defer cancel()
 
 	// Create the node service
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -667,7 +667,7 @@ func TestAutoHealing(t *testing.T) {
 	defer cancel()
 
 	// Create the node service
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -736,7 +736,7 @@ func TestHashRangeMovements(t *testing.T) {
 	defer cancel()
 
 	// Create a simple node service for the HTTP server
-	totalHashRanges := uint32(8)
+	totalHashRanges := int64(8)
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -764,9 +764,9 @@ func TestHashRangeMovements(t *testing.T) {
 
 		// Verify each movement has valid data
 		for _, movement := range response.Movements {
-			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
-			require.Less(t, movement.From, uint32(2), "from node should be less than old cluster size")
-			require.Less(t, movement.To, uint32(3), "to node should be less than new cluster size")
+			require.Less(t, movement.HashRange, int64(8), "hash range should be less than total")
+			require.Less(t, movement.From, int64(2), "from node should be less than old cluster size")
+			require.Less(t, movement.To, int64(3), "to node should be less than new cluster size")
 			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
 		}
 	})
@@ -787,9 +787,9 @@ func TestHashRangeMovements(t *testing.T) {
 
 		// Verify each movement has valid data
 		for _, movement := range response.Movements {
-			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
-			require.Less(t, movement.From, uint32(3), "from node should be less than old cluster size")
-			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
+			require.Less(t, movement.HashRange, int64(8), "hash range should be less than total")
+			require.Less(t, movement.From, int64(3), "from node should be less than old cluster size")
+			require.Less(t, movement.To, int64(2), "to node should be less than new cluster size")
 			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
 		}
 	})
@@ -903,9 +903,9 @@ func TestHashRangeMovements(t *testing.T) {
 
 		// Verify each movement has valid data
 		for _, movement := range response.Movements {
-			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
-			require.Less(t, movement.From, uint32(1), "from node should be less than old cluster size")
-			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
+			require.Less(t, movement.HashRange, int64(8), "hash range should be less than total")
+			require.Less(t, movement.From, int64(1), "from node should be less than old cluster size")
+			require.Less(t, movement.To, int64(2), "to node should be less than new cluster size")
 			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
 		}
 
@@ -941,9 +941,9 @@ func TestHashRangeMovements(t *testing.T) {
 
 		// Verify each movement has valid data
 		for _, movement := range response.Movements {
-			require.Less(t, movement.HashRange, uint32(8), "hash range should be less than total")
-			require.Less(t, movement.From, uint32(1), "from node should be less than old cluster size")
-			require.Less(t, movement.To, uint32(2), "to node should be less than new cluster size")
+			require.Less(t, movement.HashRange, int64(8), "hash range should be less than total")
+			require.Less(t, movement.From, int64(1), "from node should be less than old cluster size")
+			require.Less(t, movement.To, int64(2), "to node should be less than new cluster size")
 			require.NotEqual(t, movement.From, movement.To, "from and to should be different")
 		}
 
@@ -1056,8 +1056,8 @@ func TestHandleLastOperation(t *testing.T) {
 	// Verify operation details
 	require.NotNil(t, response.Operation)
 	require.Equal(t, scaler.ScaleUp, response.Operation.Type)
-	require.Equal(t, uint32(2), response.Operation.OldClusterSize)
-	require.Equal(t, uint32(3), response.Operation.NewClusterSize)
+	require.Equal(t, int64(2), response.Operation.OldClusterSize)
+	require.Equal(t, int64(3), response.Operation.NewClusterSize)
 	require.Equal(t, []string{"node1", "node2"}, response.Operation.OldAddresses)
 	require.Equal(t, []string{"node1", "node2", "node3"}, response.Operation.NewAddresses)
 }
@@ -1083,7 +1083,7 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	defer cancel()
 
 	// Create the initial node service
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -1146,8 +1146,8 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	// Verify operation details
 	require.NotNil(t, lastOpResponse.Operation)
 	require.Equal(t, scaler.ScaleUp, lastOpResponse.Operation.Type)
-	require.Equal(t, uint32(1), lastOpResponse.Operation.OldClusterSize)
-	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize)
+	require.Equal(t, int64(1), lastOpResponse.Operation.OldClusterSize)
+	require.Equal(t, int64(2), lastOpResponse.Operation.NewClusterSize)
 	require.Equal(t, []string{node0Address}, lastOpResponse.Operation.OldAddresses)
 	// For the failed step, we expect some error message
 	require.Equal(t, scaler.RolledBack, lastOpResponse.Operation.Status)
@@ -1191,7 +1191,7 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	defer cancel()
 
 	// Create a 2-node cluster
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -1263,8 +1263,8 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	// Verify operation details
 	require.NotNil(t, lastOpResponse.Operation)
 	require.Equal(t, scaler.ScaleDown, lastOpResponse.Operation.Type)
-	require.Equal(t, uint32(2), lastOpResponse.Operation.OldClusterSize)
-	require.Equal(t, uint32(1), lastOpResponse.Operation.NewClusterSize)
+	require.Equal(t, int64(2), lastOpResponse.Operation.OldClusterSize)
+	require.Equal(t, int64(1), lastOpResponse.Operation.NewClusterSize)
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.OldAddresses)
 	require.Equal(t, []string{unreachableAddr}, lastOpResponse.Operation.NewAddresses)
 	require.Equal(t, scaler.RolledBack, lastOpResponse.Operation.Status)
@@ -1310,7 +1310,7 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	defer cancel()
 
 	// Create a 2-node cluster
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 	node0Conf := newConf()
 	_, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -1381,8 +1381,8 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	// Verify operation details
 	require.NotNil(t, lastOpResponse.Operation)
 	require.Equal(t, scaler.AutoHealing, lastOpResponse.Operation.Type)
-	require.Equal(t, uint32(2), lastOpResponse.Operation.OldClusterSize)
-	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize) // Same size for auto-healing
+	require.Equal(t, int64(2), lastOpResponse.Operation.OldClusterSize)
+	require.Equal(t, int64(2), lastOpResponse.Operation.NewClusterSize) // Same size for auto-healing
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.OldAddresses)
 	require.Equal(t, []string{node0Address, unreachableAddr}, lastOpResponse.Operation.NewAddresses)
 	require.Equal(t, scaler.RolledBack, lastOpResponse.Operation.Status)
@@ -1456,8 +1456,8 @@ func TestRollbackFailure(t *testing.T) {
 	// Verify operation details
 	require.NotNil(t, lastOpResponse.Operation)
 	require.Equal(t, scaler.ScaleUp, lastOpResponse.Operation.Type)
-	require.Equal(t, uint32(1), lastOpResponse.Operation.OldClusterSize)
-	require.Equal(t, uint32(2), lastOpResponse.Operation.NewClusterSize)
+	require.Equal(t, int64(1), lastOpResponse.Operation.OldClusterSize)
+	require.Equal(t, int64(2), lastOpResponse.Operation.NewClusterSize)
 	require.Equal(t, []string{node0Address}, lastOpResponse.Operation.OldAddresses)
 	require.Equal(t, []string{node0Address, node1Address}, lastOpResponse.Operation.NewAddresses)
 	require.Equal(t, scaler.Failed, lastOpResponse.Operation.Status) // Should be failed, not rolled back
@@ -1528,7 +1528,7 @@ func getService(
 	return service, address
 }
 
-func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, rp scaler.RetryPolicy, addresses ...string) *opClient {
+func startScalerHTTPServer(t testing.TB, totalHashRanges int64, rp scaler.RetryPolicy, addresses ...string) *opClient {
 	t.Helper()
 
 	log := logger.NOP
@@ -1622,7 +1622,8 @@ type mockNodeServiceServer struct {
 	createSnapshotsCalls       atomic.Uint64
 	createSnapshotsReturnError atomic.Bool
 
-	loadSnapshotsCalls       atomic.Uint64
+	loadSnapshotsCalls atomic.Uint64
+
 	loadSnapshotsReturnError atomic.Bool
 }
 
@@ -1704,7 +1705,7 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 
 	// Create a variable to hold degraded state that can be updated during the test
 	degradedNodes := make([]bool, 2)
@@ -1756,7 +1757,7 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 	require.Equal(t, node0Address, resp.NodesAddresses[0])
 
 	// Verify that node 1 rejects Put requests
-	putResp, err := node1.Put(ctx, &pb.PutRequest{Keys: []string{"key5"}, TtlSeconds: uint64(5 * 60)})
+	putResp, err := node1.Put(ctx, &pb.PutRequest{Keys: []string{"key5"}, TtlSeconds: int64(5 * 60)})
 	require.NoError(t, err)
 	require.Equal(t, pb.ErrorCode_SCALING, putResp.ErrorCode)
 	require.Len(t, putResp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
@@ -1801,7 +1802,7 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	totalHashRanges := uint32(3)
+	totalHashRanges := int64(3)
 
 	// Create a variable to hold degraded state that can be updated during the test
 	degradedNodes := make([]bool, 1)
@@ -1875,7 +1876,7 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
 	)
 	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
-	require.ElementsMatch(t, []uint32{0, 1, 2}, infoResponse.HashRanges,
+	require.ElementsMatch(t, []int64{0, 1, 2}, infoResponse.HashRanges,
 		"node0 should handle all hash ranges when node1 is degraded",
 	)
 
@@ -1889,7 +1890,7 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
 	)
 	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
-	require.ElementsMatch(t, []uint32{2}, infoResponse.HashRanges)
+	require.ElementsMatch(t, []int64{2}, infoResponse.HashRanges)
 
 	// Step 6: mark node 1 as non-degraded
 	degradedNodes[1] = false

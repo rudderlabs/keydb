@@ -127,7 +127,7 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 }
 
 // Get returns the values associated with the keys and an error if the operation failed
-func (c *Cache) Get(keysByHashRange map[uint32][]string, indexes map[string]int) ([]bool, error) {
+func (c *Cache) Get(keysByHashRange map[int64][]string, indexes map[string]int) ([]bool, error) {
 	results := make([]bool, len(indexes))
 
 	err := c.cache.View(func(txn *badger.Txn) error {
@@ -155,7 +155,7 @@ func (c *Cache) Get(keysByHashRange map[uint32][]string, indexes map[string]int)
 }
 
 // Put adds or updates elements inside the cache with the specified TTL and returns an error if the operation failed
-func (c *Cache) Put(keysByHashRange map[uint32][]string, ttl time.Duration) error {
+func (c *Cache) Put(keysByHashRange map[int64][]string, ttl time.Duration) error {
 	modifiedTTL := c.getTTL(ttl)
 
 	bw := c.cache.NewWriteBatch()
@@ -185,10 +185,10 @@ func (c *Cache) getTTL(ttl time.Duration) time.Duration {
 // CreateSnapshots writes the cache contents to the provided writers
 func (c *Cache) CreateSnapshots(
 	ctx context.Context,
-	writers map[uint32]io.Writer,
-	since map[uint32]uint64,
+	writers map[int64]io.Writer,
+	since map[int64]uint64,
 ) (
-	uint64, map[uint32]bool, error,
+	uint64, map[int64]bool, error,
 ) {
 	c.snapshottingLock.Lock()
 	if c.snapshotting {
@@ -205,16 +205,16 @@ func (c *Cache) CreateSnapshots(
 		c.snapshottingLock.Unlock()
 	}()
 
-	hashRangesMap := make(map[uint32]struct{})
+	hashRangesMap := make(map[int64]struct{})
 	// We need to know which hash ranges are being written to, as buffers will have zstd footer in case compression is
 	// enabled, so we can't use the buff.Len() to check if the writer has data
-	hasData := make(map[uint32]bool)
+	hasData := make(map[int64]bool)
 	for hashRange := range writers {
 		hashRangesMap[hashRange] = struct{}{}
 		hasData[hashRange] = false
 	}
 
-	lockedWriters := make(map[uint32]*lockedWriter)
+	lockedWriters := make(map[int64]*lockedWriter)
 	for hr := range writers {
 		lw := &lockedWriter{}
 		if c.compress {
@@ -262,7 +262,7 @@ func (c *Cache) CreateSnapshots(
 	return maxSince, hasData, nil
 }
 
-func (c *Cache) createStream(numGo int, hashRange uint32, since uint64, writer *lockedWriter) (
+func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *lockedWriter) (
 	*badger.Stream,
 	func() (uint64, bool),
 ) {
@@ -302,16 +302,16 @@ func (c *Cache) createStream(numGo int, hashRange uint32, since uint64, writer *
 				hr, err := strconv.ParseUint(hashRangeStr, 10, 32)
 				if err != nil {
 					c.logger.Warnn("Skipping key with invalid hash range",
-						logger.NewIntField("expected", int64(hashRange)),
+						logger.NewIntField("expected", hashRange),
 						logger.NewStringField("actual", hashRangeStr),
 						logger.NewStringField("key", string(kv.Key)))
 					continue // Skip keys with invalid hash range
 				}
 
-				if uint32(hr) != hashRange {
+				if int64(hr) != hashRange {
 					// if this happens stream.Prefix is not used correctly
 					c.logger.Warnn("Skipping key different hash range",
-						logger.NewIntField("expected", int64(hashRange)),
+						logger.NewIntField("expected", hashRange),
 						logger.NewIntField("actual", int64(hr)),
 						logger.NewStringField("key", string(kv.Key)))
 					continue
@@ -451,11 +451,11 @@ func (c *Cache) writeTo(list *pb.KVList, w *lockedWriter) error {
 	return err
 }
 
-func getKeyPrefix(hashRange uint32) string {
+func getKeyPrefix(hashRange int64) string {
 	return "hr" + strconv.Itoa(int(hashRange)) + ":"
 }
 
-func getKey(key string, hashRange uint32) []byte {
+func getKey(key string, hashRange int64) []byte {
 	return []byte(getKeyPrefix(hashRange) + key)
 }
 

@@ -8,7 +8,7 @@ func TestGetNodeID(t *testing.T) {
 	tests := []struct {
 		name        string
 		podName     string
-		expectedID  int
+		expectedID  int64
 		expectError bool
 	}{
 		// Multi-statefulset format tests (new format)

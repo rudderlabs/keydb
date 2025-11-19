@@ -25,10 +25,10 @@ import (
 )
 
 const (
-	DefaultRetryPolicyInitialInterval        = 100 * time.Millisecond
-	DefaultRetryPolicyMultiplier             = 1.5
-	DefaultRetryPolicyMaxInterval            = 30 * time.Second
-	DefaultTotalHashRanges            uint32 = 271
+	DefaultRetryPolicyInitialInterval       = 100 * time.Millisecond
+	DefaultRetryPolicyMultiplier            = 1.5
+	DefaultRetryPolicyMaxInterval           = 30 * time.Second
+	DefaultTotalHashRanges            int64 = 271
 
 	DefaultGrpcKeepAliveTime    = 10 * time.Second
 	DefaultGrpcKeepAliveTimeout = 2 * time.Second
@@ -83,7 +83,7 @@ type Config struct {
 	Addresses []string
 
 	// TotalHashRanges is the total number of hash ranges
-	TotalHashRanges uint32
+	TotalHashRanges int64
 
 	// ConnectionPoolSize is the number of connections per node (0 means use default)
 	ConnectionPoolSize int
@@ -100,7 +100,7 @@ type Client struct {
 	config Config
 
 	// clusterSize is the number of nodes in the cluster
-	clusterSize uint32
+	clusterSize int64
 
 	// hash is the hash instance used for consistent hashing
 	hash *hash.Hash
@@ -187,7 +187,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		config.ConnectionPoolSize = DefaultConnectionPoolSize
 	}
 
-	clusterSize := uint32(len(config.Addresses))
+	clusterSize := int64(len(config.Addresses))
 	client := &Client{
 		config:      config,
 		pools:       make(map[int]*connectionPool),
@@ -317,7 +317,7 @@ func (c *Client) get(
 	[]bool, error,
 ) {
 	// Group keys by node
-	keysByNode := make(map[uint32][]string)
+	keysByNode := make(map[int64][]string)
 	for _, key := range keys {
 		if _, alreadyFetched := results[key]; alreadyFetched {
 			continue
@@ -392,7 +392,7 @@ func (c *Client) get(
 
 				if respErr != nil {
 					c.logger.Errorn("get keys from node",
-						logger.NewIntField("nodeId", int64(nodeID)),
+						logger.NewIntField("nodeId", nodeID),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
 						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -400,7 +400,7 @@ func (c *Client) get(
 						obskit.Error(respErr))
 				} else if resp != nil {
 					c.logger.Warnn("get keys from node",
-						logger.NewIntField("nodeId", int64(nodeID)),
+						logger.NewIntField("nodeId", nodeID),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
 						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -474,7 +474,7 @@ func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) erro
 
 func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) error {
 	// Group keys by node
-	keysByNode := make(map[uint32][]string)
+	keysByNode := make(map[int64][]string)
 	for _, key := range keys {
 		nodeID := c.hash.GetNodeNumber(key)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
@@ -502,7 +502,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 			c.metrics.connectionOps[int(nodeID)][connID].Increment()
 
 			// Create the request
-			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: uint64(ttl.Seconds())}
+			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: int64(ttl.Seconds())}
 
 			// Send the request with retries
 			var (
@@ -545,7 +545,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 
 				if respErr != nil {
 					c.logger.Errorn("put keys in node",
-						logger.NewIntField("nodeID", int64(nodeID)),
+						logger.NewIntField("nodeID", nodeID),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
 						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -553,7 +553,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 						obskit.Error(respErr))
 				} else if resp != nil {
 					c.logger.Warnn("put keys in node",
-						logger.NewIntField("nodeID", int64(nodeID)),
+						logger.NewIntField("nodeID", nodeID),
 						logger.NewIntField("attempt", attempt),
 						logger.NewDurationField("retryDelay", retryDelay),
 						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
@@ -604,7 +604,7 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 		c.mu.RLock()
 	}()
 
-	newClusterSize := uint32(len(nodesAddresses))
+	newClusterSize := int64(len(nodesAddresses))
 
 	// Check if cluster size has already been updated by someone else
 	if c.clusterSize == newClusterSize {
@@ -612,8 +612,8 @@ func (c *Client) updateClusterSize(nodesAddresses []string) error {
 	}
 
 	c.logger.Infon("Detected new cluster size",
-		logger.NewIntField("oldClusterSize", int64(c.clusterSize)),
-		logger.NewIntField("newClusterSize", int64(newClusterSize)),
+		logger.NewIntField("oldClusterSize", c.clusterSize),
+		logger.NewIntField("newClusterSize", newClusterSize),
 		logger.NewStringField("nodesAddresses", fmt.Sprintf("%+v", nodesAddresses)),
 	)
 

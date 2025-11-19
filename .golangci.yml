@@ -87,7 +87,7 @@ linters:
       - examples$
 issues:
   max-issues-per-linter: 50
-  max-same-issues: 10
+  max-same-issues: 50
   new: false
 formatters:
   exclusions:

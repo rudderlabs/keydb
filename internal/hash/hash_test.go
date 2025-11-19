@@ -19,8 +19,8 @@ func TestGetNodeNumberConsistency(t *testing.T) {
 	// Test with various keys, node counts, and hash ranges
 	testCases := []struct {
 		key             string
-		clusterSize     uint32
-		totalHashRanges uint32
+		clusterSize     int64
+		totalHashRanges int64
 	}{
 		{"key1", 10, 128},
 		{"key2", 5, 128},
@@ -54,9 +54,9 @@ func TestGetNodeNumberConsistency(t *testing.T) {
 func TestGetNodeHashRangesConsistency(t *testing.T) {
 	// Test with various node IDs, node counts, and hash ranges
 	testCases := []struct {
-		nodeID          uint32
-		clusterSize     uint32
-		totalHashRanges uint32
+		nodeID          int64
+		clusterSize     int64
+		totalHashRanges int64
 	}{
 		{0, 10, 128},
 		{4, 5, 128},
@@ -109,17 +109,17 @@ func TestHashRangeInNodeHashRanges(t *testing.T) {
 
 	// Initialize random number generator
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-	randomNodeIDs := make([]uint32, 0, numOfRandomNodeIDs)
+	randomNodeIDs := make([]int64, 0, numOfRandomNodeIDs)
 	for i := 0; i < numOfRandomNodeIDs; i++ {
-		randomNodeIDs = append(randomNodeIDs, uint32(i))
+		randomNodeIDs = append(randomNodeIDs, int64(i))
 	}
 
 	// Test with different random nodeIDs
 	for _, nodeID := range randomNodeIDs {
 		// we add the nodeID to make sure the nodeID is always <= clusterSize
-		clusterSize := uint32(rnd.Intn(20) + int(nodeID) + 1)
+		clusterSize := int64(rnd.Intn(20) + int(nodeID) + 1)
 		// we add the clusterSize to make sure that totalHashRanges is always >= clusterSize
-		totalHashRanges := uint32(rnd.Intn(128) + int(clusterSize) + 1)
+		totalHashRanges := int64(rnd.Intn(128) + int(clusterSize) + 1)
 
 		testName := "nodeID=" + strconv.Itoa(int(nodeID)) +
 			"_nodes=" + strconv.Itoa(int(clusterSize)) +
@@ -147,10 +147,10 @@ func TestHashRangeInNodeHashRanges(t *testing.T) {
 }
 
 func TestCollision(t *testing.T) {
-	var clusterSize, totalHashRanges uint32 = 3, 128
+	var clusterSize, totalHashRanges int64 = 3, 128
 	h := New(clusterSize, totalHashRanges)
-	seen := make(map[uint32]struct{})
-	for nodeID := uint32(0); nodeID < clusterSize; nodeID++ {
+	seen := make(map[int64]struct{})
+	for nodeID := int64(0); nodeID < clusterSize; nodeID++ {
 		hashRanges := h.GetNodeHashRanges(nodeID)
 		for hashRange := range hashRanges {
 			if _, exists := seen[hashRange]; exists {
@@ -165,9 +165,9 @@ func TestCollision(t *testing.T) {
 func TestGetNodeHashRangesListConsistency(t *testing.T) {
 	// Test with various node IDs, node counts, and hash ranges
 	testCases := []struct {
-		nodeID          uint32
-		clusterSize     uint32
-		totalHashRanges uint32
+		nodeID          int64
+		clusterSize     int64
+		totalHashRanges int64
 	}{
 		{0, 10, 128},
 		{4, 5, 128},
@@ -208,9 +208,9 @@ func TestGetNodeHashRangesListConsistency(t *testing.T) {
 // as GetNodeHashRanges but in slice format
 func TestGetNodeHashRangesListMatchesMap(t *testing.T) {
 	testCases := []struct {
-		nodeID          uint32
-		clusterSize     uint32
-		totalHashRanges uint32
+		nodeID          int64
+		clusterSize     int64
+		totalHashRanges int64
 	}{
 		{0, 10, 128},
 		{4, 5, 128},
@@ -234,7 +234,7 @@ func TestGetNodeHashRangesListMatchesMap(t *testing.T) {
 				"Map and list should have the same number of hash ranges")
 
 			// Convert list to map for comparison
-			listAsMap := make(map[uint32]struct{})
+			listAsMap := make(map[int64]struct{})
 			for _, hashRange := range rangesList {
 				listAsMap[hashRange] = struct{}{}
 			}
@@ -257,9 +257,9 @@ func TestGetNodeHashRangesListMatchesMap(t *testing.T) {
 // TestGetNodeHashRangesListSorted verifies that GetNodeHashRangesList returns hash ranges in sorted order
 func TestGetNodeHashRangesListSorted(t *testing.T) {
 	testCases := []struct {
-		nodeID          uint32
-		clusterSize     uint32
-		totalHashRanges uint32
+		nodeID          int64
+		clusterSize     int64
+		totalHashRanges int64
 	}{
 		{0, 10, 128},
 		{4, 5, 128},
@@ -295,17 +295,17 @@ func TestHashRangeInNodeHashRangesList(t *testing.T) {
 
 	// Initialize random number generator
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-	randomNodeIDs := make([]uint32, 0, numOfRandomNodeIDs)
+	randomNodeIDs := make([]int64, 0, numOfRandomNodeIDs)
 	for i := 0; i < numOfRandomNodeIDs; i++ {
-		randomNodeIDs = append(randomNodeIDs, uint32(i))
+		randomNodeIDs = append(randomNodeIDs, int64(i))
 	}
 
 	// Test with different random nodeIDs
 	for _, nodeID := range randomNodeIDs {
 		// we add the nodeID to make sure the nodeID is always <= clusterSize
-		clusterSize := uint32(rnd.Intn(20) + int(nodeID) + 1)
+		clusterSize := int64(rnd.Intn(20) + int(nodeID) + 1)
 		// we add the clusterSize to make sure that totalHashRanges is always >= clusterSize
-		totalHashRanges := uint32(rnd.Intn(128) + int(clusterSize) + 1)
+		totalHashRanges := int64(rnd.Intn(128) + int(clusterSize) + 1)
 
 		testName := "nodeID=" + strconv.Itoa(int(nodeID)) +
 			"_nodes=" + strconv.Itoa(int(clusterSize)) +
@@ -318,7 +318,7 @@ func TestHashRangeInNodeHashRangesList(t *testing.T) {
 				hashResultsForNodeID := getKeysForNodeID(h, numRandomKeys, nodeID)
 
 				// Convert slice to map for faster lookup
-				nodeHashRangesMap := make(map[uint32]struct{})
+				nodeHashRangesMap := make(map[int64]struct{})
 				for _, hashRange := range nodeHashRangesList {
 					nodeHashRangesMap[hashRange] = struct{}{}
 				}
@@ -342,9 +342,9 @@ func TestHashRangeInNodeHashRangesList(t *testing.T) {
 func TestGetNodeHashRangesListPanics(t *testing.T) {
 	testCases := []struct {
 		name            string
-		nodeID          uint32
-		clusterSize     uint32
-		totalHashRanges uint32
+		nodeID          int64
+		clusterSize     int64
+		totalHashRanges int64
 		expectedPanic   string
 	}{
 		{
@@ -391,9 +391,9 @@ func TestGetNodeHashRangesListPanics(t *testing.T) {
 func TestGetHashRangeMovements(t *testing.T) {
 	testCases := []struct {
 		name            string
-		oldClusterSize  uint32
-		newClusterSize  uint32
-		totalHashRanges uint32
+		oldClusterSize  int64
+		newClusterSize  int64
+		totalHashRanges int64
 	}{
 		{
 			name:            "scale_up_1_to_2",
@@ -436,13 +436,13 @@ func TestGetHashRangeMovements(t *testing.T) {
 			oldH := New(tc.oldClusterSize, tc.totalHashRanges)
 			newH := New(tc.newClusterSize, tc.totalHashRanges)
 
-			oldNodeRanges := make(map[uint32]map[uint32]struct{})
-			for nodeID := uint32(0); nodeID < tc.oldClusterSize; nodeID++ {
+			oldNodeRanges := make(map[int64]map[int64]struct{})
+			for nodeID := int64(0); nodeID < tc.oldClusterSize; nodeID++ {
 				oldNodeRanges[nodeID] = oldH.GetNodeHashRanges(nodeID)
 			}
 
-			newNodeRanges := make(map[uint32]map[uint32]struct{})
-			for nodeID := uint32(0); nodeID < tc.newClusterSize; nodeID++ {
+			newNodeRanges := make(map[int64]map[int64]struct{})
+			for nodeID := int64(0); nodeID < tc.newClusterSize; nodeID++ {
 				newNodeRanges[nodeID] = newH.GetNodeHashRanges(nodeID)
 			}
 
@@ -494,7 +494,7 @@ func TestGetHashRangeMovements(t *testing.T) {
 			}
 
 			// Verify that no hash ranges are duplicated in source movements
-			allSourceMovedRanges := make(map[uint32]bool)
+			allSourceMovedRanges := make(map[int64]bool)
 			for _, hashRanges := range sourceNodeMovements {
 				for _, hashRange := range hashRanges {
 					require.False(t, allSourceMovedRanges[hashRange],
@@ -505,7 +505,7 @@ func TestGetHashRangeMovements(t *testing.T) {
 			}
 
 			// Verify that no hash ranges are duplicated in destination movements
-			allDestinationMovedRanges := make(map[uint32]bool)
+			allDestinationMovedRanges := make(map[int64]bool)
 			for _, hashRanges := range destinationNodeMovements {
 				for _, hashRange := range hashRanges {
 					require.False(t, allDestinationMovedRanges[hashRange],
@@ -521,17 +521,17 @@ func TestGetHashRangeMovements(t *testing.T) {
 			)
 
 			// Verify that movements include all hash ranges that should move
-			for hashRange := uint32(0); hashRange < tc.totalHashRanges; hashRange++ {
-				var oldNodeID uint32
-				for nodeID := uint32(0); nodeID < tc.oldClusterSize; nodeID++ {
+			for hashRange := int64(0); hashRange < tc.totalHashRanges; hashRange++ {
+				var oldNodeID int64
+				for nodeID := int64(0); nodeID < tc.oldClusterSize; nodeID++ {
 					if _, exists := oldNodeRanges[nodeID][hashRange]; exists {
 						oldNodeID = nodeID
 						break
 					}
 				}
 
-				var newNodeID uint32
-				for nodeID := uint32(0); nodeID < tc.newClusterSize; nodeID++ {
+				var newNodeID int64
+				for nodeID := int64(0); nodeID < tc.newClusterSize; nodeID++ {
 					if _, exists := newNodeRanges[nodeID][hashRange]; exists {
 						newNodeID = nodeID
 						break
@@ -553,9 +553,9 @@ func TestGetHashRangeMovements(t *testing.T) {
 func TestGetHashRangeMovementsPanics(t *testing.T) {
 	testCases := []struct {
 		name            string
-		oldClusterSize  uint32
-		newClusterSize  uint32
-		totalHashRanges uint32
+		oldClusterSize  int64
+		newClusterSize  int64
+		totalHashRanges int64
 		expectedPanic   string
 	}{
 		{
@@ -599,11 +599,11 @@ func TestGetHashRangeMovementsPanics(t *testing.T) {
 
 type hashResult struct {
 	key       string
-	hashRange uint32
-	nodeID    uint32
+	hashRange int64
+	nodeID    int64
 }
 
-func getKeysForNodeID(h *Hash, noOfKeys int, nodeID uint32) []hashResult {
+func getKeysForNodeID(h *Hash, noOfKeys int, nodeID int64) []hashResult {
 	// Get the hash ranges assigned to this nodeID
 	nodeHashRanges := h.GetNodeHashRanges(nodeID)
 	if len(nodeHashRanges) == 0 {
