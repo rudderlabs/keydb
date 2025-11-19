@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.3.0](https://github.com/rudderlabs/keydb/compare/v1.2.3...v1.3.0) (2025-11-19)
+
+
+### Features
+
+* add multi-statefulset support ([#98](https://github.com/rudderlabs/keydb/issues/98)) ([72fa3d6](https://github.com/rudderlabs/keydb/commit/72fa3d690c0c8492c62ac4b608b41cdc08c9d4ca))
+
+
+### Bug Fixes
+
+* integer conversions ([#100](https://github.com/rudderlabs/keydb/issues/100)) ([f62d282](https://github.com/rudderlabs/keydb/commit/f62d2823583eab96f39608839aa47b4063bb89ed))
+* readme ([#99](https://github.com/rudderlabs/keydb/issues/99)) ([255f846](https://github.com/rudderlabs/keydb/commit/255f846a658db7d970ed7e2178296bc8e799d69a))
+
+
+### Miscellaneous
+
+* apply security best practices from step security ([#83](https://github.com/rudderlabs/keydb/issues/83)) ([9ee793e](https://github.com/rudderlabs/keydb/commit/9ee793eef3d014e3a0cc77cd3a454c5c8c429dc7))
+* apply security best practices from step security ([#86](https://github.com/rudderlabs/keydb/issues/86)) ([7fca11b](https://github.com/rudderlabs/keydb/commit/7fca11b3f79b0a2c63e9f78d24b3af10293c9490))
+* **deps:** bump github.com/opencontainers/runc from 1.3.0 to 1.3.3 in the go_modules group across 1 directory ([#92](https://github.com/rudderlabs/keydb/issues/92)) ([d224254](https://github.com/rudderlabs/keydb/commit/d22425456908a2f50d00eb49964411f60ead2df0))
+* **deps:** bump golang from 1.25.3-alpine3.22 to 1.25.4-alpine3.22 in the docker-deps group ([#93](https://github.com/rudderlabs/keydb/issues/93)) ([564d06b](https://github.com/rudderlabs/keydb/commit/564d06b6b7c9864de196ab487a4b76beeb0778ec))
+* **deps:** bump the actions-deps group across 1 directory with 5 updates ([#97](https://github.com/rudderlabs/keydb/issues/97)) ([e00f53e](https://github.com/rudderlabs/keydb/commit/e00f53e2c1785a6ce22a82b7ff2f3bfc3ab25cc9))
+* **deps:** bump the go-deps group across 1 directory with 5 updates ([#96](https://github.com/rudderlabs/keydb/issues/96)) ([b8ccf12](https://github.com/rudderlabs/keydb/commit/b8ccf129795c0ea966aa14354ddda5eb562c9853))
+* performance, scalability, and reliability improvements ([#95](https://github.com/rudderlabs/keydb/issues/95)) ([6e52c41](https://github.com/rudderlabs/keydb/commit/6e52c4171782e0db2d6a043e38bb36bfb7d2ed0f))
+
 ## [1.2.3](https://github.com/rudderlabs/keydb/compare/v1.2.2...v1.2.3) (2025-10-16)
 
 
