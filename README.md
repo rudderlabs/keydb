@@ -41,10 +41,11 @@ import (
 )
 
 config := client.Config{
-    Addresses:       []string{"localhost:50051", "localhost:50052"}, // List of node addresses
-    TotalHashRanges: 271,                                           // Optional, defaults to 271
-    RetryCount:      3,                                             // Optional, defaults to 3
-    RetryPolicy:     client.RetryPolicy{
+    Addresses:          []string{"localhost:50051", "localhost:50052"}, // List of node addresses
+    TotalHashRanges:    271,                                            // Optional, defaults to 271
+    ConnectionPoolSize: 10,                                             // Optional, defaults to 10
+    RetryCount:         3,                                              // Optional, defaults to 3
+    RetryPolicy:        client.RetryPolicy{
         Disabled:        false,
         InitialInterval: 1 * time.Second,
         Multiplier:      1.5,
@@ -103,8 +104,14 @@ for i, key := range keys {
 
 ### Client Features
 
+- **Connection Pooling**: Each node connection uses a pool of gRPC connections (default 10) for improved throughput
+  - Connections are distributed using round-robin load balancing
+  - Pool size is configurable via `ConnectionPoolSize` in client config
+  - Metrics track operations per connection: `keydb_client_connection_ops_total`
 - **Automatic Retries**: The client automatically retries operations on transient errors
-- **Cluster Awareness**: Automatically adapts to cluster size changes
+- **Cluster Awareness**: Automatically adapts to cluster size changes (including degraded mode)
+  - The cluster size is dynamically calculated based on active (non-degraded) nodes
+  - When a node is marked as degraded, it's excluded from the effective cluster size
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
 - **Automatic retries**: Automatically retries requests that fail for a configured number of times
@@ -124,11 +131,14 @@ To start a KeyDB node, configure it with environment variables (all prefixed wit
 ```bash
 # Configure node with environment variables
 export KEYDB_NODE_ID=0
-export KEYDB_CLUSTER_SIZE=3
 export KEYDB_NODE_ADDRESSES='["localhost:50051","localhost:50052","localhost:50053"]'
 export KEYDB_PORT=50051
 export KEYDB_SNAPSHOT_INTERVAL=60s
 export KEYDB_TOTAL_HASH_RANGES=271
+
+# Optional: Configure degraded nodes (comma-separated boolean values)
+# Nodes marked as degraded will not serve read/write traffic
+export KEYDB_DEGRADED_NODES="false,false,false"
 
 # Storage configuration
 export KEYDB_STORAGE_BUCKET="my-keydb-bucket"
@@ -281,13 +291,38 @@ Usage:
 * if the operation does not succeed after all the retries, then a rollback to the "last operation" is triggered
   * to see what was the "last recorded operation" you can call `/lastOperation`
 
+### Degraded Mode
+
+KeyDB supports a "degraded mode" feature that allows nodes to be temporarily excluded from serving traffic during 
+scaling operations. This helps prevent data inconsistencies when nodes restart during a scale operation.
+
+**How it works:**
+- Nodes can be marked as degraded via the `KEYDB_DEGRADED_NODES` environment variable (comma-separated boolean values)
+- Degraded nodes reject all read/write requests with an `ERROR_SCALING` response code
+- The effective cluster size excludes degraded nodes, ensuring correct hash range calculations
+- Degraded nodes can still perform administrative operations (e.g., `LoadSnapshots`)
+
+**Usage during scaling:**
+1. **First devops PR**: Add new nodes in degraded mode without changing the config of old nodes
+   ```bash
+   # Old nodes (node 0, 1)
+   export KEYDB_DEGRADED_NODES="false,false"
+
+   # New nodes (node 2, 3) - start in degraded mode
+   export KEYDB_DEGRADED_NODES="false,false,true,true"
+   ```
+2. **Run `/autoScale`**: The scaler removes degraded mode and updates all node configurations in memory
+3. **Second devops PR**: Update persistent config to remove degraded mode permanently
+
+This approach ensures that if any old node restarts during scaling, it won't use incorrect cluster size configurations.
+
 ### Alternative Scaling Methods
 * You can simply merge a devops PR with the desired cluster size and restart the nodes
   * In this case data won't be moved between nodes so it will lead to data loss
   * If you don't want to restart the nodes you can use `/autoScale` in auto-healing mode (i.e. with `old_cluster_size`
     equal to `new_cluster_size`)
 * You can do everything manually by calling the single endpoints yourself, although it might be burdensome with a lot
-  of hash ranges to move, so this would mean calling `/createSnapshots`, `/loadSnapshots`, `/scale` and `/scaleComplete`
+  of hash ranges to move, so this would mean calling `/createSnapshots`, `/loadSnapshots`, and `/scale`
   manually (which is what the `/autoScale` endpoint does under the hood)
  
 ### Postman collection
@@ -299,11 +334,10 @@ Usage:
 - `POST /get` - Check key existence
 - `POST /put` - Add keys with TTL
 - `POST /info` - Get node information (e.g. node ID, cluster size, addresses, hash ranges managed by that node, etc...)
-- `POST /createSnapshots` - Create snapshots and upload them to cloud storage 
+- `POST /createSnapshots` - Create snapshots and upload them to cloud storage
 - `POST /loadSnapshots` - Downloads snapshots from cloud storage and loads them into BadgerDB
 - `POST /scale` - Scale the cluster
-- `POST /scaleComplete` - Complete scaling operation
-- `POST /updateClusterData` - Update the scaler internal information with the addresses of all the nodes that comprise 
+- `POST /updateClusterData` - Update the scaler internal information with the addresses of all the nodes that comprise
   the cluster
 - `POST /autoScale` - Automatic scaling with retry and rollback logic
 - `POST /hashRangeMovements` - Get hash range movement information (supports snapshot creation and loading)
@@ -356,23 +390,15 @@ For a comprehensive list of available settings you can refer to the constructor 
   * If index cache is too small, index blocks and bloom filters are constantly evicted
   * Each lookup during compaction requires re-reading index blocks from disk
 
-## Issues with Horizontal Scalability
+## Known Issues and Considerations for Horizontal Scalability
 
 * Creating and loading snapshots can take a lot of time for customers like `loveholidays`
   * For this reason we can do pre-uploads with `/hashRangeMovements` but it is a manual step that requires some
     understanding of the internal workings of `keydb` and the `scaler`
-  * We could take automatic daily snapshots, but they would quite probably create spikes in CPU with a consequent 
+  * We could take automatic daily snapshots, but they would quite probably create spikes in CPU with a consequent
     increase in latencies
 * Pre-downloads are not supported yet
   * We might need to create a `checkpoints` table to store what snapshots file a node has already loaded, so that we can
     skip them during a scaling operation
 * Scaling can take extra resources, so before scaling we might need to increase the resources on the nodes
   * Increasing resources on the nodes would cause a restart, same as VPA
-* Scaling, like scaling-up for example, is done by merging a devops PR which will add more nodes. The old nodes will
-  still serve traffic by using the old cluster size until the scale is complete. However, if one of the old nodes were
-  to crash or to be restarted accidentally, it would serve traffic based on the new cluster size.
-  * To avoid this we could introduce a `degraded` mode and merge 2 devops PR incrementally:
-    1. First devops PR adds new nodes in `degraded` mode and does not change the `config.yaml` of the old nodes
-    2. Scaler to do an `/autoScale` operation which should remove the `degraded` mode and update all configs in memory
-    3. Merge another devops PR to remove the `degraded` mode for good, and update the `config.yaml` of the old nodes,
-       so that upon restarts the nodes won't pick up old configurations
