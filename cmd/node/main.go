@@ -101,25 +101,9 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	podName := conf.GetString("nodeId", "")
-	var nodeID int
-
-	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
-	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
-		// Extract the first number as the node ID (e.g., 0 from keydb-0-0)
-		var parseErr error
-		nodeID, parseErr = strconv.Atoi(matches[1])
-		if parseErr != nil {
-			return fmt.Errorf("failed to parse node ID from %q: %w", podName, parseErr)
-		}
-	} else if matches := legacyPodNameRegex.FindStringSubmatch(podName); matches != nil {
-		// Fallback to legacy single statefulset pattern (keydb-0, keydb-1, etc.)
-		var parseErr error
-		nodeID, parseErr = strconv.Atoi(matches[1])
-		if parseErr != nil {
-			return fmt.Errorf("failed to parse node ID from %q: %w", podName, parseErr)
-		}
-	} else {
-		return fmt.Errorf("invalid pod name %s, expected format: keydb-<nodeId>-<podIndex> or keydb-<nodeId>", podName)
+	nodeID, err := getNodeID(podName)
+	if err != nil {
+		return err
 	}
 	nodeAddresses := conf.GetString("nodeAddresses", "")
 	if len(nodeAddresses) == 0 {
@@ -296,6 +280,31 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	case err := <-serverErrCh:
 		return err
 	}
+}
+
+// getNodeID extracts the node ID from a pod name.
+// Supports both multi-statefulset format (keydb-{nodeId}-0) and legacy format (keydb-{nodeId}).
+func getNodeID(podName string) (int, error) {
+	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
+	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
+		// Extract the first number as the node ID (e.g., 0 from keydb-0-0)
+		nodeID, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
+		}
+		return nodeID, nil
+	}
+
+	// Fallback to legacy single statefulset pattern (keydb-0, keydb-1, etc.)
+	if matches := legacyPodNameRegex.FindStringSubmatch(podName); matches != nil {
+		nodeID, err := strconv.Atoi(matches[1])
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
+		}
+		return nodeID, nil
+	}
+
+	return 0, fmt.Errorf("invalid pod name %q, expected format: keydb-<nodeId>-0 or keydb-<nodeId>", podName)
 }
 
 type configObserver struct {
