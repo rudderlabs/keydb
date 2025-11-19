@@ -62,7 +62,7 @@ import (
 
 type distributionStats struct {
 	hasherName       string
-	clusterSize      uint32
+	clusterSize      int64
 	keyCount         int
 	minLoad          int
 	maxLoad          int
@@ -111,7 +111,7 @@ type distributionStats struct {
  */
 func TestHasherDistribution(t *testing.T) {
 	testCases := []struct {
-		clusterSize uint32
+		clusterSize int64
 		keyCount    int
 	}{
 		{3, 1000},
@@ -165,7 +165,7 @@ func TestHasherDistribution(t *testing.T) {
 	printDistributionReport(t, allStats)
 }
 
-func measureDistribution(hasherName string, clusterSize uint32, keys []string, isFnv bool) distributionStats {
+func measureDistribution(hasherName string, clusterSize int64, keys []string, isFnv bool) distributionStats {
 	totalHashRanges := clusterSize * 32 // Use reasonable hash ranges
 	var h *Hash
 	if isFnv {
@@ -184,7 +184,7 @@ func measureDistribution(hasherName string, clusterSize uint32, keys []string, i
 
 	// Count keys per node and measure distribution time
 	start = time.Now()
-	nodeLoads := make(map[uint32]int)
+	nodeLoads := make(map[int64]int)
 	for _, key := range keys {
 		nodeID := h.GetNodeNumber(key)
 		nodeLoads[nodeID]++

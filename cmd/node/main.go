@@ -112,8 +112,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	degradedNodes := conf.GetReloadableStringVar("", degradedNodesConfKey)
 
 	nodeConfig := node.Config{
-		NodeID:          uint32(nodeID),
-		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", node.DefaultTotalHashRanges)),
+		NodeID:          nodeID,
+		TotalHashRanges: conf.GetInt64("totalHashRanges", node.DefaultTotalHashRanges),
 		MaxFilesToList:  conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
 		SnapshotInterval: conf.GetDuration("snapshotInterval",
 			0, time.Nanosecond, // node.DefaultSnapshotInterval will be used
@@ -284,11 +284,11 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 
 // getNodeID extracts the node ID from a pod name.
 // Supports both multi-statefulset format (keydb-{nodeId}-0) and legacy format (keydb-{nodeId}).
-func getNodeID(podName string) (int, error) {
+func getNodeID(podName string) (int64, error) {
 	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
 	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
 		// Extract the first number as the node ID (e.g., 0 from keydb-0-0)
-		nodeID, err := strconv.Atoi(matches[1])
+		nodeID, err := strconv.ParseInt(matches[1], 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
 		}
@@ -297,7 +297,7 @@ func getNodeID(podName string) (int, error) {
 
 	// Fallback to legacy single statefulset pattern (keydb-0, keydb-1, etc.)
 	if matches := legacyPodNameRegex.FindStringSubmatch(podName); matches != nil {
-		nodeID, err := strconv.Atoi(matches[1])
+		nodeID, err := strconv.ParseInt(matches[1], 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
 		}

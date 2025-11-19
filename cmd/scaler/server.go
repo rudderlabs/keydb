@@ -31,15 +31,15 @@ const (
 )
 
 type scalerClient interface {
-	Scale(ctx context.Context, nodeIDs []uint32) error
+	Scale(ctx context.Context, nodeIDs []int64) error
 	UpdateClusterData(addresses ...string) error
-	CreateSnapshots(ctx context.Context, nodeID uint32, fullSync bool, hashRanges ...uint32) error
-	LoadSnapshots(ctx context.Context, nodeID, maxConcurrency uint32, hashRanges ...uint32) error
+	CreateSnapshots(ctx context.Context, nodeID int64, fullSync bool, hashRanges ...int64) error
+	LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64, hashRanges ...int64) error
 	ExecuteScalingWithRollback(opType scaler.ScalingOperationType, oldAddresses, newAddresses []string,
 		fn func() error) error
 	GetLastOperation() *scaler.ScalingOperation
-	TotalHashRanges() uint32
-	GetNodeInfo(ctx context.Context, id uint32) (*pb.GetNodeInfoResponse, error)
+	TotalHashRanges() int64
+	GetNodeInfo(ctx context.Context, id int64) (*pb.GetNodeInfoResponse, error)
 }
 
 type httpServer struct {
@@ -329,8 +329,8 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	oldClusterSize := uint32(len(req.OldNodesAddresses))
-	newClusterSize := uint32(len(req.NewNodesAddresses))
+	oldClusterSize := int64(len(req.OldNodesAddresses))
+	newClusterSize := int64(len(req.NewNodesAddresses))
 	loadSnapshotsMaxConcurrency := req.LoadSnapshotsMaxConcurrency
 
 	var err error
@@ -364,11 +364,11 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 // handleScaleUp implements the scale up logic based on TestScaleUpAndDown
 func (s *httpServer) handleScaleUp(
 	ctx context.Context, oldAddresses, newAddresses []string,
-	fullSync, skipCreateSnapshots bool, loadSnapshotsMaxConcurrency uint32,
+	fullSync, skipCreateSnapshots bool, loadSnapshotsMaxConcurrency int64,
 	disableCreateSnapshotsSequentially bool,
 ) error {
-	oldClusterSize := uint32(len(oldAddresses))
-	newClusterSize := uint32(len(newAddresses))
+	oldClusterSize := int64(len(oldAddresses))
+	newClusterSize := int64(len(newAddresses))
 
 	log := s.logger.Withn(
 		logger.NewStringField("oldAddresses", strings.Join(oldAddresses, ",")),
@@ -475,11 +475,11 @@ func (s *httpServer) handleScaleUp(
 // handleScaleDown implements the scale down logic based on TestScaleUpAndDown
 func (s *httpServer) handleScaleDown(
 	ctx context.Context, oldAddresses, newAddresses []string,
-	fullSync, skipCreateSnapshots bool, loadSnapshotsMaxConcurrency uint32,
+	fullSync, skipCreateSnapshots bool, loadSnapshotsMaxConcurrency int64,
 	disableCreateSnapshotsSequentially bool,
 ) error {
-	oldClusterSize := uint32(len(oldAddresses))
-	newClusterSize := uint32(len(newAddresses))
+	oldClusterSize := int64(len(oldAddresses))
+	newClusterSize := int64(len(newAddresses))
 
 	log := s.logger.Withn(
 		logger.NewStringField("oldAddresses", strings.Join(oldAddresses, ",")),
@@ -606,13 +606,13 @@ func (s *httpServer) handleAutoHealing(ctx context.Context, oldAddresses, newAdd
 		}
 
 		// Step 2: Scale all nodes to refresh their cluster information
-		return s.completeScaleOperation(ctx, uint32(len(newAddresses)))
+		return s.completeScaleOperation(ctx, int64(len(newAddresses)))
 	})
 }
 
-func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize uint32) error {
-	nodeIDs := make([]uint32, clusterSize)
-	for i := uint32(0); i < clusterSize; i++ {
+func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize int64) error {
+	nodeIDs := make([]int64, clusterSize)
+	for i := int64(0); i < clusterSize; i++ {
 		nodeIDs[i] = i
 	}
 
@@ -681,7 +681,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		req.OldClusterSize, req.NewClusterSize, req.TotalHashRanges,
 	)
 
-	destinationMap := make(map[uint32]uint32)
+	destinationMap := make(map[int64]int64)
 	for nodeID, hashRanges := range destinationNodeMovements {
 		for _, hashRange := range hashRanges {
 			destinationMap[hashRange] = nodeID
@@ -781,7 +781,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 // createSnapshotsWithProgress creates snapshots either sequentially (one at a time) or in batch
 // depending on the disableSequential flag
 func (s *httpServer) createSnapshotsWithProgress(
-	ctx context.Context, nodeID uint32, fullSync, disableSequential bool, hashRanges []uint32,
+	ctx context.Context, nodeID int64, fullSync, disableSequential bool, hashRanges []int64,
 ) error {
 	// Initialize metrics
 	nodeIDStr := strconv.FormatInt(int64(nodeID), 10)

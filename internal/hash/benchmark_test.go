@@ -30,7 +30,7 @@ func TestSequentialVsParallel(t *testing.T) {
 			t.Logf("Elapsed: %s", elapsed)
 		}()
 		h := New(3, 128)
-		keysByNode := make(map[uint32][]string)
+		keysByNode := make(map[int64][]string)
 		for _, key := range keys {
 			nodeID := h.GetNodeNumber(key)
 			keysByNode[nodeID] = append(keysByNode[nodeID], key)
@@ -44,7 +44,7 @@ func TestSequentialVsParallel(t *testing.T) {
 		}()
 		type kv struct {
 			key    string
-			nodeID uint32
+			nodeID int64
 		}
 		ch := make(chan kv, 100)
 		wg := sync.WaitGroup{}
@@ -68,7 +68,7 @@ func TestSequentialVsParallel(t *testing.T) {
 			wg.Wait()
 			close(ch)
 		}()
-		keysByNode := make(map[uint32][]string)
+		keysByNode := make(map[int64][]string)
 		for range noOfKeys {
 			kv := <-ch
 			keysByNode[kv.nodeID] = append(keysByNode[kv.nodeID], kv.key)
@@ -99,6 +99,6 @@ func BenchmarkHashingFnv(b *testing.B) {
 	})
 }
 
-func crc32Test(key string) uint32 {
-	return crc32.ChecksumIEEE([]byte(key))
+func crc32Test(key string) int64 {
+	return int64(crc32.ChecksumIEEE([]byte(key)))
 }

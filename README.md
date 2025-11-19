@@ -239,13 +239,13 @@ Supported options:
 
 ```go
 type HashRangeMovementsRequest struct {
-	OldClusterSize              uint32      `json:"old_cluster_size"`
-	NewClusterSize              uint32      `json:"new_cluster_size"`
-	TotalHashRanges             uint32      `json:"total_hash_ranges"`
+	OldClusterSize              int64      `json:"old_cluster_size"`
+	NewClusterSize              int64      `json:"new_cluster_size"`
+	TotalHashRanges             int64      `json:"total_hash_ranges"`
 	Upload                      bool        `json:"upload,omitempty"`
 	Download                    bool        `json:"download,omitempty"`
 	FullSync                    bool        `json:"full_sync,omitempty"`
-	LoadSnapshotsMaxConcurrency uint32      `json:"load_snapshots_max_concurrency,omitempty"`
+	LoadSnapshotsMaxConcurrency int64      `json:"load_snapshots_max_concurrency,omitempty"`
 }
 ```
 

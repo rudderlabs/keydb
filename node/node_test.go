@@ -48,7 +48,7 @@ func TestSimple(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		totalHashRanges := uint32(4)
+		totalHashRanges := int64(4)
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
@@ -135,7 +135,7 @@ func TestLoadSnapshotsMaxConcurrency(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		totalHashRanges := uint32(128)
+		totalHashRanges := int64(128)
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
@@ -180,7 +180,7 @@ func TestLoadSnapshotsMaxConcurrency(t *testing.T) {
 		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
 		require.NoError(t, op.UpdateClusterData(node0Address))
-		maxConcurrency := uint32(2)
+		maxConcurrency := int64(2)
 		require.NoError(t, op.LoadSnapshots(ctx, 0, maxConcurrency))
 
 		exists, err = c.Get(ctx, keys)
@@ -228,7 +228,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		totalHashRanges := uint32(3)
+		totalHashRanges := int64(3)
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
@@ -262,7 +262,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		}, node1Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
-		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
+		require.NoError(t, op.Scale(ctx, []int64{0, 1}))
 		node0.DegradedNodesChanged()
 		node1.DegradedNodesChanged()
 
@@ -289,7 +289,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
 		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, node0.hasher.GetNodeHashRangesList(0)...))
 		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.Scale(ctx, []uint32{0}))
+		require.NoError(t, op.Scale(ctx, []int64{0}))
 		node0.DegradedNodesChanged()
 
 		respNode0, err = op.GetNodeInfo(ctx, 0)
@@ -327,7 +327,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		totalHashRanges := uint32(3)
+		totalHashRanges := int64(3)
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
@@ -362,7 +362,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		}, node1Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
-		require.NoError(t, op.Scale(ctx, []uint32{0, 1}))
+		require.NoError(t, op.Scale(ctx, []int64{0, 1}))
 		node0.DegradedNodesChanged()
 		node1.DegradedNodesChanged()
 
@@ -383,7 +383,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		}, node2Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address, node2Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 2, 0, node2.hasher.GetNodeHashRangesList(2)...))
-		require.NoError(t, op.Scale(ctx, []uint32{0, 1, 2}))
+		require.NoError(t, op.Scale(ctx, []int64{0, 1, 2}))
 		node0.DegradedNodesChanged()
 		node1.DegradedNodesChanged()
 		node2.DegradedNodesChanged()
@@ -421,7 +421,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			require.NoError(t, op.LoadSnapshots(ctx, destinationNodeID, totalHashRanges, hashRanges...))
 		}
 		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.Scale(ctx, []uint32{0}))
+		require.NoError(t, op.Scale(ctx, []int64{0}))
 		node0.DegradedNodesChanged()
 
 		exists, err = c.Get(ctx, allKeys)
@@ -461,7 +461,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		totalHashRanges := uint32(4)
+		totalHashRanges := int64(4)
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
@@ -569,7 +569,7 @@ func TestSelectedSnapshots(t *testing.T) {
 		defer cancel()
 
 		// Create the node service
-		totalHashRanges := uint32(4)
+		totalHashRanges := int64(4)
 		node0Conf := newConf()
 		node0, node0Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
@@ -685,7 +685,7 @@ func getService(
 	return service, address
 }
 
-func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *client.Client {
+func getClient(t testing.TB, totalHashRanges int64, addresses ...string) *client.Client {
 	t.Helper()
 
 	clientConfig := client.Config{
@@ -701,7 +701,7 @@ func getClient(t testing.TB, totalHashRanges uint32, addresses ...string) *clien
 	return c
 }
 
-func getScaler(t testing.TB, totalHashRanges uint32, addresses ...string) *scaler.Client {
+func getScaler(t testing.TB, totalHashRanges int64, addresses ...string) *scaler.Client {
 	t.Helper()
 
 	opConfig := scaler.Config{
@@ -733,7 +733,7 @@ func TestListSnapshotsSorting(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		totalHashRanges := uint32(4)
+		totalHashRanges := int64(4)
 		node0Conf := newConf()
 		node0, _ := getService(ctx, t, cloudStorage, Config{
 			NodeID:           0,
@@ -766,7 +766,7 @@ func TestListSnapshotsSorting(t *testing.T) {
 		totalFiles, filesByHashRange, err := node0.listSnapshots(ctx)
 		require.NoError(t, err)
 		require.Equal(t, 5, totalFiles)
-		require.Equal(t, map[uint32][]snapshotFile{
+		require.Equal(t, map[int64][]snapshotFile{
 			1: {
 				{
 					filename:  defaultBackupFolderName + "/hr_1_s_0_50.snapshot",
@@ -830,7 +830,7 @@ func TestDegradedMode(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		totalHashRanges := uint32(3)
+		totalHashRanges := int64(3)
 
 		// Create a variable to hold degraded state that can be updated during the test
 		degradedNodes := make([]bool, 2)
@@ -875,7 +875,7 @@ func TestDegradedMode(t *testing.T) {
 		require.Equal(t, node0Address, resp.NodesAddresses[0])
 
 		// Test that degraded node rejects Put requests
-		putResp, err := node1.Put(ctx, &pb.PutRequest{Keys: []string{"key5"}, TtlSeconds: uint64(testTTL.Seconds())})
+		putResp, err := node1.Put(ctx, &pb.PutRequest{Keys: []string{"key5"}, TtlSeconds: int64(testTTL.Seconds())})
 		require.NoError(t, err)
 		require.Equal(t, pb.ErrorCode_SCALING, putResp.ErrorCode)
 		require.Len(t, putResp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
@@ -889,7 +889,7 @@ func TestDegradedMode(t *testing.T) {
 		require.Equal(t, node0Address, resp.NodesAddresses[0])
 
 		// Test that non-degraded node returns only non-degraded addresses in Put
-		putResp, err = node0.Put(ctx, &pb.PutRequest{Keys: []string{"key6"}, TtlSeconds: uint64(testTTL.Seconds())})
+		putResp, err = node0.Put(ctx, &pb.PutRequest{Keys: []string{"key6"}, TtlSeconds: int64(testTTL.Seconds())})
 		require.NoError(t, err)
 		require.Equal(t, pb.ErrorCode_NO_ERROR, putResp.ErrorCode)
 		require.Len(t, putResp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")

@@ -36,19 +36,19 @@ func TestSnapshots(t *testing.T) {
 			require.NoError(t, bdb.Close())
 		})
 
-		err = bdb.Put(map[uint32][]string{0: {"key1", "key2"}}, time.Hour)
+		err = bdb.Put(map[int64][]string{0: {"key1", "key2"}}, time.Hour)
 		require.NoError(t, err)
 
-		exists, err := bdb.Get(map[uint32][]string{0: {"key1", "key2"}}, map[string]int{"key1": 0, "key2": 1})
+		exists, err := bdb.Get(map[int64][]string{0: {"key1", "key2"}}, map[string]int{"key1": 0, "key2": 1})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true}, exists)
 
 		// Create snapshot
 		buf := new(bytes.Buffer)
-		mp := map[uint32]io.Writer{
+		mp := map[int64]io.Writer{
 			0: buf,
 		}
-		since, _, err := bdb.CreateSnapshots(context.Background(), mp, map[uint32]uint64{})
+		since, _, err := bdb.CreateSnapshots(context.Background(), mp, map[int64]uint64{})
 		require.NoError(t, err)
 
 		filename := fmt.Sprintf("snapshot-%d.badger", since)
@@ -64,19 +64,19 @@ func TestSnapshots(t *testing.T) {
 		require.Len(t, files, 1)
 		t.Logf("1st snapshot created: %+v", uploadedFile1)
 
-		err = bdb.Put(map[uint32][]string{0: {"key3", "key4"}}, time.Hour)
+		err = bdb.Put(map[int64][]string{0: {"key3", "key4"}}, time.Hour)
 		require.NoError(t, err)
-		exists, err = bdb.Get(map[uint32][]string{0: {"key1", "key2", "key3", "key4"}},
+		exists, err = bdb.Get(map[int64][]string{0: {"key1", "key2", "key3", "key4"}},
 			map[string]int{"key1": 0, "key2": 1, "key3": 2, "key4": 3})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, true}, exists)
 
 		// Create another snapshot which should contain also key3 and key4
 		buf.Reset()
-		mp = map[uint32]io.Writer{
+		mp = map[int64]io.Writer{
 			0: buf,
 		}
-		since, _, err = bdb.CreateSnapshots(context.Background(), mp, map[uint32]uint64{})
+		since, _, err = bdb.CreateSnapshots(context.Background(), mp, map[int64]uint64{})
 		require.NoError(t, err)
 
 		filename = fmt.Sprintf("snapshot-%d.badger", since)
@@ -105,7 +105,7 @@ func TestSnapshots(t *testing.T) {
 		err = newBdb.LoadSnapshots(context.Background(), tmpFile)
 		require.NoError(t, err)
 
-		exists, err = newBdb.Get(map[uint32][]string{0: {"key1", "key2", "key3", "key4"}},
+		exists, err = newBdb.Get(map[int64][]string{0: {"key1", "key2", "key3", "key4"}},
 			map[string]int{"key1": 0, "key2": 1, "key3": 2, "key4": 3})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, false, false}, exists)
@@ -120,7 +120,7 @@ func TestSnapshots(t *testing.T) {
 		err = newBdb.LoadSnapshots(context.Background(), tmpFile2)
 		require.NoError(t, err)
 
-		exists, err = newBdb.Get(map[uint32][]string{0: {"key1", "key2", "key3", "key4"}},
+		exists, err = newBdb.Get(map[int64][]string{0: {"key1", "key2", "key3", "key4"}},
 			map[string]int{"key1": 0, "key2": 1, "key3": 2, "key4": 3})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true, true, true}, exists)
@@ -152,26 +152,26 @@ func TestCancelSnapshot(t *testing.T) {
 			require.NoError(t, bdb.Close())
 		})
 
-		err = bdb.Put(map[uint32][]string{0: {"key1", "key2"}}, time.Hour)
+		err = bdb.Put(map[int64][]string{0: {"key1", "key2"}}, time.Hour)
 		require.NoError(t, err)
 
-		exists, err := bdb.Get(map[uint32][]string{0: {"key1", "key2"}}, map[string]int{"key1": 0, "key2": 1})
+		exists, err := bdb.Get(map[int64][]string{0: {"key1", "key2"}}, map[string]int{"key1": 0, "key2": 1})
 		require.NoError(t, err)
 		require.Equal(t, []bool{true, true}, exists)
 
 		// First we try to create a snapshot with a canceled context then we try again to see if we're in a bad state
 		snapshotCtx, cancelSnapshot := context.WithCancel(context.Background())
 		cancelSnapshot()
-		since, _, err := bdb.CreateSnapshots(snapshotCtx, map[uint32]io.Writer{0: &bytes.Buffer{}}, map[uint32]uint64{})
+		since, _, err := bdb.CreateSnapshots(snapshotCtx, map[int64]io.Writer{0: &bytes.Buffer{}}, map[int64]uint64{})
 		require.ErrorContains(t, err, context.Canceled.Error())
 		require.EqualValues(t, 0, since) // since shouldn't have been updated
 
 		// Create snapshot
 		buf := new(bytes.Buffer)
-		mp := map[uint32]io.Writer{
+		mp := map[int64]io.Writer{
 			0: buf,
 		}
-		since, _, err = bdb.CreateSnapshots(context.Background(), mp, map[uint32]uint64{})
+		since, _, err = bdb.CreateSnapshots(context.Background(), mp, map[int64]uint64{})
 		require.NoError(t, err)
 
 		filename := fmt.Sprintf("snapshot-%d.badger", since)
@@ -214,7 +214,7 @@ func TestSnapshotContextCancellationResourceCleanup(t *testing.T) {
 		keys[i] = fmt.Sprintf("key%d", i)
 	}
 
-	err = bdb.Put(map[uint32][]string{0: keys}, time.Hour)
+	err = bdb.Put(map[int64][]string{0: keys}, time.Hour)
 	require.NoError(t, err)
 
 	// Create a context that we'll cancel during snapshot creation
@@ -223,7 +223,7 @@ func TestSnapshotContextCancellationResourceCleanup(t *testing.T) {
 	// Run snapshot creation in a separate goroutine
 	snapshotErr := make(chan error, 1)
 	go func() {
-		_, _, err := bdb.CreateSnapshots(snapshotCtx, map[uint32]io.Writer{0: &bytes.Buffer{}}, map[uint32]uint64{})
+		_, _, err := bdb.CreateSnapshots(snapshotCtx, map[int64]io.Writer{0: &bytes.Buffer{}}, map[int64]uint64{})
 		snapshotErr <- err
 	}()
 
@@ -238,6 +238,6 @@ func TestSnapshotContextCancellationResourceCleanup(t *testing.T) {
 	require.True(t, errors.Is(err, context.Canceled), "Expected context.Canceled error, got: %v", err)
 
 	// Try to create another snapshot to ensure the cache is in a good state
-	_, _, err = bdb.CreateSnapshots(context.Background(), map[uint32]io.Writer{0: &bytes.Buffer{}}, map[uint32]uint64{})
+	_, _, err = bdb.CreateSnapshots(context.Background(), map[int64]io.Writer{0: &bytes.Buffer{}}, map[int64]uint64{})
 	require.NoError(t, err, "Cache should be in a good state after context cancellation")
 }

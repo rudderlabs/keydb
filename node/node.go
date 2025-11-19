@@ -66,8 +66,8 @@ type Service struct {
 	logger         logger.Logger
 
 	metrics struct {
-		getKeysCounters             map[uint32]stats.Counter
-		putKeysCounter              map[uint32]stats.Counter
+		getKeysCounters             map[int64]stats.Counter
+		putKeysCounter              map[int64]stats.Counter
 		errScalingCounter           stats.Counter
 		errWrongNodeCounter         stats.Counter
 		errInternalCounter          stats.Counter
@@ -88,18 +88,18 @@ type Service struct {
 // Cache is an interface for a key-value store with TTL support
 type Cache interface {
 	// Get returns whether the keys exist and an error if the operation failed
-	Get(keysByHashRange map[uint32][]string, indexes map[string]int) ([]bool, error)
+	Get(keysByHashRange map[int64][]string, indexes map[string]int) ([]bool, error)
 
 	// Put adds or updates keys inside the cache with the specified TTL and returns an error if the operation failed
-	Put(keysByHashRange map[uint32][]string, ttl time.Duration) error
+	Put(keysByHashRange map[int64][]string, ttl time.Duration) error
 
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
 	CreateSnapshots(
 		ctx context.Context,
-		writers map[uint32]io.Writer,
-		since map[uint32]uint64,
-	) (uint64, map[uint32]bool, error)
+		writers map[int64]io.Writer,
+		since map[int64]uint64,
+	) (uint64, map[int64]bool, error)
 
 	// LoadSnapshots reads the cache contents from the provided readers
 	LoadSnapshots(ctx context.Context, r ...io.Reader) error
@@ -175,8 +175,8 @@ func NewService(
 	service.metrics.errScalingCounter = stat.NewTaggedStat("keydb_err_scaling_count", stats.CountType, statsTags)
 	service.metrics.errWrongNodeCounter = stat.NewTaggedStat("keydb_err_wrong_node_count", stats.CountType, statsTags)
 	service.metrics.errInternalCounter = stat.NewTaggedStat("keydb_err_internal_count", stats.CountType, statsTags)
-	service.metrics.getKeysCounters = make(map[uint32]stats.Counter)
-	service.metrics.putKeysCounter = make(map[uint32]stats.Counter)
+	service.metrics.getKeysCounters = make(map[int64]stats.Counter)
+	service.metrics.putKeysCounter = make(map[int64]stats.Counter)
 	service.metrics.gcDuration = stat.NewTaggedStat("keydb_gc_duration_seconds", stats.HistogramType, statsTags)
 	service.metrics.getKeysHashingDuration = stat.NewTaggedStat("keydb_keys_hashing_duration_seconds", stats.TimerType,
 		stats.Tags{"method": "get"})
@@ -280,13 +280,13 @@ func (s *Service) logCacheLevels(ctx context.Context) {
 	}
 }
 
-func (s *Service) getCurrentRanges() map[uint32]struct{} {
+func (s *Service) getCurrentRanges() map[int64]struct{} {
 	return s.hasher.GetNodeHashRanges(s.config.NodeID)
 }
 
 // initCaches initializes the caches for all hash ranges this node handles
 func (s *Service) initCaches(
-	ctx context.Context, download bool, maxConcurrency uint32, selectedHashRanges ...uint32,
+	ctx context.Context, download bool, maxConcurrency int64, selectedHashRanges ...int64,
 ) error {
 	currentRanges := s.getCurrentRanges() // gets the hash ranges for this node
 
@@ -322,7 +322,7 @@ func (s *Service) initCaches(
 	}
 
 	if maxConcurrency == 0 {
-		maxConcurrency = uint32(len(currentRanges))
+		maxConcurrency = int64(len(currentRanges))
 	}
 
 	var (
@@ -418,9 +418,9 @@ func (s *Service) initCaches(
 	return nil
 }
 
-func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...uint32) (
+func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...int64) (
 	int,
-	map[uint32][]snapshotFile,
+	map[int64][]snapshotFile,
 	error,
 ) {
 	// List all files in the bucket
@@ -434,9 +434,9 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...uint3
 		return 0, nil, nil
 	}
 
-	var selectedRangesMap map[uint32]struct{}
+	var selectedRangesMap map[int64]struct{}
 	if len(selectedHashRanges) > 0 {
-		selectedRangesMap = make(map[uint32]struct{}, len(selectedHashRanges))
+		selectedRangesMap = make(map[int64]struct{}, len(selectedHashRanges))
 		for _, r := range selectedHashRanges {
 			selectedRangesMap[r] = struct{}{}
 		}
@@ -445,7 +445,7 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...uint3
 	}
 
 	totalFiles := 0
-	filesByHashRange := make(map[uint32][]snapshotFile, len(files))
+	filesByHashRange := make(map[int64][]snapshotFile, len(files))
 	for _, file := range files {
 		matches := snapshotFilenameRegex.FindStringSubmatch(file.Key)
 		if len(matches) != 4 {
@@ -456,7 +456,7 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...uint3
 			s.logger.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
 			continue
 		}
-		hashRange := uint32(hashRangeInt)
+		hashRange := int64(hashRangeInt)
 		if len(selectedHashRanges) > 0 {
 			if _, shouldHandle := selectedRangesMap[hashRange]; !shouldHandle {
 				s.logger.Warnn("Ignoring snapshot file for hash range since it was not selected")
@@ -625,7 +625,7 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 	ranges := s.hasher.GetNodeHashRanges(s.config.NodeID)
 
 	// Convert to proto hash ranges
-	hashRanges := make([]uint32, 0, len(ranges))
+	hashRanges := make([]int64, 0, len(ranges))
 	for r := range ranges {
 		hashRanges = append(hashRanges, r)
 	}
@@ -635,7 +635,7 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 		ClusterSize:           s.config.getClusterSize(),
 		NodesAddresses:        s.getNonDegradedAddresses(),
 		HashRanges:            hashRanges,
-		LastSnapshotTimestamp: uint64(s.lastSnapshotTime.Unix()),
+		LastSnapshotTimestamp: s.lastSnapshotTime.Unix(),
 	}, nil
 }
 
@@ -666,7 +666,7 @@ func (s *Service) Scale(_ context.Context, req *pb.ScaleRequest) (*pb.ScaleRespo
 
 	// Update cluster size
 	s.config.Addresses = req.NodesAddresses
-	newClusterSize := uint32(len(s.config.Addresses))
+	newClusterSize := int64(len(s.config.Addresses))
 
 	log.Infon("Scale completed successfully, you can now update the degraded nodes list",
 		logger.NewIntField("previousClusterSize", int64(previousClusterSize)),
@@ -731,19 +731,19 @@ func (s *Service) CreateSnapshots(
 }
 
 // createSnapshots creates snapshots for all hash ranges this node handles
-func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHashRanges ...uint32) error {
+func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHashRanges ...int64) error {
 	// Create a map of the hash ranges that we need to create as per request.
 	// If the map ends up empty, then we create snapshots for all hash ranges.
-	selected := make(map[uint32]struct{}, len(selectedHashRanges))
+	selected := make(map[int64]struct{}, len(selectedHashRanges))
 	for _, r := range selectedHashRanges {
 		selected[r] = struct{}{}
 	}
 
 	// Get hash ranges for this node
 	currentRanges := s.getCurrentRanges()
-	var writers map[uint32]io.Writer
+	var writers map[int64]io.Writer
 	if len(selected) > 0 {
-		writers = make(map[uint32]io.Writer, len(selected))
+		writers = make(map[int64]io.Writer, len(selected))
 		for r := range selected {
 			if _, ok := currentRanges[r]; !ok {
 				return fmt.Errorf("hash range %d not handled by this node", r)
@@ -751,18 +751,18 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			writers[r] = bytes.NewBuffer([]byte{})
 		}
 	} else {
-		writers = make(map[uint32]io.Writer, len(currentRanges))
+		writers = make(map[int64]io.Writer, len(currentRanges))
 		for r := range currentRanges {
 			writers[r] = bytes.NewBuffer([]byte{})
 		}
 	}
 
 	var (
-		since    map[uint32]uint64
+		since    map[int64]uint64
 		sinceLog strings.Builder
 	)
 	if fullSync {
-		since = make(map[uint32]uint64, len(currentRanges))
+		since = make(map[int64]uint64, len(currentRanges))
 		i := 0
 		for r := range currentRanges {
 			if i != 0 {
@@ -778,7 +778,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			return fmt.Errorf("list snapshots: %w", err)
 		}
 
-		since = make(map[uint32]uint64, len(currentRanges))
+		since = make(map[int64]uint64, len(currentRanges))
 		for r := range currentRanges {
 			since[r] = 0
 		}
@@ -817,7 +817,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 
 	log = log.Withn(logger.NewIntField("newSince", int64(newSince)))
 
-	filesToBeDeletedByHashRange := make(map[uint32][]string)
+	filesToBeDeletedByHashRange := make(map[int64][]string)
 	if fullSync {
 		list := s.storage.ListFilesWithPrefix(ctx, "", s.getSnapshotFilenamePrefix(), s.maxFilesToList)
 		files, err := list.Next()
@@ -837,7 +837,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 				log.Warnn("Invalid snapshot filename (hash range)", logger.NewStringField("filename", file.Key))
 				continue
 			}
-			hashRange := uint32(hashRangeInt)
+			hashRange := int64(hashRangeInt)
 			_, ok := writers[hashRange]
 			if !ok {
 				// We won't upload anything about this hash range, so we can skip it.
@@ -910,11 +910,11 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 	return nil
 }
 
-func (s *Service) GetKeysByHashRange(keys []string) (map[uint32][]string, error) {
+func (s *Service) GetKeysByHashRange(keys []string) (map[int64][]string, error) {
 	return s.hasher.GetKeysByHashRange(keys, s.config.NodeID)
 }
 
-func (s *Service) GetKeysByHashRangeWithIndexes(keys []string) (map[uint32][]string, map[string]int, error) {
+func (s *Service) GetKeysByHashRangeWithIndexes(keys []string) (map[int64][]string, map[string]int, error) {
 	return s.hasher.GetKeysByHashRangeWithIndexes(keys, s.config.NodeID)
 }
 
@@ -980,7 +980,7 @@ func (s *Service) getSnapshotFilenamePrefix() string {
 	return path.Join(s.config.BackupFolderName, "hr_")
 }
 
-func getSnapshotFilenamePostfix(hashRange uint32, from, to uint64) string {
+func getSnapshotFilenamePostfix(hashRange int64, from, to uint64) string {
 	return strconv.Itoa(int(hashRange)) +
 		"_s_" + strconv.FormatUint(from, 10) + "_" + strconv.FormatUint(to, 10) +
 		".snapshot"
@@ -988,12 +988,12 @@ func getSnapshotFilenamePostfix(hashRange uint32, from, to uint64) string {
 
 type snapshotReader struct {
 	filename  string
-	hashRange uint32
+	hashRange int64
 	reader    io.Reader
 }
 
 type snapshotFile struct {
 	filename  string
-	hashRange uint32
+	hashRange int64
 	from, to  uint64
 }

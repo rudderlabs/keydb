@@ -139,8 +139,8 @@ func TestRecordAndGetOperation(t *testing.T) {
 	lastOp := scalerClient.GetLastOperation()
 	require.NotNil(t, lastOp)
 	require.Equal(t, ScaleDown, lastOp.Type)
-	require.Equal(t, uint32(4), lastOp.OldClusterSize)
-	require.Equal(t, uint32(2), lastOp.NewClusterSize)
+	require.Equal(t, int64(4), lastOp.OldClusterSize)
+	require.Equal(t, int64(2), lastOp.NewClusterSize)
 	require.Equal(t, []string{"node1", "node2", "node3", "node4"}, lastOp.OldAddresses)
 	require.Equal(t, []string{"node1", "node2"}, lastOp.NewAddresses)
 	require.Equal(t, InProgress, lastOp.Status)
@@ -167,8 +167,8 @@ func TestOperationRecordingTable(t *testing.T) {
 	tests := []struct {
 		name           string
 		opType         ScalingOperationType
-		oldClusterSize uint32
-		newClusterSize uint32
+		oldClusterSize int64
+		newClusterSize int64
 		oldAddresses   []string
 		newAddresses   []string
 		expectedType   ScalingOperationType

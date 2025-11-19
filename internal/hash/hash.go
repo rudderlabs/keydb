@@ -17,8 +17,8 @@ const (
 )
 
 type Hash struct {
-	clusterSize     uint32
-	totalHashRanges uint32
+	clusterSize     int64
+	totalHashRanges int64
 	consistent      *consistent.Consistent
 	hasher          consistent.Hasher
 }
@@ -37,7 +37,7 @@ func WithFnvHasher() Option {
 	return func(cfg *consistent.Config) { cfg.Hasher = fnvHasher{} }
 }
 
-func New(clusterSize, totalHashRanges uint32, opts ...Option) *Hash {
+func New(clusterSize, totalHashRanges int64, opts ...Option) *Hash {
 	if clusterSize == 0 {
 		panic("clusterSize must be greater than 0")
 	}
@@ -56,8 +56,8 @@ func New(clusterSize, totalHashRanges uint32, opts ...Option) *Hash {
 	}
 
 	c := consistent.New(nil, cfg)
-	for i := uint32(0); i < clusterSize; i++ {
-		c.Add(member(strconv.FormatUint(uint64(i), 10)))
+	for i := int64(0); i < clusterSize; i++ {
+		c.Add(member(strconv.FormatInt(i, 10)))
 	}
 
 	return &Hash{
@@ -68,37 +68,37 @@ func New(clusterSize, totalHashRanges uint32, opts ...Option) *Hash {
 	}
 }
 
-func (h *Hash) ClusterSize() uint32 {
+func (h *Hash) ClusterSize() int64 {
 	return h.clusterSize
 }
 
-func (h *Hash) TotalHashRanges() uint32 {
+func (h *Hash) TotalHashRanges() int64 {
 	return h.totalHashRanges
 }
 
-func (h *Hash) GetNodeNumber(key string) uint32 {
+func (h *Hash) GetNodeNumber(key string) int64 {
 	m := h.consistent.LocateKey([]byte(key))
-	nodeID, err := strconv.ParseUint(m.String(), 10, 32)
+	nodeID, err := strconv.ParseInt(m.String(), 10, 32)
 	if err != nil {
 		panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 	}
-	return uint32(nodeID)
+	return nodeID
 }
 
-func (h *Hash) GetKeysByHashRange(keys []string, nodeID uint32) (
-	map[uint32][]string,
+func (h *Hash) GetKeysByHashRange(keys []string, nodeID int64) (
+	map[int64][]string,
 	error,
 ) {
-	m := make(map[uint32][]string)
+	m := make(map[int64][]string)
 	for _, key := range keys {
 		bk := []byte(key)
 		mem := h.consistent.LocateKey(bk)
-		keyNodeID, err := strconv.ParseUint(mem.String(), 10, 32)
+		keyNodeID, err := strconv.ParseInt(mem.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
 
-		if nodeID != uint32(keyNodeID) {
+		if nodeID != keyNodeID {
 			hashRange := h.getHashRangeBytes(bk)
 			return nil, fmt.Errorf("hashRange %d not for node %d: %w", hashRange, nodeID, ErrWrongNode)
 		}
@@ -110,22 +110,22 @@ func (h *Hash) GetKeysByHashRange(keys []string, nodeID uint32) (
 	return m, nil
 }
 
-func (h *Hash) GetKeysByHashRangeWithIndexes(keys []string, nodeID uint32) (
-	map[uint32][]string,
+func (h *Hash) GetKeysByHashRangeWithIndexes(keys []string, nodeID int64) (
+	map[int64][]string,
 	map[string]int,
 	error,
 ) {
-	m := make(map[uint32][]string)
+	m := make(map[int64][]string)
 	indexes := make(map[string]int, len(keys))
 	for i, key := range keys {
 		bk := []byte(key)
 		mem := h.consistent.LocateKey(bk)
-		keyNodeID, err := strconv.ParseUint(mem.String(), 10, 32)
+		keyNodeID, err := strconv.ParseInt(mem.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
 
-		if nodeID != uint32(keyNodeID) {
+		if nodeID != keyNodeID {
 			hashRange := h.getHashRangeBytes(bk)
 			return nil, nil, fmt.Errorf("hashRange %d not for node %d: %w", hashRange, nodeID, ErrWrongNode)
 		}
@@ -138,40 +138,40 @@ func (h *Hash) GetKeysByHashRangeWithIndexes(keys []string, nodeID uint32) (
 	return m, indexes, nil
 }
 
-func (h *Hash) GetNodeHashRanges(nodeID uint32) map[uint32]struct{} {
+func (h *Hash) GetNodeHashRanges(nodeID int64) map[int64]struct{} {
 	if nodeID >= h.clusterSize {
 		panic("nodeID must be less than clusterSize")
 	}
 
-	ranges := make(map[uint32]struct{})
-	for hashRange := uint32(0); hashRange < h.totalHashRanges; hashRange++ {
+	ranges := make(map[int64]struct{})
+	for hashRange := int64(0); hashRange < h.totalHashRanges; hashRange++ {
 		m := h.consistent.GetPartitionOwner(int(hashRange))
-		rangeNodeID, err := strconv.ParseUint(m.String(), 10, 32)
+		rangeNodeID, err := strconv.ParseInt(m.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
 
-		if uint32(rangeNodeID) == nodeID {
+		if rangeNodeID == nodeID {
 			ranges[hashRange] = struct{}{}
 		}
 	}
 	return ranges
 }
 
-func (h *Hash) GetNodeHashRangesList(nodeID uint32) []uint32 {
+func (h *Hash) GetNodeHashRangesList(nodeID int64) []int64 {
 	if nodeID >= h.clusterSize {
 		panic("nodeID must be less than clusterSize")
 	}
 
-	ranges := make([]uint32, 0)
-	for i := uint32(0); i < h.totalHashRanges; i++ {
+	ranges := make([]int64, 0)
+	for i := int64(0); i < h.totalHashRanges; i++ {
 		m := h.consistent.GetPartitionOwner(int(i))
-		rangeNodeID, err := strconv.ParseUint(m.String(), 10, 32)
+		rangeNodeID, err := strconv.ParseInt(m.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
 
-		if uint32(rangeNodeID) == nodeID {
+		if rangeNodeID == nodeID {
 			ranges = append(ranges, i)
 		}
 	}
@@ -181,10 +181,10 @@ func (h *Hash) GetNodeHashRangesList(nodeID uint32) []uint32 {
 func GetHashRangeMovements(
 	oldClusterSize,
 	newClusterSize,
-	totalHashRanges uint32,
+	totalHashRanges int64,
 ) (
-	map[uint32][]uint32,
-	map[uint32][]uint32,
+	map[int64][]int64,
+	map[int64][]int64,
 ) {
 	if oldClusterSize == 0 {
 		panic("oldClusterSize must be greater than 0")
@@ -202,41 +202,41 @@ func GetHashRangeMovements(
 	oldClusterHasher := New(oldClusterSize, totalHashRanges)
 	newClusterHasher := New(newClusterSize, totalHashRanges)
 
-	sourceNodeMovements := make(map[uint32][]uint32)
-	destinationNodeMovements := make(map[uint32][]uint32)
+	sourceNodeMovements := make(map[int64][]int64)
+	destinationNodeMovements := make(map[int64][]int64)
 
-	for hashRange := uint32(0); hashRange < totalHashRanges; hashRange++ {
+	for hashRange := int64(0); hashRange < totalHashRanges; hashRange++ {
 		oldMember := oldClusterHasher.consistent.GetPartitionOwner(int(hashRange))
-		oldNodeID, err := strconv.ParseUint(oldMember.String(), 10, 32)
+		oldNodeID, err := strconv.ParseInt(oldMember.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
 
 		newMember := newClusterHasher.consistent.GetPartitionOwner(int(hashRange))
-		newNodeID, err := strconv.ParseUint(newMember.String(), 10, 32)
+		newNodeID, err := strconv.ParseInt(newMember.String(), 10, 32)
 		if err != nil {
 			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
 		}
 
-		if uint32(oldNodeID) != uint32(newNodeID) {
-			sourceNodeMovements[uint32(oldNodeID)] = append(sourceNodeMovements[uint32(oldNodeID)], hashRange)
-			destinationNodeMovements[uint32(newNodeID)] = append(destinationNodeMovements[uint32(newNodeID)], hashRange)
+		if oldNodeID != newNodeID {
+			sourceNodeMovements[oldNodeID] = append(sourceNodeMovements[oldNodeID], hashRange)
+			destinationNodeMovements[newNodeID] = append(destinationNodeMovements[newNodeID], hashRange)
 		}
 	}
 
 	return sourceNodeMovements, destinationNodeMovements
 }
 
-func (h *Hash) getHashRange(key string) uint32 {
+func (h *Hash) getHashRange(key string) int64 {
 	return h.getHashRangeFromValue(h.hasher.Sum64([]byte(key)))
 }
 
-func (h *Hash) getHashRangeBytes(key []byte) uint32 {
+func (h *Hash) getHashRangeBytes(key []byte) int64 {
 	return h.getHashRangeFromValue(h.hasher.Sum64(key))
 }
 
-func (h *Hash) getHashRangeFromValue(hashValue uint64) uint32 {
-	return uint32(hashValue % uint64(h.totalHashRanges))
+func (h *Hash) getHashRangeFromValue(hashValue uint64) int64 {
+	return int64(hashValue % uint64(h.totalHashRanges))
 }
 
 type member string
