@@ -66,7 +66,6 @@ func TestScaleUpAndDown(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx0, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -99,7 +98,6 @@ func TestScaleUpAndDown(t *testing.T) {
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx1, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -114,7 +112,9 @@ func TestScaleUpAndDown(t *testing.T) {
 		HashRanges: hash.New(2, totalHashRanges).GetNodeHashRangesList(1),
 	}, true)
 	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0, 1}}, true)
-	_ = s.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0, 1}}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
 
 	// Test node info 0
 	body = s.Do("/info", InfoRequest{NodeID: 0})
@@ -164,7 +164,9 @@ func TestScaleUpAndDown(t *testing.T) {
 	}, true)
 	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{Addresses: []string{node0Address}}, true)
 	_ = s.Do("/scale", ScaleRequest{NodeIDs: []uint32{0}}, true)
-	_ = s.Do("/scaleComplete", ScaleCompleteRequest{NodeIDs: []uint32{0}}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
 
 	// Get node info again
 	body = s.Do("/info", InfoRequest{
@@ -216,7 +218,6 @@ func TestAutoScale(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -243,7 +244,6 @@ func TestAutoScale(t *testing.T) {
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -254,6 +254,9 @@ func TestAutoScale(t *testing.T) {
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, node1Address},
 	}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
 
 	// Verify scale up worked - check node info
 	body = s.Do("/info", InfoRequest{NodeID: 0})
@@ -307,6 +310,8 @@ func TestAutoScale(t *testing.T) {
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
 	}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
@@ -367,7 +372,6 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf, withProxy(proxy))
@@ -398,7 +402,6 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -469,6 +472,8 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
 	}, true)
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
@@ -515,7 +520,6 @@ func TestAutoScaleTransientError(t *testing.T) {
 	node0.createSnapshotsReturnError.Store(true)
 	node1.loadSnapshotsReturnError.Store(true)
 	node0.scaleReturnError.Store(true)
-	node0.scaleCompleteReturnError.Store(true)
 	done := make(chan struct{})
 	go func() {
 		close(done)
@@ -544,12 +548,6 @@ func TestAutoScaleTransientError(t *testing.T) {
 		return node0.scaleCalls.Load() >= waitForRetries // wait for at least 10 retries
 	}, 10*time.Second, time.Millisecond, "Calls %d", node0.scaleCalls.Load())
 	node0.scaleReturnError.Store(false)
-
-	t.Logf("Waiting for at least %d retries to be done on ScaleComplete", waitForRetries)
-	require.Eventuallyf(t, func() bool {
-		return node0.scaleCompleteCalls.Load() >= waitForRetries // wait for at least 10 retries
-	}, 10*time.Second, time.Millisecond, "Calls %d", node0.scaleCompleteCalls.Load())
-	node0.scaleCompleteReturnError.Store(false)
 
 	<-done
 
@@ -590,7 +588,6 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -674,7 +671,6 @@ func TestAutoHealing(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -744,7 +740,6 @@ func TestHashRangeMovements(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -976,9 +971,9 @@ func TestHashRangeMovements(t *testing.T) {
 		newNodeConf := newConf()
 		_, newNodeAddress := getService(newNodeCtx, t, cloudStorage, node.Config{
 			NodeID:           1,
-			ClusterSize:      2,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
+			Addresses:        []string{node0Address},
 		}, newNodeConf)
 
 		s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address, newNodeAddress)
@@ -1092,7 +1087,6 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -1201,7 +1195,6 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	node0Conf := newConf()
 	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -1209,7 +1202,6 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	node1Conf := newConf()
 	_, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -1322,7 +1314,6 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	node0Conf := newConf()
 	_, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
@@ -1330,7 +1321,6 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	node1Conf := newConf()
 	_, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
-		ClusterSize:      2,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 		Addresses:        []string{node0Address},
@@ -1566,7 +1556,7 @@ func startScalerHTTPServer(t testing.TB, totalHashRanges uint32, rp scaler.Retry
 
 	addr := fmt.Sprintf(":%d", freePort)
 
-	opServer := newHTTPServer(c, op, addr, log)
+	opServer := newHTTPServer(c, op, addr, stats.NOP, log)
 	go func() {
 		err := opServer.Start(context.Background())
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -1629,9 +1619,6 @@ type mockNodeServiceServer struct {
 	scaleCalls       atomic.Uint64
 	scaleReturnError atomic.Bool
 
-	scaleCompleteCalls       atomic.Uint64
-	scaleCompleteReturnError atomic.Bool
-
 	createSnapshotsCalls       atomic.Uint64
 	createSnapshotsReturnError atomic.Bool
 
@@ -1646,17 +1633,6 @@ func (m *mockNodeServiceServer) Scale(_ context.Context, _ *pb.ScaleRequest) (*p
 		return nil, errors.New("scale mock error on " + m.identifier)
 	}
 	return &pb.ScaleResponse{Success: true}, nil
-}
-
-func (m *mockNodeServiceServer) ScaleComplete(_ context.Context, _ *pb.ScaleCompleteRequest) (
-	*pb.ScaleCompleteResponse, error,
-) {
-	m.t.Logf("mockNodeServiceServer.ScaleComplete called on %s", m.identifier)
-	defer m.scaleCompleteCalls.Add(1)
-	if m.scaleCompleteReturnError.Load() {
-		return nil, errors.New("scale complete mock error on " + m.identifier)
-	}
-	return &pb.ScaleCompleteResponse{Success: true}, nil
 }
 
 func (m *mockNodeServiceServer) CreateSnapshots(_ context.Context, _ *pb.CreateSnapshotsRequest) (
@@ -1706,4 +1682,284 @@ func startMockNodeService(t testing.TB, identifier string) *mockNodeServiceServe
 	})
 
 	return mockServer
+}
+
+func TestDegradedModeDuringScaling(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	totalHashRanges := uint32(3)
+
+	// Create a variable to hold degraded state that can be updated during the test
+	degradedNodes := make([]bool, 2)
+
+	// Create two nodes with DegradedNodes function
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:          0,
+		TotalHashRanges: totalHashRanges,
+		DegradedNodes: func() []bool {
+			return degradedNodes
+		},
+	}, node0Conf)
+
+	node1Conf := newConf()
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:          1,
+		TotalHashRanges: totalHashRanges,
+		Addresses:       []string{node0Address},
+		DegradedNodes: func() []bool {
+			return degradedNodes
+		},
+	}, node1Conf)
+
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address, node1Address)
+
+	// Test Put some initial data
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3"}, TTL: testTTL,
+	}, true)
+
+	// Test Get to verify data exists
+	body := s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4"},
+	})
+	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
+
+	// Mark node 1 as degraded
+	degradedNodes[1] = true
+
+	// Verify that node 1 rejects Get requests
+	resp, err := node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+	require.NoError(t, err)
+	require.Equal(t, pb.ErrorCode_SCALING, resp.ErrorCode)
+	require.Len(t, resp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+	require.Equal(t, node0Address, resp.NodesAddresses[0])
+
+	// Verify that node 1 rejects Put requests
+	putResp, err := node1.Put(ctx, &pb.PutRequest{Keys: []string{"key5"}, TtlSeconds: uint64(5 * 60)})
+	require.NoError(t, err)
+	require.Equal(t, pb.ErrorCode_SCALING, putResp.ErrorCode)
+	require.Len(t, putResp.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+	require.Equal(t, node0Address, putResp.NodesAddresses[0])
+
+	// Verify that GetNodeInfo returns only non-degraded addresses
+	nodeInfo, err := node0.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{NodeId: 0})
+	require.NoError(t, err)
+	require.Len(t, nodeInfo.NodesAddresses, 1, "Only non-degraded node should be in NodesAddresses")
+	require.Equal(t, node0Address, nodeInfo.NodesAddresses[0])
+
+	// Mark node 1 as non-degraded again
+	degradedNodes[1] = false
+
+	// Verify that node 1 now accepts requests (should not return SCALING error)
+	resp, err = node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+	require.NoError(t, err)
+	require.NotEqual(t, pb.ErrorCode_SCALING, resp.ErrorCode, "Node 1 should not be in degraded mode")
+	require.Len(t, resp.NodesAddresses, 2, "All non-degraded nodes should be in NodesAddresses")
+
+	cancel()
+	node0.Close()
+	node1.Close()
+}
+
+func TestScaleUpInDegradedMode(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	totalHashRanges := uint32(3)
+
+	// Create a variable to hold degraded state that can be updated during the test
+	degradedNodes := make([]bool, 1)
+
+	// Step 1: Create a cluster with 1 node
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:          0,
+		TotalHashRanges: totalHashRanges,
+		DegradedNodes:   func() []bool { return degradedNodes },
+	}, node0Conf)
+
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, node0Address)
+
+	// Step 2: Add keys via Put and verify them via Get
+	// Add enough keys to ensure distribution across hash ranges
+	// Based on hash distribution with clusterSize=2, totalHashRanges=3:
+	// key1, key2, key3 → node0; key4, key5, key6, key7, key8 → will distribute across nodes
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"}, TTL: testTTL,
+	}, true)
+
+	body := s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+	})
+	require.JSONEq(t,
+		`{"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		body,
+	)
+
+	// Step 3: Create a second node
+	node1Conf := newConf()
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:          1,
+		TotalHashRanges: totalHashRanges,
+		Addresses:       []string{node0Address},
+		DegradedNodes:   func() []bool { return degradedNodes },
+	}, node1Conf)
+
+	// Step 4: Update degradedNodes - mark node 1 as degraded
+	degradedNodes = append(degradedNodes, true) //nolint:makezero
+
+	// Verify that node 1 is in degraded mode
+	resp, err := node1.Get(ctx, &pb.GetRequest{Keys: []string{"key1"}})
+	require.NoError(t, err)
+	require.Equal(t, pb.ErrorCode_SCALING, resp.ErrorCode)
+
+	// Step 5: Use /autoScale to scale the cluster while node1 is degraded
+	_ = s.Do("/autoScale", AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address},
+		NewNodesAddresses: []string{node0Address, node1Address},
+	}, true)
+
+	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
+
+	// Verify scale up worked - check node info
+	// Note: While node1 is degraded, NodesAddresses will only include non-degraded nodes
+	// and ClusterSize will be 1 (only non-degraded nodes count)
+	body = s.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse := pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 1, infoResponse.ClusterSize,
+		"ClusterSize should be 1 because node1 is degraded",
+	)
+	require.Len(t, infoResponse.NodesAddresses, 1,
+		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
+	)
+	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
+	require.ElementsMatch(t, []uint32{0, 1, 2}, infoResponse.HashRanges,
+		"node0 should handle all hash ranges when node1 is degraded",
+	)
+
+	body = s.Do("/info", InfoRequest{NodeID: 1})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 1, infoResponse.ClusterSize,
+		"ClusterSize should be 1 because node1 is degraded",
+	)
+	require.Len(t, infoResponse.NodesAddresses, 1,
+		"Only non-degraded node should be in NodesAddresses while node1 is degraded",
+	)
+	require.Equal(t, node0Address, infoResponse.NodesAddresses[0])
+	require.ElementsMatch(t, []uint32{2}, infoResponse.HashRanges)
+
+	// Step 6: mark node 1 as non-degraded
+	degradedNodes[1] = false
+
+	// Trigger hasher reinitialization after degraded nodes change
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
+
+	// Verify that node 1 now accepts requests and has loaded snapshots correctly
+	// Node1 owns hash range 2, which contains key4 and other keys
+	// Let's determine which keys belong to node1's hash range
+	h := hash.New(2, totalHashRanges)
+	allKeys := []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"}
+	var node1Keys []string
+	for _, key := range allKeys {
+		if h.GetNodeNumber(key) == 1 {
+			node1Keys = append(node1Keys, key)
+		}
+	}
+	require.Greater(t, len(node1Keys), 0, "Node 1 should own at least one key")
+	t.Logf("Node 1 owns %d keys: %v", len(node1Keys), node1Keys)
+
+	// Query node1 directly for keys that belong to its hash range
+	resp, err = node1.Get(ctx, &pb.GetRequest{Keys: node1Keys})
+	require.NoError(t, err)
+	require.NotEqual(t, pb.ErrorCode_SCALING, resp.ErrorCode, "Node 1 should not be in degraded mode")
+	require.Len(t, resp.Exists, len(node1Keys), "Node 1 should return results for all its keys")
+	for _, exists := range resp.Exists {
+		require.True(t, exists, "All keys belonging to node1 should exist after loading snapshots")
+	}
+
+	// Verify that now both nodes appear in NodesAddresses
+	body = s.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 2,
+		"Both nodes should be in NodesAddresses after node1 is no longer degraded",
+	)
+	require.Contains(t, infoResponse.NodesAddresses, node0Address)
+	require.Contains(t, infoResponse.NodesAddresses, node1Address)
+
+	// Step 7: Verify that the cluster is scaled and Get and Put are now served by both nodes
+	// Verify all existing data is accessible via scaler
+	body = s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8"},
+	})
+	require.JSONEq(t,
+		`{"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,"key7":true,"key8":true}`,
+		body,
+	)
+
+	// Test Put with new keys now that both nodes are operational
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"key9", "key10", "key11"}, TTL: testTTL,
+	}, true)
+
+	// Verify all keys including new ones are accessible
+	body = s.Do("/get", GetRequest{
+		Keys: []string{"key1", "key2", "key3", "key4", "key5", "key6", "key7", "key8", "key9", "key10", "key11"},
+	})
+	require.JSONEq(t,
+		`{
+			"key1":true,"key2":true,"key3":true,"key4":true,"key5":true,"key6":true,
+			"key7":true,"key8":true,"key9":true,"key10":true,"key11":true
+		}`,
+		body,
+	)
+
+	cancel()
+	node0.Close()
+	node1.Close()
 }

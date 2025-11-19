@@ -37,7 +37,6 @@ func BenchmarkSingleNode(b *testing.B) {
 
 	nodeConfig := node.Config{
 		NodeID:           0,
-		ClusterSize:      1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 24 * time.Hour,
 	}

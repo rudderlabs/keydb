@@ -528,78 +528,6 @@ func (c *Client) Scale(ctx context.Context, nodeIDs []uint32) error {
 	return nil
 }
 
-// ScaleComplete notifies a node that the scaling operation is complete
-func (c *Client) ScaleComplete(ctx context.Context, nodeIDs []uint32) error {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if len(nodeIDs) == 0 {
-		return fmt.Errorf("at least one node ID must be provided")
-	}
-
-	group, ctx := kitsync.NewEagerGroup(ctx, len(nodeIDs))
-	for _, nodeID := range nodeIDs {
-		group.Go(func() error {
-			// Get the client for this node
-			client, ok := c.clients[int(nodeID)]
-			if !ok {
-				return fmt.Errorf("no client for node %d", nodeID)
-			}
-			conn, ok := c.connections[int(nodeID)]
-			if !ok {
-				return fmt.Errorf("no connection for node %d", nodeID)
-			}
-
-			req := &pb.ScaleCompleteRequest{}
-
-			// Send the request with retries
-			var (
-				err         error
-				resp        *pb.ScaleCompleteResponse
-				nextBackoff = c.getNextBackoffFunc()
-			)
-			for attempt := int64(1); ; attempt++ {
-				resp, err = client.ScaleComplete(ctx, req)
-				if err == nil && resp != nil && resp.Success {
-					break
-				}
-
-				if err == nil {
-					if resp != nil {
-						err = errors.New("unsuccessful response from nodes")
-					} else {
-						err = errors.New("unknown error")
-					}
-				}
-
-				retryDelay := nextBackoff()
-				if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
-					return fmt.Errorf("failed to complete scale on node %d: %w", nodeID, err)
-				}
-
-				c.logger.Warnn("Cannot complete scale operation",
-					logger.NewIntField("nodeID", int64(nodeID)),
-					logger.NewIntField("attempt", attempt),
-					logger.NewDurationField("retryDelay", retryDelay),
-					logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
-					logger.NewStringField("connState", conn.GetState().String()),
-					obskit.Error(err))
-
-				// Wait before retrying
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(retryDelay):
-				}
-			}
-
-			return nil
-		})
-	}
-
-	return group.Wait()
-}
-
 // UpdateClusterData updates the cluster size in a race-condition safe manner.
 // It takes a new cluster size and the current keys being processed.
 // It returns a slice of keys that need to be fetched again.
@@ -747,19 +675,9 @@ func (c *Client) rollbackToOldConfiguration(ctx context.Context, operation *Scal
 		oldNodeIDs[i] = i
 	}
 
-	// stop any ongoing scaling
-	if err := c.ScaleComplete(ctx, oldNodeIDs); err != nil {
-		return fmt.Errorf("failed to complete scale back: %w", err)
-	}
-
 	// restore correct behavior
 	if err := c.Scale(ctx, oldNodeIDs); err != nil {
 		return fmt.Errorf("failed to scale back nodes: %w", err)
-	}
-
-	// notify all nodes that the scaling operation is complete
-	if err := c.ScaleComplete(ctx, oldNodeIDs); err != nil {
-		return fmt.Errorf("failed to complete scale back: %w", err)
 	}
 
 	return nil

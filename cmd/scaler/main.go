@@ -13,8 +13,11 @@ import (
 
 	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/scaler"
+	"github.com/rudderlabs/keydb/release"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
+	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
@@ -26,13 +29,25 @@ func main() {
 	defer logFactory.Sync()
 	log := logFactory.NewLogger()
 
-	if err := run(ctx, cancel, conf, log); err != nil {
+	releaseInfo := release.NewInfo()
+	statsOptions := []stats.Option{
+		stats.WithServiceName("keydb-scaler"),
+		stats.WithServiceVersion(releaseInfo.Version),
+		stats.WithDefaultHistogramBuckets(defaultHistogramBuckets),
+	}
+	for histogramName, buckets := range customBuckets {
+		statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
+	}
+	stat := stats.NewStats(conf, logFactory, svcMetric.NewManager(), statsOptions...)
+	defer stat.Stop()
+
+	if err := run(ctx, cancel, conf, stat, log); err != nil {
 		log.Fataln("failed to run", obskit.Error(err))
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Logger) error {
+func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Stats, log logger.Logger) error {
 	defer cancel()
 
 	nodeAddresses := conf.GetString("nodeAddresses", "")
@@ -41,8 +56,9 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 	}
 
 	clientConfig := client.Config{
-		Addresses:       strings.Split(nodeAddresses, ","),
-		TotalHashRanges: uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
+		Addresses:          strings.Split(nodeAddresses, ","),
+		TotalHashRanges:    uint32(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
+		ConnectionPoolSize: conf.GetInt("connectionPoolSize", 0),
 		RetryPolicy: client.RetryPolicy{
 			Disabled:        conf.GetBool("retryPolicy.disabled", false),
 			InitialInterval: conf.GetDuration("retryPolicy.initialInterval", 0, time.Second),
@@ -114,7 +130,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, log logger.Log
 
 	// Create and start HTTP server
 	serverAddr := conf.GetString("serverAddr", ":8080")
-	server := newHTTPServer(c, scClient, serverAddr, log)
+	server := newHTTPServer(c, scClient, serverAddr, stat, log)
 
 	// Start server in a goroutine
 	serverErrCh := make(chan error, 1)
