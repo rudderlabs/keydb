@@ -22,6 +22,16 @@ require (
 	google.golang.org/protobuf v1.36.10
 )
 
+replace (
+	go.opentelemetry.io/auto/sdk => go.opentelemetry.io/auto/sdk v1.1.0
+	go.opentelemetry.io/contrib/detectors/gcp => go.opentelemetry.io/contrib/detectors/gcp v1.37.0
+	go.opentelemetry.io/otel => go.opentelemetry.io/otel v1.37.0
+	go.opentelemetry.io/otel/metric => go.opentelemetry.io/otel/metric v1.37.0
+	go.opentelemetry.io/otel/sdk => go.opentelemetry.io/otel/sdk v1.37.0
+	go.opentelemetry.io/otel/sdk/metric => go.opentelemetry.io/otel/sdk/metric v1.37.0
+	go.opentelemetry.io/otel/trace => go.opentelemetry.io/otel/trace v1.37.0
+)
+
 require (
 	cel.dev/expr v0.24.0 // indirect
 	cloud.google.com/go v0.121.6 // indirect
