@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.1](https://github.com/rudderlabs/keydb/compare/v1.3.0...v1.3.1) (2025-11-20)
+
+
+### Bug Fixes
+
+* pin otel version ([#103](https://github.com/rudderlabs/keydb/issues/103)) ([423c8ff](https://github.com/rudderlabs/keydb/commit/423c8ffb4f4caa72b43e035aab80434975659b89))
+
+
+### Miscellaneous
+
+* **deps:** bump golang.org/x/crypto from 0.43.0 to 0.45.0 ([#101](https://github.com/rudderlabs/keydb/issues/101)) ([b8054ff](https://github.com/rudderlabs/keydb/commit/b8054ff8082ea0b38a572f25721edac79f18d372))
+* update build-scan-push-action to v1.8.2 ([#102](https://github.com/rudderlabs/keydb/issues/102)) ([d346d84](https://github.com/rudderlabs/keydb/commit/d346d84ab932f8de12c9f1b8e5680ccbdf37d343))
+
 ## [1.3.0](https://github.com/rudderlabs/keydb/compare/v1.2.3...v1.3.0) (2025-11-19)
 
 
