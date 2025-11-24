@@ -238,13 +238,13 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	totalSnapshotsToLoad := s.stat.NewTaggedStat(totalSnapshotsToLoadMetricName, stats.GaugeType, stats.Tags{
 		"nodeId": nodeIDStr,
 	})
-	totalSnapshotsToLoad.Observe(float64(len(req.HashRanges)))
-	defer totalSnapshotsToLoad.Observe(0)
+	totalSnapshotsToLoad.Gauge(float64(len(req.HashRanges)))
+	defer totalSnapshotsToLoad.Gauge(0)
 
 	currentSnapshotsLoaded := s.stat.NewTaggedStat(currentSnapshotsToLoadMetricName, stats.GaugeType, stats.Tags{
 		"nodeId": nodeIDStr,
 	})
-	currentSnapshotsLoaded.Observe(0)
+	currentSnapshotsLoaded.Gauge(0)
 
 	// Load snapshots from cloud storage
 	if err := s.scaler.LoadSnapshots(r.Context(), req.NodeID, req.MaxConcurrency, req.HashRanges...); err != nil {
@@ -253,7 +253,7 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Update metrics after successful load
-	currentSnapshotsLoaded.Observe(float64(len(req.HashRanges)))
+	currentSnapshotsLoaded.Gauge(float64(len(req.HashRanges)))
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
@@ -720,18 +720,18 @@ func (s *httpServer) processHashRangeMovements(
 
 	// Initialize metrics for tracking progress
 	totalSnapshotsToCreate := s.stat.NewStat(totalSnapshotsToCreateMetricName, stats.GaugeType)
-	totalSnapshotsToCreate.Observe(float64(len(movements)))
-	defer totalSnapshotsToCreate.Observe(0)
+	totalSnapshotsToCreate.Gauge(float64(len(movements)))
+	defer totalSnapshotsToCreate.Gauge(0)
 
 	currentSnapshotsCreated := s.stat.NewStat(currentSnapshotsToCreateMetricName, stats.GaugeType)
-	currentSnapshotsCreated.Observe(0)
+	currentSnapshotsCreated.Gauge(0)
 
 	totalSnapshotsToLoad := s.stat.NewStat(totalSnapshotsToLoadMetricName, stats.GaugeType)
-	totalSnapshotsToLoad.Observe(float64(len(movements)))
-	defer totalSnapshotsToLoad.Observe(0)
+	totalSnapshotsToLoad.Gauge(float64(len(movements)))
+	defer totalSnapshotsToLoad.Gauge(0)
 
 	currentSnapshotsLoaded := s.stat.NewStat(currentSnapshotsToLoadMetricName, stats.GaugeType)
-	currentSnapshotsLoaded.Observe(0)
+	currentSnapshotsLoaded.Gauge(0)
 
 	start := time.Now()
 	defer func() {
@@ -791,7 +791,7 @@ func (s *httpServer) processHashRangeMovements(
 				)
 
 				// Update progress
-				currentSnapshotsCreated.Observe(float64(createdCount.Add(1)))
+				currentSnapshotsCreated.Gauge(float64(createdCount.Add(1)))
 
 				// Send to queue for loading
 				select {
@@ -834,7 +834,7 @@ func (s *httpServer) processHashRangeMovements(
 			)
 
 			// Update progress
-			currentSnapshotsLoaded.Observe(float64(loadedCount.Add(1)))
+			currentSnapshotsLoaded.Gauge(float64(loadedCount.Add(1)))
 
 			return nil
 		})
@@ -864,13 +864,13 @@ func (s *httpServer) createSnapshotsWithProgress(
 	totalSnapshotsToCreate := s.stat.NewTaggedStat(totalSnapshotsToCreateMetricName, stats.GaugeType, stats.Tags{
 		"nodeId": nodeIDStr,
 	})
-	totalSnapshotsToCreate.Observe(float64(len(hashRanges)))
-	defer totalSnapshotsToCreate.Observe(0)
+	totalSnapshotsToCreate.Gauge(float64(len(hashRanges)))
+	defer totalSnapshotsToCreate.Gauge(0)
 
 	currentSnapshotsCreated := s.stat.NewTaggedStat(currentSnapshotsToCreateMetricName, stats.GaugeType, stats.Tags{
 		"nodeId": nodeIDStr,
 	})
-	currentSnapshotsCreated.Observe(0)
+	currentSnapshotsCreated.Gauge(0)
 
 	if disableSequential || len(hashRanges) == 0 {
 		// Call with all hash ranges at once (existing behavior)
@@ -878,7 +878,7 @@ func (s *httpServer) createSnapshotsWithProgress(
 		if err != nil {
 			return err
 		}
-		currentSnapshotsCreated.Observe(float64(len(hashRanges)))
+		currentSnapshotsCreated.Gauge(float64(len(hashRanges)))
 		return nil
 	}
 
@@ -896,7 +896,7 @@ func (s *httpServer) createSnapshotsWithProgress(
 		}
 
 		// Update progress metric
-		currentSnapshotsCreated.Observe(float64(i + 1))
+		currentSnapshotsCreated.Gauge(float64(i + 1))
 	}
 
 	return nil
