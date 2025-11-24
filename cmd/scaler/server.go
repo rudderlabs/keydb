@@ -733,9 +733,18 @@ func (s *httpServer) processHashRangeMovements(
 	currentSnapshotsLoaded := s.stat.NewStat(currentSnapshotsToLoadMetricName, stats.GaugeType)
 	currentSnapshotsLoaded.Gauge(0)
 
+	log := s.logger.Withn(
+		logger.NewIntField("totalHashRanges", int64(len(movements))),
+		logger.NewBoolField("fullSync", fullSync),
+		logger.NewBoolField("skipCreateSnapshots", skipCreateSnapshots),
+		logger.NewIntField("createSnapshotsMaxConcurrency", int64(createSnapshotsMaxConcurrency)),
+		logger.NewIntField("loadSnapshotsMaxConcurrency", int64(loadSnapshotsMaxConcurrency)),
+		logger.NewBoolField("disableCreateSnapshotsSequentially", disableCreateSnapshotsSequentially),
+	)
+
 	start := time.Now()
 	defer func() {
-		s.logger.Infon("All snapshots created and loaded",
+		log.Infon("All snapshots created and loaded",
 			logger.NewStringField("duration", time.Since(start).String()),
 		)
 	}()
@@ -743,7 +752,7 @@ func (s *httpServer) processHashRangeMovements(
 	// Channel to coordinate between snapshot creation and loading
 	if !disableCreateSnapshotsSequentially {
 		createSnapshotsMaxConcurrency = 1
-		s.logger.Warnn("Disabling concurrent snapshot creation due to disableCreateSnapshotsSequentially=true")
+		log.Warnn("Disabling concurrent snapshot creation due to disableCreateSnapshotsSequentially=true")
 	}
 	type snapshotCreated struct {
 		hashRange         int64
@@ -783,7 +792,7 @@ func (s *httpServer) processHashRangeMovements(
 					)
 				}
 
-				s.logger.Infon("Snapshot created",
+				log.Infon("Snapshot created",
 					logger.NewIntField("hashRange", hashRange),
 					logger.NewIntField("sourceNodeId", movement.SourceNodeID),
 					logger.NewIntField("destinationNodeId", movement.DestinationNodeID),
@@ -802,6 +811,11 @@ func (s *httpServer) processHashRangeMovements(
 					sourceNodeID:      movement.SourceNodeID,
 					destinationNodeID: movement.DestinationNodeID,
 				}:
+					log.Infon("Snapshot queued for loading",
+						logger.NewIntField("hashRange", hashRange),
+						logger.NewIntField("sourceNodeId", movement.SourceNodeID),
+						logger.NewIntField("destinationNodeId", movement.DestinationNodeID),
+					)
 				}
 				return nil
 			})
@@ -817,6 +831,12 @@ func (s *httpServer) processHashRangeMovements(
 	group, gCtx := kitsync.NewEagerGroup(ctx, loadSnapshotsMaxConcurrency)
 	for snapshot := range snapshotsQueue {
 		group.Go(func() error {
+			log.Infon("Received snapshot queued for loading",
+				logger.NewIntField("hashRange", snapshot.hashRange),
+				logger.NewIntField("sourceNodeId", snapshot.sourceNodeID),
+				logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
+			)
+
 			loadStart := time.Now()
 			err := s.scaler.LoadSnapshots(
 				gCtx, snapshot.destinationNodeID, int64(loadSnapshotsMaxConcurrency), snapshot.hashRange,
@@ -827,7 +847,7 @@ func (s *httpServer) processHashRangeMovements(
 				)
 			}
 
-			s.logger.Infon("Snapshot loaded",
+			log.Infon("Snapshot loaded",
 				logger.NewIntField("hashRange", snapshot.hashRange),
 				logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
 				logger.NewStringField("duration", time.Since(loadStart).String()),
