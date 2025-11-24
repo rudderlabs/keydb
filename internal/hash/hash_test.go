@@ -386,8 +386,8 @@ func TestGetNodeHashRangesListPanics(t *testing.T) {
 	}
 }
 
-// TestGetHashRangeMovements verifies that GetHashRangeMovements correctly identifies
-// which hash ranges need to be moved during scaling operations and returns ready-to-use maps
+// TestGetHashRangeMovements verifies that GetHashRangeMovementsByRange correctly identifies
+// which hash ranges need to be moved during scaling operations
 func TestGetHashRangeMovements(t *testing.T) {
 	testCases := []struct {
 		name            string
@@ -429,7 +429,7 @@ func TestGetHashRangeMovements(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			sourceNodeMovements, destinationNodeMovements := GetHashRangeMovements(
+			movements := GetHashRangeMovementsByRange(
 				tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges,
 			)
 
@@ -446,78 +446,49 @@ func TestGetHashRangeMovements(t *testing.T) {
 				newNodeRanges[nodeID] = newH.GetNodeHashRanges(nodeID)
 			}
 
-			// Verify that all source node IDs are valid
-			for sourceNodeID, hashRanges := range sourceNodeMovements {
-				require.Less(t, sourceNodeID, tc.oldClusterSize, "Source node ID should be valid")
+			// Verify all movements
+			for hashRange, movement := range movements {
+				// Verify hash range is valid
+				require.Less(t, hashRange, tc.totalHashRanges, "Hash range should be valid")
 
-				// Verify all hash ranges for this source node are valid
-				for _, hashRange := range hashRanges {
-					require.Less(t, hashRange, tc.totalHashRanges, "Hash range should be valid")
+				// Verify source node ID is valid
+				require.Less(t, movement.SourceNodeID, tc.oldClusterSize, "Source node ID should be valid")
 
-					// Verify that this hash range actually belongs to this source node in old cluster
-					_, exists := oldNodeRanges[sourceNodeID][hashRange]
-					require.True(t, exists,
-						"Hash range %d should belong to source node %d in old cluster", hashRange, sourceNodeID,
-					)
+				// Verify destination node ID is valid
+				require.Less(t, movement.DestinationNodeID, tc.newClusterSize, "Destination node ID should be valid")
 
-					// Verify that this hash range moves to a different node
-					_, existsInNew := newNodeRanges[sourceNodeID][hashRange]
-					require.False(t, existsInNew,
-						"Hash range %d should move from node %d to different node",
-						hashRange, sourceNodeID,
-					)
-				}
+				// Verify that this hash range actually belongs to source node in old cluster
+				_, exists := oldNodeRanges[movement.SourceNodeID][hashRange]
+				require.True(t, exists,
+					"Hash range %d should belong to source node %d in old cluster",
+					hashRange, movement.SourceNodeID,
+				)
+
+				// Verify that this hash range moves to a different node
+				_, existsInNewSource := newNodeRanges[movement.SourceNodeID][hashRange]
+				require.False(t, existsInNewSource,
+					"Hash range %d should move from node %d to different node",
+					hashRange, movement.SourceNodeID,
+				)
+
+				// Verify that this hash range actually belongs to destination node in new cluster
+				_, exists = newNodeRanges[movement.DestinationNodeID][hashRange]
+				require.True(t, exists,
+					"Hash range %d should belong to destination node %d in new cluster",
+					hashRange, movement.DestinationNodeID,
+				)
+
+				// Verify that this hash range moves from a different node
+				_, existsInOldDest := oldNodeRanges[movement.DestinationNodeID][hashRange]
+				require.False(t, existsInOldDest,
+					"Hash range %d should move from different node to node %d",
+					hashRange, movement.DestinationNodeID,
+				)
 			}
 
-			// Verify that all destination node IDs are valid
-			for destinationNodeID, hashRanges := range destinationNodeMovements {
-				require.Less(t, destinationNodeID, tc.newClusterSize, "Destination node ID should be valid")
-
-				// Verify all hash ranges for this destination node are valid
-				for _, hashRange := range hashRanges {
-					require.Less(t, hashRange, tc.totalHashRanges, "Hash range should be valid")
-
-					// Verify that this hash range actually belongs to this destination node in new cluster
-					_, exists := newNodeRanges[destinationNodeID][hashRange]
-					require.True(t, exists,
-						"Hash range %d should belong to destination node %d in new cluster",
-						hashRange, destinationNodeID,
-					)
-
-					// Verify that this hash range moves from a different node
-					_, existsInOld := oldNodeRanges[destinationNodeID][hashRange]
-					require.False(t, existsInOld,
-						"Hash range %d should move from different node to node %d",
-						hashRange, destinationNodeID,
-					)
-				}
-			}
-
-			// Verify that no hash ranges are duplicated in source movements
-			allSourceMovedRanges := make(map[int64]bool)
-			for _, hashRanges := range sourceNodeMovements {
-				for _, hashRange := range hashRanges {
-					require.False(t, allSourceMovedRanges[hashRange],
-						"Hash range %d should not be duplicated in source movements", hashRange,
-					)
-					allSourceMovedRanges[hashRange] = true
-				}
-			}
-
-			// Verify that no hash ranges are duplicated in destination movements
-			allDestinationMovedRanges := make(map[int64]bool)
-			for _, hashRanges := range destinationNodeMovements {
-				for _, hashRange := range hashRanges {
-					require.False(t, allDestinationMovedRanges[hashRange],
-						"Hash range %d should not be duplicated in destination movements", hashRange,
-					)
-					allDestinationMovedRanges[hashRange] = true
-				}
-			}
-
-			// Verify that source and destination movements contain the same hash ranges
-			require.Equal(t, allSourceMovedRanges, allDestinationMovedRanges,
-				"Source and destination movements should contain the same hash ranges",
+			// Verify that no hash ranges are duplicated
+			require.Len(t, movements, len(movements),
+				"Each hash range should appear at most once in movements",
 			)
 
 			// Verify that movements include all hash ranges that should move
@@ -539,66 +510,28 @@ func TestGetHashRangeMovements(t *testing.T) {
 				}
 
 				shouldMove := oldNodeID != newNodeID
-				actuallyMoved := allSourceMovedRanges[hashRange]
+				_, actuallyMoved := movements[hashRange]
 
 				require.Equal(t, shouldMove, actuallyMoved,
 					"Hash range %d movement status should match expectation", hashRange,
 				)
+
+				// If it should move, verify the movement is correct
+				if shouldMove {
+					require.Equal(t, oldNodeID, movements[hashRange].SourceNodeID,
+						"Hash range %d should have correct source node", hashRange,
+					)
+					require.Equal(t, newNodeID, movements[hashRange].DestinationNodeID,
+						"Hash range %d should have correct destination node", hashRange,
+					)
+				}
 			}
 		})
 	}
 }
 
-// TestGetHashRangeMovementsPanics verifies that GetHashRangeMovements panics with invalid parameters
-func TestGetHashRangeMovementsPanics(t *testing.T) {
-	testCases := []struct {
-		name            string
-		oldClusterSize  int64
-		newClusterSize  int64
-		totalHashRanges int64
-		expectedPanic   string
-	}{
-		{
-			name:            "zero_old_cluster_size",
-			oldClusterSize:  0,
-			newClusterSize:  2,
-			totalHashRanges: 128,
-			expectedPanic:   "oldClusterSize must be greater than 0",
-		},
-		{
-			name:            "zero_new_cluster_size",
-			oldClusterSize:  2,
-			newClusterSize:  0,
-			totalHashRanges: 128,
-			expectedPanic:   "newClusterSize must be greater than 0",
-		},
-		{
-			name:            "totalHashRanges_less_than_oldClusterSize",
-			oldClusterSize:  10,
-			newClusterSize:  5,
-			totalHashRanges: 5,
-			expectedPanic:   "totalHashRanges must be greater than or equal to oldClusterSize",
-		},
-		{
-			name:            "totalHashRanges_less_than_newClusterSize",
-			oldClusterSize:  5,
-			newClusterSize:  10,
-			totalHashRanges: 5,
-			expectedPanic:   "totalHashRanges must be greater than or equal to newClusterSize",
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			require.PanicsWithValue(t, tc.expectedPanic, func() {
-				_, _ = GetHashRangeMovements(tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges)
-			})
-		})
-	}
-}
-
-// TestGetHashRangeMovementsByRange verifies that GetHashRangeMovementsByRange returns consistent
-// results with GetHashRangeMovements and correctly maps hash ranges to their movements
+// TestGetHashRangeMovementsByRange verifies that GetHashRangeMovementsByRange correctly
+// maps hash ranges to their source and destination nodes
 func TestGetHashRangeMovementsByRange(t *testing.T) {
 	testCases := []struct {
 		name            string
@@ -640,55 +573,92 @@ func TestGetHashRangeMovementsByRange(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Get results from both functions
-			sourceNodeMovements, destinationNodeMovements := GetHashRangeMovements(
-				tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges,
-			)
 			movementsByRange := GetHashRangeMovementsByRange(
 				tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges,
 			)
 
-			// Build expected map from the original function results
-			expectedMovements := make(map[int64]Movement)
-			for sourceNodeID, hashRanges := range sourceNodeMovements {
-				for _, hashRange := range hashRanges {
-					expectedMovements[hashRange] = Movement{
-						SourceNodeID:      sourceNodeID,
-						DestinationNodeID: -1, // Will be filled in next loop
+			oldH := New(tc.oldClusterSize, tc.totalHashRanges)
+			newH := New(tc.newClusterSize, tc.totalHashRanges)
+
+			// Verify each movement is correct
+			for hashRange, movement := range movementsByRange {
+				// Verify the hash range is valid
+				require.Less(t, hashRange, tc.totalHashRanges, "Hash range should be valid")
+
+				// Verify the hash range belongs to the source node in the old cluster
+				oldNodeRanges := oldH.GetNodeHashRanges(movement.SourceNodeID)
+				_, existsInOld := oldNodeRanges[hashRange]
+				require.True(t, existsInOld,
+					"Hash range %d should belong to source node %d in old cluster",
+					hashRange, movement.SourceNodeID,
+				)
+
+				// Verify the hash range belongs to the destination node in the new cluster
+				newNodeRanges := newH.GetNodeHashRanges(movement.DestinationNodeID)
+				_, existsInNew := newNodeRanges[hashRange]
+				require.True(t, existsInNew,
+					"Hash range %d should belong to destination node %d in new cluster",
+					hashRange, movement.DestinationNodeID,
+				)
+
+				// Verify the hash range actually moved (source != destination)
+				require.NotEqual(t, movement.SourceNodeID, movement.DestinationNodeID,
+					"Hash range %d should move from node %d to a different node %d",
+					hashRange, movement.SourceNodeID, movement.DestinationNodeID,
+				)
+			}
+
+			// Verify that all hash ranges that should move are included
+			for hashRange := int64(0); hashRange < tc.totalHashRanges; hashRange++ {
+				// Find which node owns this hash range in old and new clusters
+				var oldNodeID, newNodeID int64
+				var foundOld, foundNew bool
+
+				for nodeID := int64(0); nodeID < tc.oldClusterSize; nodeID++ {
+					oldNodeRanges := oldH.GetNodeHashRanges(nodeID)
+					if _, exists := oldNodeRanges[hashRange]; exists {
+						oldNodeID = nodeID
+						foundOld = true
+						break
 					}
 				}
-			}
 
-			for destNodeID, hashRanges := range destinationNodeMovements {
-				for _, hashRange := range hashRanges {
-					movement := expectedMovements[hashRange]
-					movement.DestinationNodeID = destNodeID
-					expectedMovements[hashRange] = movement
+				for nodeID := int64(0); nodeID < tc.newClusterSize; nodeID++ {
+					newNodeRanges := newH.GetNodeHashRanges(nodeID)
+					if _, exists := newNodeRanges[hashRange]; exists {
+						newNodeID = nodeID
+						foundNew = true
+						break
+					}
+				}
+
+				require.True(t, foundOld, "Hash range %d should belong to a node in old cluster", hashRange)
+				require.True(t, foundNew, "Hash range %d should belong to a node in new cluster", hashRange)
+
+				// Check if this hash range should move
+				shouldMove := oldNodeID != newNodeID
+				movement, hasMoved := movementsByRange[hashRange]
+
+				require.Equal(t, shouldMove, hasMoved,
+					"Hash range %d movement status should match expectation (old node: %d, new node: %d)",
+					hashRange, oldNodeID, newNodeID,
+				)
+
+				// If it moved, verify the movement details are correct
+				if shouldMove {
+					require.Equal(t, oldNodeID, movement.SourceNodeID,
+						"Hash range %d should have correct source node", hashRange,
+					)
+					require.Equal(t, newNodeID, movement.DestinationNodeID,
+						"Hash range %d should have correct destination node", hashRange,
+					)
 				}
 			}
 
-			// Verify that both functions return the same number of movements
-			require.Equal(t, len(expectedMovements), len(movementsByRange),
-				"Both functions should return the same number of movements",
+			// Verify no duplicate hash ranges in movements
+			require.Len(t, movementsByRange, len(movementsByRange),
+				"Each hash range should appear at most once in movements",
 			)
-
-			// Verify that all movements match
-			for hashRange, expectedMovement := range expectedMovements {
-				actualMovement, exists := movementsByRange[hashRange]
-				require.True(t, exists, "Hash range %d should exist in movements map", hashRange)
-				require.Equal(t, expectedMovement.SourceNodeID, actualMovement.SourceNodeID,
-					"Hash range %d should have matching source node ID", hashRange,
-				)
-				require.Equal(t, expectedMovement.DestinationNodeID, actualMovement.DestinationNodeID,
-					"Hash range %d should have matching destination node ID", hashRange,
-				)
-			}
-
-			// Verify that no extra movements exist
-			for hashRange := range movementsByRange {
-				_, exists := expectedMovements[hashRange]
-				require.True(t, exists, "Hash range %d should not have unexpected movement", hashRange)
-			}
 		})
 	}
 }
