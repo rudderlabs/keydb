@@ -810,14 +810,10 @@ func (s *httpServer) processHashRangeMovements(
 	if skipCreateSnapshots {
 		// If skipping creation, just queue all snapshots for loading
 		for hashRange, movement := range movements {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case snapshotsQueue <- snapshotCreated{
+			snapshotsQueue <- snapshotCreated{ // buffer is exactly the number of movements, no need to check the ctx
 				hashRange:         hashRange,
 				sourceNodeID:      movement.SourceNodeID,
 				destinationNodeID: movement.DestinationNodeID,
-			}:
 			}
 		}
 	} else {
