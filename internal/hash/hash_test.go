@@ -597,6 +597,150 @@ func TestGetHashRangeMovementsPanics(t *testing.T) {
 	}
 }
 
+// TestGetHashRangeMovementsByRange verifies that GetHashRangeMovementsByRange returns consistent
+// results with GetHashRangeMovements and correctly maps hash ranges to their movements
+func TestGetHashRangeMovementsByRange(t *testing.T) {
+	testCases := []struct {
+		name            string
+		oldClusterSize  int64
+		newClusterSize  int64
+		totalHashRanges int64
+	}{
+		{
+			name:            "scale_up_1_to_2",
+			oldClusterSize:  1,
+			newClusterSize:  2,
+			totalHashRanges: 4,
+		},
+		{
+			name:            "scale_up_2_to_3",
+			oldClusterSize:  2,
+			newClusterSize:  3,
+			totalHashRanges: 6,
+		},
+		{
+			name:            "scale_down_3_to_2",
+			oldClusterSize:  3,
+			newClusterSize:  2,
+			totalHashRanges: 6,
+		},
+		{
+			name:            "scale_down_2_to_1",
+			oldClusterSize:  2,
+			newClusterSize:  1,
+			totalHashRanges: 4,
+		},
+		{
+			name:            "large_scale_up",
+			oldClusterSize:  5,
+			newClusterSize:  10,
+			totalHashRanges: 128,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Get results from both functions
+			sourceNodeMovements, destinationNodeMovements := GetHashRangeMovements(
+				tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges,
+			)
+			movementsByRange := GetHashRangeMovementsByRange(
+				tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges,
+			)
+
+			// Build expected map from the original function results
+			expectedMovements := make(map[int64]Movement)
+			for sourceNodeID, hashRanges := range sourceNodeMovements {
+				for _, hashRange := range hashRanges {
+					expectedMovements[hashRange] = Movement{
+						SourceNodeID:      sourceNodeID,
+						DestinationNodeID: -1, // Will be filled in next loop
+					}
+				}
+			}
+
+			for destNodeID, hashRanges := range destinationNodeMovements {
+				for _, hashRange := range hashRanges {
+					movement := expectedMovements[hashRange]
+					movement.DestinationNodeID = destNodeID
+					expectedMovements[hashRange] = movement
+				}
+			}
+
+			// Verify that both functions return the same number of movements
+			require.Equal(t, len(expectedMovements), len(movementsByRange),
+				"Both functions should return the same number of movements",
+			)
+
+			// Verify that all movements match
+			for hashRange, expectedMovement := range expectedMovements {
+				actualMovement, exists := movementsByRange[hashRange]
+				require.True(t, exists, "Hash range %d should exist in movements map", hashRange)
+				require.Equal(t, expectedMovement.SourceNodeID, actualMovement.SourceNodeID,
+					"Hash range %d should have matching source node ID", hashRange,
+				)
+				require.Equal(t, expectedMovement.DestinationNodeID, actualMovement.DestinationNodeID,
+					"Hash range %d should have matching destination node ID", hashRange,
+				)
+			}
+
+			// Verify that no extra movements exist
+			for hashRange := range movementsByRange {
+				_, exists := expectedMovements[hashRange]
+				require.True(t, exists, "Hash range %d should not have unexpected movement", hashRange)
+			}
+		})
+	}
+}
+
+// TestGetHashRangeMovementsByRangePanics verifies that GetHashRangeMovementsByRange panics with invalid parameters
+func TestGetHashRangeMovementsByRangePanics(t *testing.T) {
+	testCases := []struct {
+		name            string
+		oldClusterSize  int64
+		newClusterSize  int64
+		totalHashRanges int64
+		expectedPanic   string
+	}{
+		{
+			name:            "zero_old_cluster_size",
+			oldClusterSize:  0,
+			newClusterSize:  2,
+			totalHashRanges: 128,
+			expectedPanic:   "oldClusterSize must be greater than 0",
+		},
+		{
+			name:            "zero_new_cluster_size",
+			oldClusterSize:  2,
+			newClusterSize:  0,
+			totalHashRanges: 128,
+			expectedPanic:   "newClusterSize must be greater than 0",
+		},
+		{
+			name:            "totalHashRanges_less_than_oldClusterSize",
+			oldClusterSize:  10,
+			newClusterSize:  5,
+			totalHashRanges: 5,
+			expectedPanic:   "totalHashRanges must be greater than or equal to oldClusterSize",
+		},
+		{
+			name:            "totalHashRanges_less_than_newClusterSize",
+			oldClusterSize:  5,
+			newClusterSize:  10,
+			totalHashRanges: 5,
+			expectedPanic:   "totalHashRanges must be greater than or equal to newClusterSize",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.PanicsWithValue(t, tc.expectedPanic, func() {
+				_ = GetHashRangeMovementsByRange(tc.oldClusterSize, tc.newClusterSize, tc.totalHashRanges)
+			})
+		})
+	}
+}
+
 type hashResult struct {
 	key       string
 	hashRange int64
