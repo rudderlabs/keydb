@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -331,19 +332,20 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 
 	oldClusterSize := int64(len(req.OldNodesAddresses))
 	newClusterSize := int64(len(req.NewNodesAddresses))
+	createSnapshotsMaxConcurrency := req.CreateSnapshotsMaxConcurrency
 	loadSnapshotsMaxConcurrency := req.LoadSnapshotsMaxConcurrency
 
 	var err error
 	if newClusterSize > oldClusterSize {
 		err = s.handleScaleUp(
 			r.Context(), req.OldNodesAddresses, req.NewNodesAddresses,
-			req.FullSync, req.SkipCreateSnapshots, loadSnapshotsMaxConcurrency,
+			req.FullSync, req.SkipCreateSnapshots, createSnapshotsMaxConcurrency, loadSnapshotsMaxConcurrency,
 			req.DisableCreateSnapshotsSequentially,
 		)
 	} else if newClusterSize < oldClusterSize {
 		err = s.handleScaleDown(
 			r.Context(), req.OldNodesAddresses, req.NewNodesAddresses,
-			req.FullSync, req.SkipCreateSnapshots, loadSnapshotsMaxConcurrency,
+			req.FullSync, req.SkipCreateSnapshots, createSnapshotsMaxConcurrency, loadSnapshotsMaxConcurrency,
 			req.DisableCreateSnapshotsSequentially,
 		)
 	} else {
@@ -364,7 +366,8 @@ func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
 // handleScaleUp implements the scale up logic based on TestScaleUpAndDown
 func (s *httpServer) handleScaleUp(
 	ctx context.Context, oldAddresses, newAddresses []string,
-	fullSync, skipCreateSnapshots bool, loadSnapshotsMaxConcurrency int,
+	fullSync, skipCreateSnapshots bool,
+	createSnapshotsMaxConcurrency, loadSnapshotsMaxConcurrency int,
 	disableCreateSnapshotsSequentially bool,
 ) error {
 	oldClusterSize := int64(len(oldAddresses))
@@ -398,82 +401,24 @@ func (s *httpServer) handleScaleUp(
 		)
 
 		// Step 3: Create and load snapshots for hash ranges that will be moved
-		for hashRange, movement := range movements {
-			// TODO
-		}
-
-		// BELOW OLD LOGIC
-		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
-			oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
-		)
-		if !skipCreateSnapshots {
-			log.Infon("Scale up to start creating snapshots",
-				logger.NewIntField("totalNodesAffected", int64(len(sourceNodeMovements))),
+		// Use pipelined approach: start loading snapshots as they are created
+		if skipCreateSnapshots {
+			log.Infon("Skipping snapshots creation, only loading",
+				logger.NewIntField("totalMovements", int64(len(movements))),
 			)
-
-			groupStart := time.Now()
-			group, gCtx := errgroup.WithContext(ctx)
-			for sourceNodeID, hashRanges := range sourceNodeMovements {
-				if len(hashRanges) == 0 {
-					continue
-				}
-				group.Go(func() error {
-					createSnapshotsStart := time.Now()
-					err := s.createSnapshotsWithProgress(
-						gCtx, sourceNodeID, fullSync, disableCreateSnapshotsSequentially, hashRanges,
-					)
-					if err != nil {
-						return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
-							sourceNodeID, hashRanges, err,
-						)
-					}
-					log.Infon("Node snapshots created",
-						logger.NewIntField("nodeId", sourceNodeID),
-						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
-						logger.NewStringField("duration", time.Since(createSnapshotsStart).String()),
-					)
-					return nil
-				})
-			}
-			if err := group.Wait(); err != nil {
-				return err
-			}
-			log.Infon("All snapshots created", logger.NewStringField("duration", time.Since(groupStart).String()))
 		} else {
-			log.Infon("Skipping snapshots creation")
+			log.Infon("Scale up to start creating and loading snapshots",
+				logger.NewIntField("totalMovements", int64(len(movements))),
+			)
 		}
 
-		// Step 4: Load snapshots to destination nodes
-		log.Infon("Scale up to start loading snapshots",
-			logger.NewIntField("totalNodesAffected", int64(len(destinationNodeMovements))),
+		err := s.processHashRangeMovements(
+			ctx, movements, fullSync, skipCreateSnapshots, createSnapshotsMaxConcurrency,
+			loadSnapshotsMaxConcurrency, disableCreateSnapshotsSequentially,
 		)
-
-		groupStart := time.Now()
-		group, gCtx := errgroup.WithContext(ctx)
-		for nodeID, hashRanges := range destinationNodeMovements {
-			if len(hashRanges) == 0 {
-				continue
-			}
-			group.Go(func() error {
-				loadSnapshotsStart := time.Now()
-				err := s.scaler.LoadSnapshots(gCtx, nodeID, int64(loadSnapshotsMaxConcurrency), hashRanges...)
-				if err != nil {
-					return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
-						nodeID, hashRanges, err,
-					)
-				}
-				log.Infon("Node snapshots loaded",
-					logger.NewIntField("nodeId", nodeID),
-					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
-					logger.NewStringField("duration", time.Since(loadSnapshotsStart).String()),
-				)
-				return nil
-			})
+		if err != nil {
+			return err
 		}
-		if err := group.Wait(); err != nil {
-			return fmt.Errorf("waiting for snapshot loading: %w", err)
-		}
-		log.Infon("All snapshots loaded", logger.NewStringField("duration", time.Since(groupStart).String()))
 
 		// Step 5: Scale all nodes
 		return s.completeScaleOperation(ctx, newClusterSize)
@@ -483,7 +428,7 @@ func (s *httpServer) handleScaleUp(
 // handleScaleDown implements the scale down logic based on TestScaleUpAndDown
 func (s *httpServer) handleScaleDown(
 	ctx context.Context, oldAddresses, newAddresses []string,
-	fullSync, skipCreateSnapshots bool, loadSnapshotsMaxConcurrency int,
+	fullSync, skipCreateSnapshots bool, createSnapshotsMaxConcurrency, loadSnapshotsMaxConcurrency int,
 	disableCreateSnapshotsSequentially bool,
 ) error {
 	oldClusterSize := int64(len(oldAddresses))
@@ -503,79 +448,30 @@ func (s *httpServer) handleScaleDown(
 	}()
 
 	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleDown, oldAddresses, newAddresses, func() error {
-		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+		// Step 1: Determine which hash ranges need to be moved
+		movements := hash.GetHashRangeMovementsByRange(
 			oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
 		)
 
-		// Step 1: Create snapshots from source nodes for hash ranges that will be moved
-		if !skipCreateSnapshots {
-			log.Infon("Scale down to start creating snapshots",
-				logger.NewIntField("totalNodesAffected", int64(len(sourceNodeMovements))),
+		// Step 2: Create and load snapshots for hash ranges that will be moved
+		// Use pipelined approach: start loading snapshots as they are created
+		if skipCreateSnapshots {
+			log.Infon("Skipping snapshots creation, only loading",
+				logger.NewIntField("totalMovements", int64(len(movements))),
 			)
-
-			groupStart := time.Now()
-			group, gCtx := errgroup.WithContext(ctx)
-			for sourceNodeID, hashRanges := range sourceNodeMovements {
-				if len(hashRanges) == 0 {
-					continue
-				}
-				group.Go(func() error {
-					createSnapshotsStart := time.Now()
-					err := s.createSnapshotsWithProgress(
-						gCtx, sourceNodeID, fullSync, disableCreateSnapshotsSequentially, hashRanges,
-					)
-					if err != nil {
-						return fmt.Errorf("creating snapshots from node %d for hash ranges %v: %w",
-							sourceNodeID, hashRanges, err,
-						)
-					}
-					log.Infon("Node snapshots created",
-						logger.NewIntField("nodeId", sourceNodeID),
-						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
-						logger.NewStringField("duration", time.Since(createSnapshotsStart).String()),
-					)
-					return nil
-				})
-			}
-			if err := group.Wait(); err != nil {
-				return fmt.Errorf("waiting for snapshot creation: %w", err)
-			}
-			log.Infon("All snapshots created", logger.NewStringField("duration", time.Since(groupStart).String()))
 		} else {
-			log.Infon("Skipping snapshots creation")
+			log.Infon("Scale down to start creating and loading snapshots",
+				logger.NewIntField("totalMovements", int64(len(movements))),
+			)
 		}
 
-		// Step 2: Load snapshots to destination nodes
-		log.Infon("Scale down to start loading snapshots",
-			logger.NewIntField("totalNodesAffected", int64(len(destinationNodeMovements))),
+		err := s.processHashRangeMovements(
+			ctx, movements, fullSync, skipCreateSnapshots, createSnapshotsMaxConcurrency,
+			loadSnapshotsMaxConcurrency, disableCreateSnapshotsSequentially,
 		)
-
-		groupStart := time.Now()
-		group, gCtx := errgroup.WithContext(ctx)
-		for nodeID, hashRanges := range destinationNodeMovements {
-			if len(hashRanges) == 0 {
-				continue
-			}
-			group.Go(func() error {
-				loadSnapshotsStart := time.Now()
-				err := s.scaler.LoadSnapshots(gCtx, nodeID, int64(loadSnapshotsMaxConcurrency), hashRanges...)
-				if err != nil {
-					return fmt.Errorf("loading snapshots to node %d for hash ranges %v: %w",
-						nodeID, hashRanges, err,
-					)
-				}
-				log.Infon("Node snapshots loaded",
-					logger.NewIntField("nodeId", nodeID),
-					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
-					logger.NewStringField("duration", time.Since(loadSnapshotsStart).String()),
-				)
-				return nil
-			})
+		if err != nil {
+			return err
 		}
-		if err := group.Wait(); err != nil {
-			return fmt.Errorf("waiting for snapshot loading: %w", err)
-		}
-		log.Infon("All snapshots loaded", logger.NewStringField("duration", time.Since(groupStart).String()))
 
 		// Step 3: Update cluster data with new addresses
 		if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
@@ -685,35 +581,50 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 	}()
 
 	// Get hash range movements
-	sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(
+	movements := hash.GetHashRangeMovementsByRange(
 		req.OldClusterSize, req.NewClusterSize, req.TotalHashRanges,
 	)
 
-	destinationMap := make(map[int64]int64)
-	for nodeID, hashRanges := range destinationNodeMovements {
-		for _, hashRange := range hashRanges {
-			destinationMap[hashRange] = nodeID
-		}
-	}
-
 	// Convert to response format
 	var response HashRangeMovementsResponse
-	for sourceNodeID, hashRanges := range sourceNodeMovements {
-		for _, hashRange := range hashRanges {
-			response.Movements = append(response.Movements, HashRangeMovement{
-				HashRange: hashRange,
-				From:      sourceNodeID,
-				To:        destinationMap[hashRange],
-			})
-			response.Total++
-		}
+	response.Total = len(movements)
+	response.Movements = make([]HashRangeMovement, 0, len(movements))
+	for hashRange, movement := range movements {
+		response.Movements = append(response.Movements, HashRangeMovement{
+			HashRange: hashRange,
+			From:      movement.SourceNodeID,
+			To:        movement.DestinationNodeID,
+		})
 	}
 
-	// If upload=true, send CreateSnapshots requests to old nodes that are losing hash ranges
-	if req.Upload {
+	// If upload=true and download=true, use pipelined approach
+	// Otherwise use the old sequential approach for backward compatibility
+	if req.Upload && req.Download {
+		log.Infon("Upload and download of hash ranges are enabled (using pipelined approach)",
+			logger.NewIntField("totalHashRanges", req.TotalHashRanges),
+		)
+
+		ctx := r.Context()
+		err := s.processHashRangeMovements(
+			ctx, movements, req.FullSync, false, req.CreateSnapshotsMaxConcurrency,
+			req.LoadSnapshotsMaxConcurrency, req.DisableCreateSnapshotsSequentially,
+		)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if req.Upload {
 		log.Infon("Upload of hash ranges is enabled",
 			logger.NewIntField("totalHashRanges", req.TotalHashRanges),
 		)
+
+		// Group movements by source node
+		sourceNodeMovements := make(map[int64][]int64)
+		for hashRange, movement := range movements {
+			sourceNodeMovements[movement.SourceNodeID] = append(
+				sourceNodeMovements[movement.SourceNodeID], hashRange,
+			)
+		}
 
 		ctx := r.Context()
 		group, gCtx := errgroup.WithContext(ctx)
@@ -744,12 +655,18 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		}
 
 		log.Infon("All snapshots created")
-	}
-
-	if req.Download {
+	} else if req.Download {
 		log.Infon("Download of hash ranges is enabled",
 			logger.NewIntField("totalHashRanges", req.TotalHashRanges),
 		)
+
+		// Group movements by destination node
+		destinationNodeMovements := make(map[int64][]int64)
+		for hashRange, movement := range movements {
+			destinationNodeMovements[movement.DestinationNodeID] = append(
+				destinationNodeMovements[movement.DestinationNodeID], hashRange,
+			)
+		}
 
 		ctx := r.Context()
 		group, gCtx := errgroup.WithContext(ctx)
@@ -784,6 +701,195 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+// processHashRangeMovements processes hash range movements by creating and loading snapshots in a pipelined manner.
+// Instead of creating all snapshots first and then loading them, it starts loading snapshots as they are created.
+func (s *httpServer) processHashRangeMovements(
+	ctx context.Context,
+	movements map[int64]hash.Movement,
+	fullSync bool,
+	skipCreateSnapshots bool,
+	createSnapshotsMaxConcurrency int,
+	loadSnapshotsMaxConcurrency int,
+	disableCreateSnapshotsSequentially bool,
+) error {
+	if len(movements) == 0 {
+		return nil
+	}
+
+	// Set default concurrency limits if not specified
+	if createSnapshotsMaxConcurrency <= 0 {
+		createSnapshotsMaxConcurrency = 10 // Default to 10 concurrent creates
+	}
+	if loadSnapshotsMaxConcurrency <= 0 {
+		loadSnapshotsMaxConcurrency = 10 // Default to 10 concurrent loads
+	}
+
+	// Group movements by source node to track metrics
+	sourceNodeMovements := make(map[int64][]int64)
+	destinationNodeMovements := make(map[int64][]int64)
+	for hashRange, movement := range movements {
+		sourceNodeMovements[movement.SourceNodeID] = append(
+			sourceNodeMovements[movement.SourceNodeID], hashRange,
+		)
+		destinationNodeMovements[movement.DestinationNodeID] = append(
+			destinationNodeMovements[movement.DestinationNodeID], hashRange,
+		)
+	}
+
+	// Initialize metrics for tracking progress
+	totalSnapshotsToCreate := s.stat.NewStat(totalSnapshotsToCreateMetricName, stats.GaugeType)
+	totalSnapshotsToCreate.Observe(float64(len(movements)))
+	defer totalSnapshotsToCreate.Observe(0)
+
+	currentSnapshotsCreated := s.stat.NewStat(currentSnapshotsToCreateMetricName, stats.GaugeType)
+	currentSnapshotsCreated.Observe(0)
+
+	totalSnapshotsToLoad := s.stat.NewStat(totalSnapshotsToLoadMetricName, stats.GaugeType)
+	totalSnapshotsToLoad.Observe(float64(len(movements)))
+	defer totalSnapshotsToLoad.Observe(0)
+
+	currentSnapshotsLoaded := s.stat.NewStat(currentSnapshotsToLoadMetricName, stats.GaugeType)
+	currentSnapshotsLoaded.Observe(0)
+
+	start := time.Now()
+	defer func() {
+		s.logger.Infon("All snapshots created and loaded",
+			logger.NewStringField("duration", time.Since(start).String()),
+		)
+	}()
+
+	// Channel to coordinate between snapshot creation and loading
+	type completedSnapshot struct {
+		hashRange         int64
+		sourceNodeID      int64
+		destinationNodeID int64
+	}
+	snapshotQueue := make(chan completedSnapshot, len(movements))
+
+	group, gCtx := errgroup.WithContext(ctx)
+
+	// Use atomic counters for thread-safe progress tracking
+	var createdCount, loadedCount atomic.Int64
+
+	// Semaphores to limit concurrent operations
+	createSemaphore := make(chan struct{}, createSnapshotsMaxConcurrency)
+	loadSemaphore := make(chan struct{}, loadSnapshotsMaxConcurrency)
+
+	// Start goroutine to create snapshots (or just queue them if skipCreateSnapshots is true)
+	group.Go(func() error {
+		defer close(snapshotQueue)
+
+		if skipCreateSnapshots {
+			// If skipping creation, just queue all snapshots for loading
+			for hashRange, movement := range movements {
+				select {
+				case snapshotQueue <- completedSnapshot{
+					hashRange:         hashRange,
+					sourceNodeID:      movement.SourceNodeID,
+					destinationNodeID: movement.DestinationNodeID,
+				}:
+				case <-gCtx.Done():
+					return gCtx.Err()
+				}
+			}
+			return nil
+		}
+
+		// Normal path: create snapshots
+		createGroup, createCtx := errgroup.WithContext(gCtx)
+
+		for hashRange, movement := range movements {
+			hashRange := hashRange
+			movement := movement
+
+			createGroup.Go(func() error {
+				// Acquire semaphore
+				select {
+				case createSemaphore <- struct{}{}:
+					defer func() { <-createSemaphore }()
+				case <-createCtx.Done():
+					return createCtx.Err()
+				}
+
+				createStart := time.Now()
+				err := s.scaler.CreateSnapshots(
+					createCtx, movement.SourceNodeID, fullSync, hashRange,
+				)
+				if err != nil {
+					return fmt.Errorf("creating snapshot for hash range %d from node %d: %w",
+						hashRange, movement.SourceNodeID, err,
+					)
+				}
+
+				s.logger.Infon("Snapshot created",
+					logger.NewIntField("hashRange", hashRange),
+					logger.NewIntField("sourceNodeId", movement.SourceNodeID),
+					logger.NewIntField("destinationNodeId", movement.DestinationNodeID),
+					logger.NewStringField("duration", time.Since(createStart).String()),
+				)
+
+				// Update progress
+				count := createdCount.Add(1)
+				currentSnapshotsCreated.Observe(float64(count))
+
+				// Send to queue for loading
+				select {
+				case snapshotQueue <- completedSnapshot{
+					hashRange:         hashRange,
+					sourceNodeID:      movement.SourceNodeID,
+					destinationNodeID: movement.DestinationNodeID,
+				}:
+				case <-createCtx.Done():
+					return createCtx.Err()
+				}
+
+				return nil
+			})
+		}
+
+		return createGroup.Wait()
+	})
+
+	// Start goroutines to load snapshots
+	for snapshot := range snapshotQueue {
+		snapshot := snapshot
+
+		group.Go(func() error {
+			// Acquire semaphore
+			select {
+			case loadSemaphore <- struct{}{}:
+				defer func() { <-loadSemaphore }()
+			case <-gCtx.Done():
+				return gCtx.Err()
+			}
+
+			loadStart := time.Now()
+			err := s.scaler.LoadSnapshots(
+				gCtx, snapshot.destinationNodeID, int64(loadSnapshotsMaxConcurrency), snapshot.hashRange,
+			)
+			if err != nil {
+				return fmt.Errorf("loading snapshot for hash range %d to node %d: %w",
+					snapshot.hashRange, snapshot.destinationNodeID, err,
+				)
+			}
+
+			s.logger.Infon("Snapshot loaded",
+				logger.NewIntField("hashRange", snapshot.hashRange),
+				logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
+				logger.NewStringField("duration", time.Since(loadStart).String()),
+			)
+
+			// Update progress
+			count := loadedCount.Add(1)
+			currentSnapshotsLoaded.Observe(float64(count))
+
+			return nil
+		})
+	}
+
+	return group.Wait()
 }
 
 // createSnapshotsWithProgress creates snapshots either sequentially (one at a time) or in batch

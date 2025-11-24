@@ -65,6 +65,7 @@ type AutoScaleRequest struct {
 	// When true, all data will be included in snapshots regardless of incremental changes.
 	FullSync                           bool `json:"full_sync,omitempty"`
 	SkipCreateSnapshots                bool `json:"skip_create_snapshots,omitempty"`
+	CreateSnapshotsMaxConcurrency      int  `json:"create_snapshots_max_concurrency,omitempty"`
 	LoadSnapshotsMaxConcurrency        int  `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool `json:"disable_create_snapshots_sequentially,omitempty"`
 }
@@ -77,6 +78,7 @@ type HashRangeMovementsRequest struct {
 	Upload                             bool  `json:"upload,omitempty"`
 	Download                           bool  `json:"download,omitempty"`
 	FullSync                           bool  `json:"full_sync,omitempty"`
+	CreateSnapshotsMaxConcurrency      int   `json:"create_snapshots_max_concurrency,omitempty"`
 	LoadSnapshotsMaxConcurrency        int   `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
 }
