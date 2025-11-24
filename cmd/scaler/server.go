@@ -21,14 +21,17 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/jsonrs"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
+	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
 const (
-	totalSnapshotsToLoadMetricName     = "scaler_total_snapshots_to_load"
-	currentSnapshotsToLoadMetricName   = "scaler_current_snapshots_loaded"
-	totalSnapshotsToCreateMetricName   = "scaler_total_snapshots_to_create"
-	currentSnapshotsToCreateMetricName = "scaler_current_snapshots_created"
+	totalSnapshotsToLoadMetricName       = "scaler_total_snapshots_to_load"
+	currentSnapshotsToLoadMetricName     = "scaler_current_snapshots_loaded"
+	totalSnapshotsToCreateMetricName     = "scaler_total_snapshots_to_create"
+	currentSnapshotsToCreateMetricName   = "scaler_current_snapshots_created"
+	defaultCreateSnapshotsMaxConcurrency = 10
+	defaultLoadSnapshotsMaxConcurrency   = 10
 )
 
 type scalerClient interface {
@@ -720,22 +723,10 @@ func (s *httpServer) processHashRangeMovements(
 
 	// Set default concurrency limits if not specified
 	if createSnapshotsMaxConcurrency <= 0 {
-		createSnapshotsMaxConcurrency = 10 // Default to 10 concurrent creates
+		createSnapshotsMaxConcurrency = defaultCreateSnapshotsMaxConcurrency
 	}
 	if loadSnapshotsMaxConcurrency <= 0 {
-		loadSnapshotsMaxConcurrency = 10 // Default to 10 concurrent loads
-	}
-
-	// Group movements by source node to track metrics
-	sourceNodeMovements := make(map[int64][]int64)
-	destinationNodeMovements := make(map[int64][]int64)
-	for hashRange, movement := range movements {
-		sourceNodeMovements[movement.SourceNodeID] = append(
-			sourceNodeMovements[movement.SourceNodeID], hashRange,
-		)
-		destinationNodeMovements[movement.DestinationNodeID] = append(
-			destinationNodeMovements[movement.DestinationNodeID], hashRange,
-		)
+		loadSnapshotsMaxConcurrency = defaultLoadSnapshotsMaxConcurrency
 	}
 
 	// Initialize metrics for tracking progress
@@ -761,59 +752,42 @@ func (s *httpServer) processHashRangeMovements(
 	}()
 
 	// Channel to coordinate between snapshot creation and loading
-	type completedSnapshot struct {
+	if !disableCreateSnapshotsSequentially {
+		createSnapshotsMaxConcurrency = 1
+		s.logger.Warnn("Disabling concurrent snapshot creation due to disableCreateSnapshotsSequentially=true")
+	}
+	type snapshotCreated struct {
 		hashRange         int64
 		sourceNodeID      int64
 		destinationNodeID int64
 	}
-	snapshotQueue := make(chan completedSnapshot, len(movements))
-
-	group, gCtx := errgroup.WithContext(ctx)
-
-	// Use atomic counters for thread-safe progress tracking
-	var createdCount, loadedCount atomic.Int64
-
-	// Semaphores to limit concurrent operations
-	createSemaphore := make(chan struct{}, createSnapshotsMaxConcurrency)
-	loadSemaphore := make(chan struct{}, loadSnapshotsMaxConcurrency)
+	var (
+		createdCount, loadedCount atomic.Int64
+		creationDone              = make(chan error, 1)
+		snapshotsQueue            = make(chan snapshotCreated, len(movements))
+	)
 
 	// Start goroutine to create snapshots (or just queue them if skipCreateSnapshots is true)
-	group.Go(func() error {
-		defer close(snapshotQueue)
-
-		if skipCreateSnapshots {
-			// If skipping creation, just queue all snapshots for loading
-			for hashRange, movement := range movements {
-				select {
-				case snapshotQueue <- completedSnapshot{
-					hashRange:         hashRange,
-					sourceNodeID:      movement.SourceNodeID,
-					destinationNodeID: movement.DestinationNodeID,
-				}:
-				case <-gCtx.Done():
-					return gCtx.Err()
-				}
-			}
-			return nil
-		}
-
-		// Normal path: create snapshots
-		createGroup, createCtx := errgroup.WithContext(gCtx)
-
+	if skipCreateSnapshots {
+		// If skipping creation, just queue all snapshots for loading
 		for hashRange, movement := range movements {
-			createGroup.Go(func() error {
-				// Acquire semaphore
-				select {
-				case createSemaphore <- struct{}{}:
-					defer func() { <-createSemaphore }()
-				case <-createCtx.Done():
-					return createCtx.Err()
-				}
-
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case snapshotsQueue <- snapshotCreated{
+				hashRange:         hashRange,
+				sourceNodeID:      movement.SourceNodeID,
+				destinationNodeID: movement.DestinationNodeID,
+			}:
+			}
+		}
+		close(snapshotsQueue)
+	} else {
+		group, gCtx := kitsync.NewEagerGroup(ctx, createSnapshotsMaxConcurrency)
+		for hashRange, movement := range movements {
+			group.Go(func() error {
 				createStart := time.Now()
-				err := s.scaler.CreateSnapshots(
-					createCtx, movement.SourceNodeID, fullSync, hashRange,
-				)
+				err := s.scaler.CreateSnapshots(gCtx, movement.SourceNodeID, fullSync, hashRange)
 				if err != nil {
 					return fmt.Errorf("creating snapshot for hash range %d from node %d: %w",
 						hashRange, movement.SourceNodeID, err,
@@ -824,42 +798,36 @@ func (s *httpServer) processHashRangeMovements(
 					logger.NewIntField("hashRange", hashRange),
 					logger.NewIntField("sourceNodeId", movement.SourceNodeID),
 					logger.NewIntField("destinationNodeId", movement.DestinationNodeID),
-					logger.NewStringField("duration", time.Since(createStart).String()),
+					logger.NewDurationField("duration", time.Since(createStart)),
 				)
 
 				// Update progress
-				count := createdCount.Add(1)
-				currentSnapshotsCreated.Observe(float64(count))
+				currentSnapshotsCreated.Observe(float64(createdCount.Add(1)))
 
 				// Send to queue for loading
 				select {
-				case snapshotQueue <- completedSnapshot{
+				case <-gCtx.Done():
+					return gCtx.Err()
+				case snapshotsQueue <- snapshotCreated{
 					hashRange:         hashRange,
 					sourceNodeID:      movement.SourceNodeID,
 					destinationNodeID: movement.DestinationNodeID,
 				}:
-				case <-createCtx.Done():
-					return createCtx.Err()
 				}
-
 				return nil
 			})
 		}
-
-		return createGroup.Wait()
-	})
+		go func() {
+			creationDone <- group.Wait()
+			close(snapshotsQueue)
+			close(creationDone)
+		}()
+	}
 
 	// Start goroutines to load snapshots
-	for snapshot := range snapshotQueue {
+	group, gCtx := kitsync.NewEagerGroup(ctx, loadSnapshotsMaxConcurrency)
+	for snapshot := range snapshotsQueue {
 		group.Go(func() error {
-			// Acquire semaphore
-			select {
-			case loadSemaphore <- struct{}{}:
-				defer func() { <-loadSemaphore }()
-			case <-gCtx.Done():
-				return gCtx.Err()
-			}
-
 			loadStart := time.Now()
 			err := s.scaler.LoadSnapshots(
 				gCtx, snapshot.destinationNodeID, int64(loadSnapshotsMaxConcurrency), snapshot.hashRange,
@@ -877,14 +845,24 @@ func (s *httpServer) processHashRangeMovements(
 			)
 
 			// Update progress
-			count := loadedCount.Add(1)
-			currentSnapshotsLoaded.Observe(float64(count))
+			currentSnapshotsLoaded.Observe(float64(loadedCount.Add(1)))
 
 			return nil
 		})
 	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("error waiting for snapshot loading goroutines: %w", err)
+	}
 
-	return group.Wait()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-creationDone:
+		if err != nil {
+			return fmt.Errorf("error waiting for snapshot creation goroutine: %w", err)
+		}
+		return nil
+	}
 }
 
 // createSnapshotsWithProgress creates snapshots either sequentially (one at a time) or in batch
@@ -936,7 +914,7 @@ func (s *httpServer) createSnapshotsWithProgress(
 }
 
 // handleLastOperation handles GET /lastOperation requests
-func (s *httpServer) handleLastOperation(w http.ResponseWriter, r *http.Request) {
+func (s *httpServer) handleLastOperation(w http.ResponseWriter, _ *http.Request) {
 	operation := s.scaler.GetLastOperation()
 	if operation == nil {
 		http.Error(w, "No operation found", http.StatusNotFound)
