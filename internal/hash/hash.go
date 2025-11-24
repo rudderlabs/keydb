@@ -183,60 +183,7 @@ type Movement struct {
 	DestinationNodeID int64
 }
 
-func GetHashRangeMovements(
-	oldClusterSize,
-	newClusterSize,
-	totalHashRanges int64,
-) (
-	map[int64][]int64,
-	map[int64][]int64,
-) {
-	if oldClusterSize == 0 {
-		panic("oldClusterSize must be greater than 0")
-	}
-	if newClusterSize == 0 {
-		panic("newClusterSize must be greater than 0")
-	}
-	if totalHashRanges < oldClusterSize {
-		panic("totalHashRanges must be greater than or equal to oldClusterSize")
-	}
-	if totalHashRanges < newClusterSize {
-		panic("totalHashRanges must be greater than or equal to newClusterSize")
-	}
-
-	oldClusterHasher := New(oldClusterSize, totalHashRanges)
-	newClusterHasher := New(newClusterSize, totalHashRanges)
-
-	sourceNodeMovements := make(map[int64][]int64)
-	destinationNodeMovements := make(map[int64][]int64)
-
-	for hashRange := int64(0); hashRange < totalHashRanges; hashRange++ {
-		oldMember := oldClusterHasher.consistent.GetPartitionOwner(int(hashRange))
-		oldNodeID, err := strconv.ParseInt(oldMember.String(), 10, 32)
-		if err != nil {
-			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
-		}
-
-		newMember := newClusterHasher.consistent.GetPartitionOwner(int(hashRange))
-		newNodeID, err := strconv.ParseInt(newMember.String(), 10, 32)
-		if err != nil {
-			panic(fmt.Errorf("implementation error: members must be unsigned integers: %w", err))
-		}
-
-		if oldNodeID != newNodeID {
-			sourceNodeMovements[oldNodeID] = append(sourceNodeMovements[oldNodeID], hashRange)
-			destinationNodeMovements[newNodeID] = append(destinationNodeMovements[newNodeID], hashRange)
-		}
-	}
-
-	return sourceNodeMovements, destinationNodeMovements
-}
-
-func GetHashRangeMovementsByRange(
-	oldClusterSize,
-	newClusterSize,
-	totalHashRanges int64,
-) map[int64]Movement {
+func GetHashRangeMovementsByRange(oldClusterSize, newClusterSize, totalHashRanges int64) map[int64]Movement {
 	if oldClusterSize == 0 {
 		panic("oldClusterSize must be greater than 0")
 	}

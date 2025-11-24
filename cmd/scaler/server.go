@@ -375,10 +375,14 @@ func (s *httpServer) handleScaleUp(
 ) error {
 	oldClusterSize := int64(len(oldAddresses))
 	newClusterSize := int64(len(newAddresses))
+	movements := hash.GetHashRangeMovementsByRange(
+		oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
+	)
 
 	log := s.logger.Withn(
 		logger.NewStringField("oldAddresses", strings.Join(oldAddresses, ",")),
 		logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
+		logger.NewIntField("totalMovements", int64(len(movements))),
 	)
 	log.Infon("Starting scale up")
 
@@ -398,21 +402,11 @@ func (s *httpServer) handleScaleUp(
 
 		log.Infon("Cluster data updated")
 
-		// Step 2: Determine which hash ranges need to be moved and get ready-to-use maps
-		movements := hash.GetHashRangeMovementsByRange(
-			oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
-		)
-
-		// Step 3: Create and load snapshots for hash ranges that will be moved
-		// Use pipelined approach: start loading snapshots as they are created
+		// Step 2: Create and load snapshots for hash ranges that will be moved
 		if skipCreateSnapshots {
-			log.Infon("Skipping snapshots creation, only loading",
-				logger.NewIntField("totalMovements", int64(len(movements))),
-			)
+			log.Infon("Skipping snapshots creation, loading only")
 		} else {
-			log.Infon("Scale up to start creating and loading snapshots",
-				logger.NewIntField("totalMovements", int64(len(movements))),
-			)
+			log.Infon("Scale up to start creating and loading snapshots")
 		}
 
 		err := s.processHashRangeMovements(
@@ -436,10 +430,14 @@ func (s *httpServer) handleScaleDown(
 ) error {
 	oldClusterSize := int64(len(oldAddresses))
 	newClusterSize := int64(len(newAddresses))
+	movements := hash.GetHashRangeMovementsByRange(
+		oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
+	)
 
 	log := s.logger.Withn(
 		logger.NewStringField("oldAddresses", strings.Join(oldAddresses, ",")),
 		logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
+		logger.NewIntField("totalMovements", int64(len(movements))),
 	)
 	log.Infon("Starting scale down")
 
@@ -451,21 +449,12 @@ func (s *httpServer) handleScaleDown(
 	}()
 
 	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleDown, oldAddresses, newAddresses, func() error {
-		// Step 1: Determine which hash ranges need to be moved
-		movements := hash.GetHashRangeMovementsByRange(
-			oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
-		)
-
-		// Step 2: Create and load snapshots for hash ranges that will be moved
+		// Step 1: Create and load snapshots for hash ranges that will be moved
 		// Use pipelined approach: start loading snapshots as they are created
 		if skipCreateSnapshots {
-			log.Infon("Skipping snapshots creation, only loading",
-				logger.NewIntField("totalMovements", int64(len(movements))),
-			)
+			log.Infon("Skipping snapshots creation, loading only")
 		} else {
-			log.Infon("Scale down to start creating and loading snapshots",
-				logger.NewIntField("totalMovements", int64(len(movements))),
-			)
+			log.Infon("Scale down to start creating and loading snapshots")
 		}
 
 		err := s.processHashRangeMovements(
@@ -476,7 +465,7 @@ func (s *httpServer) handleScaleDown(
 			return err
 		}
 
-		// Step 3: Update cluster data with new addresses
+		// Step 2: Update cluster data with new addresses
 		if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
 			log.Errorn("Cannot update cluster data", obskit.Error(err))
 			return fmt.Errorf("updating cluster data: %w", err)
