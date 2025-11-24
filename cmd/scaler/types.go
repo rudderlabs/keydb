@@ -63,10 +63,10 @@ type AutoScaleRequest struct {
 	NewNodesAddresses []string `json:"new_nodes_addresses"`
 	// FullSync indicates whether to perform a full synchronization during snapshot creation.
 	// When true, all data will be included in snapshots regardless of incremental changes.
-	FullSync                           bool  `json:"full_sync,omitempty"`
-	SkipCreateSnapshots                bool  `json:"skip_create_snapshots,omitempty"`
-	LoadSnapshotsMaxConcurrency        int64 `json:"load_snapshots_max_concurrency,omitempty"`
-	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
+	FullSync                           bool `json:"full_sync,omitempty"`
+	SkipCreateSnapshots                bool `json:"skip_create_snapshots,omitempty"`
+	LoadSnapshotsMaxConcurrency        int  `json:"load_snapshots_max_concurrency,omitempty"`
+	DisableCreateSnapshotsSequentially bool `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 
 // HashRangeMovementsRequest represents a request to preview hash range movements
@@ -77,7 +77,7 @@ type HashRangeMovementsRequest struct {
 	Upload                             bool  `json:"upload,omitempty"`
 	Download                           bool  `json:"download,omitempty"`
 	FullSync                           bool  `json:"full_sync,omitempty"`
-	LoadSnapshotsMaxConcurrency        int64 `json:"load_snapshots_max_concurrency,omitempty"`
+	LoadSnapshotsMaxConcurrency        int   `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 
