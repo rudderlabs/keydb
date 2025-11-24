@@ -760,10 +760,51 @@ func (s *httpServer) processHashRangeMovements(
 		destinationNodeID int64
 	}
 	var (
-		createdCount, loadedCount atomic.Int64
-		creationDone              = make(chan error, 1)
-		snapshotsQueue            = make(chan snapshotCreated, len(movements))
+		createdCount, loadedCount  atomic.Int64
+		loadingDone                = make(chan error, 1)
+		snapshotsQueue             = make(chan snapshotCreated, len(movements))
+		sharedCtx, sharedCtxCancel = context.WithCancel(ctx)
+		creatingGroup, creatingCtx = kitsync.NewEagerGroup(sharedCtx, createSnapshotsMaxConcurrency)
 	)
+	defer sharedCtxCancel()
+
+	// Start goroutine to load snapshots in parallel
+	go func() {
+		defer close(loadingDone)
+		loadingGroup, loadingCtx := kitsync.NewEagerGroup(sharedCtx, loadSnapshotsMaxConcurrency)
+		for snapshot := range snapshotsQueue {
+			loadingGroup.Go(func() error {
+				log.Infon("Received snapshot queued for loading",
+					logger.NewIntField("hashRange", snapshot.hashRange),
+					logger.NewIntField("sourceNodeId", snapshot.sourceNodeID),
+					logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
+				)
+
+				loadStart := time.Now()
+				err := s.scaler.LoadSnapshots(
+					loadingCtx, snapshot.destinationNodeID, int64(loadSnapshotsMaxConcurrency), snapshot.hashRange,
+				)
+				if err != nil {
+					sharedCtxCancel()
+					return fmt.Errorf("loading snapshot for hash range %d to node %d: %w",
+						snapshot.hashRange, snapshot.destinationNodeID, err,
+					)
+				}
+
+				log.Infon("Snapshot loaded",
+					logger.NewIntField("hashRange", snapshot.hashRange),
+					logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
+					logger.NewStringField("duration", time.Since(loadStart).String()),
+				)
+
+				// Update progress
+				currentSnapshotsLoaded.Gauge(float64(loadedCount.Add(1)))
+
+				return nil
+			})
+		}
+		loadingDone <- loadingGroup.Wait()
+	}()
 
 	// Start goroutine to create snapshots (or just queue them if skipCreateSnapshots is true)
 	if skipCreateSnapshots {
@@ -779,14 +820,13 @@ func (s *httpServer) processHashRangeMovements(
 			}:
 			}
 		}
-		close(snapshotsQueue)
 	} else {
-		group, gCtx := kitsync.NewEagerGroup(ctx, createSnapshotsMaxConcurrency)
 		for hashRange, movement := range movements {
-			group.Go(func() error {
+			creatingGroup.Go(func() error {
 				createStart := time.Now()
-				err := s.scaler.CreateSnapshots(gCtx, movement.SourceNodeID, fullSync, hashRange)
+				err := s.scaler.CreateSnapshots(creatingCtx, movement.SourceNodeID, fullSync, hashRange)
 				if err != nil {
+					sharedCtxCancel()
 					return fmt.Errorf("creating snapshot for hash range %d from node %d: %w",
 						hashRange, movement.SourceNodeID, err,
 					)
@@ -804,8 +844,8 @@ func (s *httpServer) processHashRangeMovements(
 
 				// Send to queue for loading
 				select {
-				case <-gCtx.Done():
-					return gCtx.Err()
+				case <-creatingCtx.Done():
+					return creatingCtx.Err()
 				case snapshotsQueue <- snapshotCreated{
 					hashRange:         hashRange,
 					sourceNodeID:      movement.SourceNodeID,
@@ -820,60 +860,24 @@ func (s *httpServer) processHashRangeMovements(
 				return nil
 			})
 		}
-		go func() {
-			creationDone <- group.Wait()
-			close(snapshotsQueue)
-			close(creationDone)
-		}()
 	}
 
-	log.Infon("Starting loading group")
-
-	// Start goroutines to load snapshots
-	group, gCtx := kitsync.NewEagerGroup(ctx, loadSnapshotsMaxConcurrency)
-	for snapshot := range snapshotsQueue {
-		group.Go(func() error {
-			log.Infon("Received snapshot queued for loading",
-				logger.NewIntField("hashRange", snapshot.hashRange),
-				logger.NewIntField("sourceNodeId", snapshot.sourceNodeID),
-				logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
-			)
-
-			loadStart := time.Now()
-			err := s.scaler.LoadSnapshots(
-				gCtx, snapshot.destinationNodeID, int64(loadSnapshotsMaxConcurrency), snapshot.hashRange,
-			)
-			if err != nil {
-				return fmt.Errorf("loading snapshot for hash range %d to node %d: %w",
-					snapshot.hashRange, snapshot.destinationNodeID, err,
-				)
-			}
-
-			log.Infon("Snapshot loaded",
-				logger.NewIntField("hashRange", snapshot.hashRange),
-				logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
-				logger.NewStringField("duration", time.Since(loadStart).String()),
-			)
-
-			// Update progress
-			currentSnapshotsLoaded.Gauge(float64(loadedCount.Add(1)))
-
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return fmt.Errorf("error waiting for snapshot loading goroutines: %w", err)
-	}
+	creatingErr := creatingGroup.Wait()
+	close(snapshotsQueue)
 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case err := <-creationDone:
+	case err := <-loadingDone:
 		if err != nil {
-			return fmt.Errorf("error waiting for snapshot creation goroutine: %w", err)
+			return fmt.Errorf("error waiting for snapshot loading goroutine: %w", err)
 		}
-		return nil
 	}
+
+	if creatingErr != nil {
+		return fmt.Errorf("error waiting for snapshot creation goroutine: %w", creatingErr)
+	}
+	return nil
 }
 
 // createSnapshotsWithProgress creates snapshots either sequentially (one at a time) or in batch
