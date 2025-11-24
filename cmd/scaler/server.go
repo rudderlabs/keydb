@@ -801,9 +801,6 @@ func (s *httpServer) processHashRangeMovements(
 		createGroup, createCtx := errgroup.WithContext(gCtx)
 
 		for hashRange, movement := range movements {
-			hashRange := hashRange
-			movement := movement
-
 			createGroup.Go(func() error {
 				// Acquire semaphore
 				select {
@@ -854,8 +851,6 @@ func (s *httpServer) processHashRangeMovements(
 
 	// Start goroutines to load snapshots
 	for snapshot := range snapshotQueue {
-		snapshot := snapshot
-
 		group.Go(func() error {
 			// Acquire semaphore
 			select {
