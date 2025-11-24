@@ -288,7 +288,13 @@ func (s *Service) getCurrentRanges() map[int64]struct{} {
 func (s *Service) initCaches(
 	ctx context.Context, download bool, maxConcurrency int64, selectedHashRanges ...int64,
 ) error {
-	currentRanges := s.getCurrentRanges() // gets the hash ranges for this node
+	var currentRanges map[int64]struct{}
+	if degradedClusterSize, isDegraded := s.isDegraded(); isDegraded {
+		h := hash.New(degradedClusterSize, s.config.TotalHashRanges)
+		currentRanges = h.GetNodeHashRanges(s.config.NodeID)
+	} else {
+		currentRanges = s.getCurrentRanges() // gets the hash ranges for this node
+	}
 
 	// Remove caches and key maps for ranges this node no longer handles
 	for r := range s.metrics.getKeysCounters {
@@ -515,7 +521,7 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.isDegraded() {
+	if _, isDegraded := s.isDegraded(); isDegraded {
 		s.metrics.errScalingCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_SCALING
 		return response, nil
@@ -567,7 +573,7 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.isDegraded() {
+	if _, isDegraded := s.isDegraded(); isDegraded {
 		s.metrics.errScalingCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_SCALING
 		return resp, nil
@@ -925,7 +931,7 @@ func (s *Service) DegradedNodesChanged() {
 	defer s.mu.Unlock()
 
 	// If this node is degraded, skip hasher reinitialization since it won't serve traffic
-	if s.isDegraded() {
+	if _, isDegraded := s.isDegraded(); isDegraded {
 		s.logger.Infon("Node is degraded, skipping hasher reinitialization")
 		return
 	}
@@ -942,22 +948,22 @@ func (s *Service) DegradedNodesChanged() {
 }
 
 // isDegraded checks if the current node is in degraded mode
-func (s *Service) isDegraded() bool {
+func (s *Service) isDegraded() (int64, bool) {
 	if s.config.DegradedNodes == nil {
-		return false
+		return 0, false
 	}
 	degradedNodes := s.config.DegradedNodes()
 	if len(degradedNodes) == 0 {
-		return false
+		return 0, false
 	}
 	if int(s.config.NodeID) >= len(degradedNodes) {
 		s.logger.Warnn("Node ID out of range for degraded nodes list",
 			logger.NewIntField("nodeId", s.config.NodeID),
 			logger.NewIntField("degradedNodes", int64(len(degradedNodes))),
 		)
-		return false
+		return 0, false
 	}
-	return degradedNodes[s.config.NodeID]
+	return int64(len(degradedNodes)), degradedNodes[s.config.NodeID]
 }
 
 // getNonDegradedAddresses returns the list of node addresses excluding degraded nodes
