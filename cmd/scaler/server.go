@@ -827,6 +827,8 @@ func (s *httpServer) processHashRangeMovements(
 		}()
 	}
 
+	log.Infon("Starting loading group")
+
 	// Start goroutines to load snapshots
 	group, gCtx := kitsync.NewEagerGroup(ctx, loadSnapshotsMaxConcurrency)
 	for snapshot := range snapshotsQueue {
