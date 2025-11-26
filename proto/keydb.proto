@@ -22,9 +22,6 @@ service NodeService {
 
   // CreateSnapshots forces the creation of snapshots for all hash ranges
   rpc CreateSnapshots(CreateSnapshotsRequest) returns (CreateSnapshotsResponse) {}
-
-  // Scale changes the number of nodes in the cluster
-  rpc Scale(ScaleRequest) returns (ScaleResponse) {}
 }
 
 // NodeService message definitions
@@ -105,19 +102,4 @@ message CreateSnapshotsResponse {
   bool success = 1;
   string error_message = 2; // Error message if the operation failed
   int64 node_id = 3; // ID of the node that processed the request
-}
-
-// ScaleRequest changes the number of nodes in the cluster
-message ScaleRequest {
-  // When the cluster_size changes the scaler can use this field to tell all nodes which addresses are to be broadcast
-  // to clients
-  repeated string nodesAddresses = 1;
-}
-
-// ScaleResponse contains the result of the scaling operation
-message ScaleResponse {
-  bool success = 1;
-  int64 previous_cluster_size = 2;
-  int64 new_cluster_size = 3;
-  string error_message = 4; // Error message if the operation failed
 }

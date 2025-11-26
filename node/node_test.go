@@ -29,6 +29,7 @@ import (
 const (
 	testTTL                 = 5 * time.Minute
 	defaultBackupFolderName = "default"
+	nodeAddressesConfKey    = "nodeAddresses"
 )
 
 func TestSimple(t *testing.T) {
@@ -258,11 +259,10 @@ func TestScaleUpAndDown(t *testing.T) {
 			NodeID:           1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-			Addresses:        []string{node0Address},
-		}, node1Conf)
+		}, node0Conf, node1Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
-		require.NoError(t, op.Scale(ctx, []int64{0, 1}))
+		// Trigger hasher reinitialization based on updated addresses
 		node0.DegradedNodesChanged()
 		node1.DegradedNodesChanged()
 
@@ -289,7 +289,9 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
 		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, node0.hasher.GetNodeHashRangesList(0)...))
 		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.Scale(ctx, []int64{0}))
+		// Update addresses on all nodes (simulating DevOps config change for scale down)
+		node0Conf.Set(nodeAddressesConfKey, node0Address)
+		// Trigger hasher reinitialization based on updated addresses
 		node0.DegradedNodesChanged()
 
 		respNode0, err = op.GetNodeInfo(ctx, 0)
@@ -302,13 +304,10 @@ func TestScaleUpAndDown(t *testing.T) {
 		node1.Close()
 	}
 
-	t.Run("badger", func(t *testing.T) {
-		run(t, func() *config.Config {
-			conf := config.New()
-			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-			conf.Set("BadgerDB.Dedup.Compress", false)
-			return conf
-		})
+	run(t, func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		return conf
 	})
 }
 
@@ -358,11 +357,11 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			NodeID:           1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-			Addresses:        []string{node0Address},
-		}, node1Conf)
+			Addresses:        func() []string { return []string{node0Address} },
+		}, node0Conf, node1Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
-		require.NoError(t, op.Scale(ctx, []int64{0, 1}))
+		// Trigger hasher reinitialization based on updated addresses
 		node0.DegradedNodesChanged()
 		node1.DegradedNodesChanged()
 
@@ -379,11 +378,10 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			NodeID:           2,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-			Addresses:        []string{node0Address, node1Address},
-		}, node2Conf)
+		}, node0Conf, node1Conf, node2Conf)
 		require.NoError(t, op.UpdateClusterData(node0Address, node1Address, node2Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 2, 0, node2.hasher.GetNodeHashRangesList(2)...))
-		require.NoError(t, op.Scale(ctx, []int64{0, 1, 2}))
+		// Trigger hasher reinitialization based on updated addresses
 		node0.DegradedNodesChanged()
 		node1.DegradedNodesChanged()
 		node2.DegradedNodesChanged()
@@ -438,7 +436,9 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			require.NoError(t, op.LoadSnapshots(ctx, destinationNodeID, totalHashRanges, hashRanges...))
 		}
 		require.NoError(t, op.UpdateClusterData(node0Address))
-		require.NoError(t, op.Scale(ctx, []int64{0}))
+		// Update addresses on all nodes (simulating DevOps config change for scale down)
+		node0Conf.Set(nodeAddressesConfKey, node0Address)
+		// Trigger hasher reinitialization based on updated addresses
 		node0.DegradedNodesChanged()
 
 		exists, err = c.Get(ctx, allKeys)
@@ -664,76 +664,6 @@ func TestSelectedSnapshots(t *testing.T) {
 	})
 }
 
-func getService(
-	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf *config.Config,
-) (*Service, string) {
-	t.Helper()
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-	address := "localhost:" + strconv.Itoa(freePort)
-	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
-	nodeConfig.BackupFolderName = defaultBackupFolderName
-
-	log := logger.NOP
-	if testing.Verbose() {
-		log = logger.NewLogger()
-	}
-	conf.Set("BadgerDB.Dedup.NopLogger", true)
-	service, err := NewService(ctx, nodeConfig, cs, conf, stats.NOP, log)
-	require.NoError(t, err)
-
-	// Create a gRPC server
-	server := grpc.NewServer()
-	pb.RegisterNodeServiceServer(server, service)
-
-	lis, err := net.Listen("tcp", address)
-	require.NoError(t, err)
-
-	// Start the server
-	go func() {
-		require.NoError(t, server.Serve(lis))
-	}()
-	t.Cleanup(func() {
-		server.GracefulStop()
-		_ = lis.Close()
-	})
-
-	return service, address
-}
-
-func getClient(t testing.TB, totalHashRanges int64, addresses ...string) *client.Client {
-	t.Helper()
-
-	clientConfig := client.Config{
-		Addresses:       addresses,
-		TotalHashRanges: totalHashRanges,
-		RetryPolicy:     client.RetryPolicy{Disabled: true},
-	}
-
-	c, err := client.NewClient(clientConfig, logger.NOP)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-
-	return c
-}
-
-func getScaler(t testing.TB, totalHashRanges int64, addresses ...string) *scaler.Client {
-	t.Helper()
-
-	opConfig := scaler.Config{
-		Addresses:       addresses,
-		TotalHashRanges: totalHashRanges,
-		RetryPolicy:     scaler.RetryPolicy{Disabled: true},
-	}
-
-	op, err := scaler.NewClient(opConfig, logger.NOP)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = op.Close() })
-
-	return op
-}
-
 func TestListSnapshotsSorting(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
@@ -866,11 +796,10 @@ func TestDegradedMode(t *testing.T) {
 		node1, node1Address := getService(ctx, t, cloudStorage, Config{
 			NodeID:          1,
 			TotalHashRanges: totalHashRanges,
-			Addresses:       []string{node0Address},
 			DegradedNodes: func() []bool {
 				return degradedNodes
 			},
-		}, node1Conf)
+		}, node0Conf, node1Conf)
 
 		c := getClient(t, totalHashRanges, node0Address, node1Address)
 
@@ -952,4 +881,93 @@ func TestDegradedMode(t *testing.T) {
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
 		return conf
 	})
+}
+
+func getService(
+	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf ...*config.Config,
+) (*Service, string) {
+	t.Helper()
+	if len(conf) < 1 {
+		t.Fatal("no config provided")
+	}
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	address := "localhost:" + strconv.Itoa(freePort)
+
+	// Simulating reloadable addresses for all configs
+	nodeAddresses := conf[0].GetReloadableStringVar("", nodeAddressesConfKey)
+	var addrList []string
+	if rawAddresses := strings.TrimSpace(nodeAddresses.Load()); rawAddresses != "" {
+		addrList = append(strings.Split(rawAddresses, ","), address)
+	} else {
+		addrList = []string{address}
+	}
+	for _, c := range conf {
+		c.Set(nodeAddressesConfKey, strings.Join(addrList, ","))
+	}
+
+	// Set the Addresses function to return our modifiable slice
+	nodeConfig.Addresses = func() []string {
+		return strings.Split(nodeAddresses.Load(), ",")
+	}
+	nodeConfig.BackupFolderName = defaultBackupFolderName
+
+	log := logger.NOP
+	if testing.Verbose() {
+		log = logger.NewLogger()
+	}
+	conf[nodeConfig.NodeID].Set("BadgerDB.Dedup.NopLogger", true)
+	service, err := NewService(ctx, nodeConfig, cs, conf[nodeConfig.NodeID], stats.NOP, log)
+	require.NoError(t, err)
+
+	// Create a gRPC server
+	server := grpc.NewServer()
+	pb.RegisterNodeServiceServer(server, service)
+
+	lis, err := net.Listen("tcp", address)
+	require.NoError(t, err)
+
+	// Start the server
+	go func() {
+		require.NoError(t, server.Serve(lis))
+	}()
+	t.Cleanup(func() {
+		server.GracefulStop()
+		_ = lis.Close()
+	})
+
+	return service, address
+}
+
+func getClient(t testing.TB, totalHashRanges int64, addresses ...string) *client.Client {
+	t.Helper()
+
+	clientConfig := client.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+		RetryPolicy:     client.RetryPolicy{Disabled: true},
+	}
+
+	c, err := client.NewClient(clientConfig, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	return c
+}
+
+func getScaler(t testing.TB, totalHashRanges int64, addresses ...string) *scaler.Client {
+	t.Helper()
+
+	opConfig := scaler.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+		RetryPolicy:     scaler.RetryPolicy{Disabled: true},
+	}
+
+	op, err := scaler.NewClient(opConfig, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = op.Close() })
+
+	return op
 }

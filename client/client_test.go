@@ -233,10 +233,6 @@ func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *proto.GetN
 	return &proto.GetNodeInfoResponse{}, nil
 }
 
-func (m *mockNodeServiceServer) Scale(ctx context.Context, req *proto.ScaleRequest) (*proto.ScaleResponse, error) {
-	return &proto.ScaleResponse{Success: true}, nil
-}
-
 func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.CreateSnapshotsRequest) (
 	*proto.CreateSnapshotsResponse, error,
 ) {

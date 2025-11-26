@@ -19,10 +19,12 @@ type Config struct {
 	// GarbageCollectionInterval defines the duration between automatic GC operation per cache
 	GarbageCollectionInterval time.Duration
 
-	// Addresses is a list of node addresses that this node will advertise to clients
-	Addresses []string
+	// Addresses returns the list of node addresses that this node will advertise to clients.
+	// The function allows addresses to be updated dynamically via configuration.
+	Addresses func() []string
 
-	// DegradedNodes is a list of nodes that are considered degraded and should not be used for reads and writes.
+	// DegradedNodes returns a list indicating which nodes are considered degraded
+	// and should not be used for reads and writes.
 	DegradedNodes func() []bool
 
 	// logTableStructureDuration defines the duration for which the table structure is logged
@@ -33,7 +35,11 @@ type Config struct {
 }
 
 func (c *Config) getClusterSize() int64 {
-	l := int64(len(c.Addresses))
+	var addresses []string
+	if c.Addresses != nil {
+		addresses = c.Addresses()
+	}
+	l := int64(len(addresses))
 	if c.DegradedNodes == nil {
 		return l
 	}
