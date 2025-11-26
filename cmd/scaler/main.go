@@ -39,10 +39,14 @@ func main() {
 		statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
 	}
 	stat := stats.NewStats(conf, logFactory, svcMetric.NewManager(), statsOptions...)
+	if err := stat.Start(ctx, stats.DefaultGoRoutineFactory); err != nil {
+		log.Errorn("Failed to start Stats", obskit.Error(err))
+		os.Exit(1)
+	}
 	defer stat.Stop()
 
 	if err := run(ctx, cancel, conf, stat, log); err != nil {
-		log.Fataln("failed to run", obskit.Error(err))
+		log.Errorn("Failed to run", obskit.Error(err))
 		os.Exit(1)
 	}
 }
