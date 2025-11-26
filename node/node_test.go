@@ -408,7 +408,24 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		// then it will be node2 and the clusterSize will be 3
 		// WARNING: when scaling down you can only remove nodes from the right i.e. if you have 2 nodes you can't remove
 		// node0, you have to remove node1
-		sourceNodeMovements, destinationNodeMovements := hash.GetHashRangeMovements(3, 1, totalHashRanges)
+		movements := hash.GetHashRangeMovementsByRange(3, 1, totalHashRanges)
+
+		// Group movements by source node for snapshot creation
+		sourceNodeMovements := make(map[int64][]int64)
+		for hashRange, movement := range movements {
+			sourceNodeMovements[movement.SourceNodeID] = append(
+				sourceNodeMovements[movement.SourceNodeID], hashRange,
+			)
+		}
+
+		// Group movements by destination node for snapshot loading
+		destinationNodeMovements := make(map[int64][]int64)
+		for hashRange, movement := range movements {
+			destinationNodeMovements[movement.DestinationNodeID] = append(
+				destinationNodeMovements[movement.DestinationNodeID], hashRange,
+			)
+		}
+
 		for sourceNodeID, hashRanges := range sourceNodeMovements {
 			require.NoError(t, op.CreateSnapshots(ctx, sourceNodeID, false, hashRanges...))
 		}
