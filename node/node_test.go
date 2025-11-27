@@ -89,7 +89,7 @@ func TestSimple(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
@@ -180,7 +180,7 @@ func TestLoadSnapshotsMaxConcurrency(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address))
 		maxConcurrency := int64(2)
 		require.NoError(t, op.LoadSnapshots(ctx, 0, maxConcurrency))
 
@@ -260,7 +260,7 @@ func TestScaleUpAndDown(t *testing.T) {
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf, node1Conf)
-		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		// Trigger hasher reinitialization based on updated addresses
 		node0.DegradedNodesChanged()
@@ -288,7 +288,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		require.NoError(t, op.CreateSnapshots(ctx, 0, false))
 		require.NoError(t, op.CreateSnapshots(ctx, 1, false))
 		require.NoError(t, op.LoadSnapshots(ctx, 0, 0, node0.hasher.GetNodeHashRangesList(0)...))
-		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address))
 		// Update addresses on all nodes (simulating DevOps config change for scale down)
 		node0Conf.Set(nodeAddressesConfKey, node0Address)
 		// Trigger hasher reinitialization based on updated addresses
@@ -359,7 +359,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 			Addresses:        func() []string { return []string{node0Address} },
 		}, node0Conf, node1Conf)
-		require.NoError(t, op.UpdateClusterData(node0Address, node1Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address, node1Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 1, 0, node1.hasher.GetNodeHashRangesList(1)...))
 		// Trigger hasher reinitialization based on updated addresses
 		node0.DegradedNodesChanged()
@@ -379,7 +379,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf, node1Conf, node2Conf)
-		require.NoError(t, op.UpdateClusterData(node0Address, node1Address, node2Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address, node1Address, node2Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 2, 0, node2.hasher.GetNodeHashRangesList(2)...))
 		// Trigger hasher reinitialization based on updated addresses
 		node0.DegradedNodesChanged()
@@ -435,7 +435,7 @@ func TestGetPutAddressBroadcast(t *testing.T) {
 		for destinationNodeID, hashRanges := range destinationNodeMovements {
 			require.NoError(t, op.LoadSnapshots(ctx, destinationNodeID, totalHashRanges, hashRanges...))
 		}
-		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address))
 		// Update addresses on all nodes (simulating DevOps config change for scale down)
 		node0Conf.Set(nodeAddressesConfKey, node0Address)
 		// Trigger hasher reinitialization based on updated addresses
@@ -529,7 +529,7 @@ func TestIncrementalSnapshots(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})
@@ -634,7 +634,7 @@ func TestSelectedSnapshots(t *testing.T) {
 			SnapshotInterval: 60 * time.Second,
 		}, node0Conf)
 		c = getClient(t, totalHashRanges, node0Address)
-		require.NoError(t, op.UpdateClusterData(node0Address))
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address))
 		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
 
 		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4", "key5"})

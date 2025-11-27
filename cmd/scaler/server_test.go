@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,6 +40,7 @@ import (
 const (
 	testTTL                 = "5m" // 5 minutes
 	defaultBackupFolderName = "default"
+	nodeAddressesConfKey    = "nodeAddresses"
 )
 
 func TestScaleUpAndDown(t *testing.T) {
@@ -100,8 +102,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node0Address},
-	}, node1Conf)
+	}, node0Conf, node1Conf)
 
 	// Test scaling procedure
 	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{
@@ -111,8 +112,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		NodeID:     1,
 		HashRanges: hash.New(2, totalHashRanges).GetNodeHashRangesList(1),
 	}, true)
-	_ = s.Do("/scale", ScaleRequest{NodeIDs: []int64{0, 1}}, true)
-	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	// Trigger hasher reinitialization based on updated addresses
 	node0.DegradedNodesChanged()
 	node1.DegradedNodesChanged()
 
@@ -163,10 +163,10 @@ func TestScaleUpAndDown(t *testing.T) {
 		HashRanges: hash.New(1, totalHashRanges).GetNodeHashRangesList(0),
 	}, true)
 	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{Addresses: []string{node0Address}}, true)
-	_ = s.Do("/scale", ScaleRequest{NodeIDs: []int64{0}}, true)
-	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	// Update addresses on node0 (simulating DevOps config change for scale down)
+	node0Conf.Set(nodeAddressesConfKey, node0Address)
+	// Trigger hasher reinitialization based on updated addresses
 	node0.DegradedNodesChanged()
-	node1.DegradedNodesChanged()
 
 	// Get node info again
 	body = s.Do("/info", InfoRequest{
@@ -189,6 +189,7 @@ func TestScaleUpAndDown(t *testing.T) {
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true,"key4":false}`, body)
 
+	s.Close()
 	cancel0()
 	node0.Close()
 }
@@ -246,15 +247,14 @@ func TestAutoScale(t *testing.T) {
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node0Address},
-	}, node1Conf)
+	}, node0Conf, node1Conf)
 
 	// Test Scale Up using autoScale
 	_ = s.Do("/autoScale", AutoScaleRequest{
 		OldNodesAddresses: []string{node0Address},
 		NewNodesAddresses: []string{node0Address, node1Address},
 	}, true)
-	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	// Trigger hasher reinitialization based on updated addresses
 	node0.DegradedNodesChanged()
 	node1.DegradedNodesChanged()
 
@@ -310,7 +310,9 @@ func TestAutoScale(t *testing.T) {
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
 	}, true)
-	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	// Update addresses on node0 (simulating DevOps config change for scale down)
+	node0Conf.Set(nodeAddressesConfKey, node0Address)
+	// Trigger hasher reinitialization based on updated addresses
 	node0.DegradedNodesChanged()
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
@@ -335,6 +337,7 @@ func TestAutoScale(t *testing.T) {
 		body,
 	)
 
+	s.Close()
 	cancel()
 	node0.Close()
 	node1.Close()
@@ -370,11 +373,11 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	// Create the node service
 	totalHashRanges := int64(3)
 	node0Conf := newConf()
-	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+	node0, node0Address := getServiceWithProxy(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf, withProxy(proxy))
+	}, proxy, node0Conf)
 	go proxy.Start(t) // Starting the proxy after we get the service to populate RemoteAddr
 
 	// Start the Scaler HTTP Server
@@ -404,8 +407,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node0Address},
-	}, node1Conf)
+	}, node0Conf, node1Conf)
 
 	// Test Scale Up using autoScale
 	t.Log("Stopping proxy to simulate transient failure...")
@@ -472,7 +474,9 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		OldNodesAddresses: []string{node0Address, node1Address},
 		NewNodesAddresses: []string{node0Address},
 	}, true)
-	// After Scale, trigger hasher reinitialization based on current degraded nodes
+	// Update addresses on node0 to reflect the scale down (simulating DevOps config change)
+	node0Conf.Set(nodeAddressesConfKey, node0Address)
+	// Trigger hasher reinitialization based on updated addresses
 	node0.DegradedNodesChanged()
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
@@ -496,6 +500,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		body,
 	)
 
+	s.Close()
 	cancel()
 	node0.Close()
 	node1.Close()
@@ -519,7 +524,6 @@ func TestAutoScaleTransientError(t *testing.T) {
 	t.Log("Scaling up from 1 node to 2 nodes...")
 	node0.createSnapshotsReturnError.Store(true)
 	node1.loadSnapshotsReturnError.Store(true)
-	node0.scaleReturnError.Store(true)
 	done := make(chan struct{})
 	go func() {
 		close(done)
@@ -542,12 +546,6 @@ func TestAutoScaleTransientError(t *testing.T) {
 		return node1.loadSnapshotsCalls.Load() >= waitForRetries // wait for at least 10 retries
 	}, 10*time.Second, time.Millisecond, "Calls %d", node1.loadSnapshotsCalls.Load())
 	node1.loadSnapshotsReturnError.Store(false)
-
-	t.Logf("Waiting for at least %d retries to be done on Scale", waitForRetries)
-	require.Eventuallyf(t, func() bool {
-		return node0.scaleCalls.Load() >= waitForRetries // wait for at least 10 retries
-	}, 10*time.Second, time.Millisecond, "Calls %d", node0.scaleCalls.Load())
-	node0.scaleReturnError.Store(false)
 
 	<-done
 
@@ -591,6 +589,7 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
+	t.Cleanup(node0.Close)
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address)
@@ -643,7 +642,6 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 	}
 
 	cancel()
-	node0.Close()
 }
 
 func TestAutoHealing(t *testing.T) {
@@ -674,6 +672,7 @@ func TestAutoHealing(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
+	t.Cleanup(node0.Close)
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -712,7 +711,6 @@ func TestAutoHealing(t *testing.T) {
 	require.JSONEq(t, `{"heal1":true,"heal2":true,"heal3":true,"heal4":false}`, body)
 
 	cancel()
-	node0.Close()
 }
 
 func TestHashRangeMovements(t *testing.T) {
@@ -743,6 +741,7 @@ func TestHashRangeMovements(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
+	t.Cleanup(node0.Close)
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address)
@@ -973,8 +972,7 @@ func TestHashRangeMovements(t *testing.T) {
 			NodeID:           1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-			Addresses:        []string{node0Address},
-		}, newNodeConf)
+		}, node0Conf, newNodeConf)
 
 		s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address, newNodeAddress)
 
@@ -1028,7 +1026,6 @@ func TestHashRangeMovements(t *testing.T) {
 	})
 
 	cancel()
-	node0.Close()
 }
 
 func TestHandleLastOperation(t *testing.T) {
@@ -1090,6 +1087,7 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
+	t.Cleanup(node0.Close)
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -1167,7 +1165,6 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
 
 	cancel()
-	node0.Close()
 }
 
 func TestScaleDownFailureAndRollback(t *testing.T) {
@@ -1200,12 +1197,11 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 	}, node0Conf)
 
 	node1Conf := newConf()
-	_, node1Address := getService(ctx, t, cloudStorage, node.Config{
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node0Address},
-	}, node1Conf)
+	}, node0Conf, node1Conf)
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -1287,6 +1283,7 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 
 	cancel()
 	node0.Close()
+	node1.Close()
 }
 
 func TestAutoHealingFailureAndRollback(t *testing.T) {
@@ -1312,19 +1309,20 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 	// Create a 2-node cluster
 	totalHashRanges := int64(3)
 	node0Conf := newConf()
-	_, node0Address := getService(ctx, t, cloudStorage, node.Config{
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, node0Conf)
+	t.Cleanup(node0.Close)
 
 	node1Conf := newConf()
-	_, node1Address := getService(ctx, t, cloudStorage, node.Config{
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-		Addresses:        []string{node0Address},
-	}, node1Conf)
+	}, node0Conf, node1Conf)
+	t.Cleanup(node1.Close)
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -1401,8 +1399,6 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 		Keys: []string{"key1", "key2", "key3"},
 	})
 	require.JSONEq(t, `{"key1":true,"key2":true,"key3":true}`, body)
-
-	cancel()
 }
 
 func TestRollbackFailure(t *testing.T) {
@@ -1473,218 +1469,6 @@ func withProxy(proxy *tcpproxy.Proxy) option {
 	return func(c *serviceConfig) { c.proxy = proxy }
 }
 
-func getService(
-	ctx context.Context, t testing.TB, cs *filemanager.S3Manager, nodeConfig node.Config, conf *config.Config,
-	opts ...option,
-) (*node.Service, string) {
-	t.Helper()
-
-	var svcConf serviceConfig
-	for _, opt := range opts {
-		opt(&svcConf)
-	}
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-
-	var address string
-	if svcConf.proxy != nil {
-		address = svcConf.proxy.LocalAddr
-		svcConf.proxy.RemoteAddr = "localhost:" + strconv.Itoa(freePort)
-		nodeConfig.Addresses = append(nodeConfig.Addresses, svcConf.proxy.RemoteAddr)
-		t.Logf("Using proxy, client will connect to %s but node is %s", address, svcConf.proxy.RemoteAddr)
-	} else {
-		address = "localhost:" + strconv.Itoa(freePort)
-		nodeConfig.Addresses = append(nodeConfig.Addresses, address)
-	}
-
-	log := logger.NOP
-	if testing.Verbose() {
-		lf := logger.NewFactory(conf)
-		require.NoError(t, lf.SetLogLevel("", "DEBUG"))
-		log = lf.NewLogger()
-	}
-	conf.Set("BadgerDB.Dedup.NopLogger", true)
-	nodeConfig.BackupFolderName = defaultBackupFolderName
-	service, err := node.NewService(ctx, nodeConfig, cs, conf, stats.NOP, log)
-	require.NoError(t, err)
-
-	// Create a gRPC server
-	server := grpc.NewServer()
-	pb.RegisterNodeServiceServer(server, service)
-
-	lis, err := net.Listen("tcp", nodeConfig.Addresses[len(nodeConfig.Addresses)-1])
-	require.NoError(t, err)
-
-	// Start the server
-	go func() {
-		require.NoError(t, server.Serve(lis))
-	}()
-	t.Cleanup(func() {
-		server.GracefulStop()
-		_ = lis.Close()
-	})
-
-	return service, address
-}
-
-func startScalerHTTPServer(t testing.TB, totalHashRanges int64, rp scaler.RetryPolicy, addresses ...string) *opClient {
-	t.Helper()
-
-	log := logger.NOP
-	if testing.Verbose() {
-		lf := logger.NewFactory(config.New())
-		require.NoError(t, lf.SetLogLevel("", "DEBUG"))
-		log = lf.NewLogger()
-	}
-
-	c, err := client.NewClient(client.Config{
-		Addresses:       addresses,
-		TotalHashRanges: totalHashRanges,
-	}, log)
-	require.NoError(t, err)
-
-	op, err := scaler.NewClient(scaler.Config{
-		Addresses:       addresses,
-		TotalHashRanges: totalHashRanges,
-		RetryPolicy:     rp,
-	}, log)
-	require.NoError(t, err)
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-
-	addr := fmt.Sprintf(":%d", freePort)
-
-	opServer := newHTTPServer(c, op, addr, stats.NOP, log)
-	go func() {
-		err := opServer.Start(context.Background())
-		if !errors.Is(err, http.ErrServerClosed) {
-			t.Errorf("Scaler server error: %v", err)
-		}
-	}()
-	t.Cleanup(func() {
-		_ = opServer.Stop(context.Background())
-	})
-
-	return &opClient{
-		t:      t,
-		client: http.DefaultClient,
-		url:    fmt.Sprintf("http://localhost:%d", freePort),
-		scaler: op,
-	}
-}
-
-type opClient struct {
-	t      testing.TB
-	client *http.Client
-	url    string
-	scaler *scaler.Client
-}
-
-func (c *opClient) Do(endpoint string, data any, success ...bool) string {
-	c.t.Helper()
-
-	buf, err := jsonrs.Marshal(data)
-	require.NoError(c.t, err)
-	req, err := http.NewRequest(http.MethodPost, c.url+endpoint, bytes.NewBuffer(buf))
-	require.NoError(c.t, err)
-
-	resp, err := c.client.Do(req)
-	require.NoError(c.t, err)
-
-	defer func() { httputil.CloseResponse(resp) }()
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(c.t, err)
-
-	if resp.StatusCode != http.StatusOK {
-		c.t.Fatalf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	if len(success) > 0 && success[0] {
-		require.JSONEq(c.t, `{"success":true}`, string(body))
-	}
-
-	return string(body)
-}
-
-type mockNodeServiceServer struct {
-	pb.UnimplementedNodeServiceServer
-
-	t          testing.TB
-	address    string
-	identifier string
-
-	scaleCalls       atomic.Uint64
-	scaleReturnError atomic.Bool
-
-	createSnapshotsCalls       atomic.Uint64
-	createSnapshotsReturnError atomic.Bool
-
-	loadSnapshotsCalls atomic.Uint64
-
-	loadSnapshotsReturnError atomic.Bool
-}
-
-func (m *mockNodeServiceServer) Scale(_ context.Context, _ *pb.ScaleRequest) (*pb.ScaleResponse, error) {
-	m.t.Logf("mockNodeServiceServer.Scale called on %s", m.identifier)
-	defer m.scaleCalls.Add(1)
-	if m.scaleReturnError.Load() {
-		return nil, errors.New("scale mock error on " + m.identifier)
-	}
-	return &pb.ScaleResponse{Success: true}, nil
-}
-
-func (m *mockNodeServiceServer) CreateSnapshots(_ context.Context, _ *pb.CreateSnapshotsRequest) (
-	*pb.CreateSnapshotsResponse, error,
-) {
-	m.t.Logf("mockNodeServiceServer.CreateSnapshots called on %s", m.identifier)
-	defer m.createSnapshotsCalls.Add(1)
-	if m.createSnapshotsReturnError.Load() {
-		return nil, errors.New("create snapshots mock error on " + m.identifier)
-	}
-	return &pb.CreateSnapshotsResponse{Success: true}, nil
-}
-
-func (m *mockNodeServiceServer) LoadSnapshots(_ context.Context, _ *pb.LoadSnapshotsRequest) (
-	*pb.LoadSnapshotsResponse, error,
-) {
-	m.t.Logf("mockNodeServiceServer.LoadSnapshots called on %s", m.identifier)
-	defer m.loadSnapshotsCalls.Add(1)
-	if m.loadSnapshotsReturnError.Load() {
-		return nil, errors.New("load snapshots mock error on " + m.identifier)
-	}
-	return &pb.LoadSnapshotsResponse{Success: true}, nil
-}
-
-func startMockNodeService(t testing.TB, identifier string) *mockNodeServiceServer {
-	t.Helper()
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-
-	address := "localhost:" + strconv.Itoa(freePort)
-	lis, err := net.Listen("tcp", address)
-	require.NoError(t, err)
-
-	grpcServer := grpc.NewServer()
-	mockServer := &mockNodeServiceServer{
-		t:          t,
-		identifier: identifier,
-		address:    lis.Addr().String(),
-	}
-	pb.RegisterNodeServiceServer(grpcServer, mockServer)
-
-	go func() { _ = grpcServer.Serve(lis) }()
-	t.Cleanup(func() {
-		grpcServer.GracefulStop()
-		_ = lis.Close()
-	})
-
-	return mockServer
-}
-
 func TestDegradedModeDuringScaling(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
@@ -1724,11 +1508,10 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:          1,
 		TotalHashRanges: totalHashRanges,
-		Addresses:       []string{node0Address},
 		DegradedNodes: func() []bool {
 			return degradedNodes
 		},
-	}, node1Conf)
+	}, node0Conf, node1Conf)
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -1779,8 +1562,6 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 	require.Len(t, resp.NodesAddresses, 2, "All non-degraded nodes should be in NodesAddresses")
 
 	cancel()
-	node0.Close()
-	node1.Close()
 }
 
 func TestScaleUpInDegradedMode(t *testing.T) {
@@ -1841,9 +1622,8 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:          1,
 		TotalHashRanges: totalHashRanges,
-		Addresses:       []string{node0Address},
 		DegradedNodes:   func() []bool { return degradedNodes },
-	}, node1Conf)
+	}, node0Conf, node1Conf)
 
 	// Step 4: Update degradedNodes - mark node 1 as degraded
 	degradedNodes = append(degradedNodes, true) //nolint:makezero
@@ -1861,7 +1641,7 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 
 	// After Scale, trigger hasher reinitialization based on current degraded nodes
 	node0.DegradedNodesChanged()
-	node1.DegradedNodesChanged()
+	// Note: node1 is degraded, so DegradedNodesChanged will skip reinitialization for it
 
 	// Verify scale up worked - check node info
 	// Note: While node1 is degraded, NodesAddresses will only include non-degraded nodes
@@ -1961,6 +1741,291 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 	)
 
 	cancel()
-	node0.Close()
-	node1.Close()
+}
+
+func getService(
+	ctx context.Context, t testing.TB, cs *filemanager.S3Manager, nodeConfig node.Config, conf ...*config.Config,
+) (*node.Service, string) {
+	t.Helper()
+	if len(conf) < 1 {
+		t.Fatal("no config provided")
+	}
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	address := "localhost:" + strconv.Itoa(freePort)
+
+	// Simulating reloadable addresses for all configs
+	nodeAddresses := conf[0].GetReloadableStringVar("", nodeAddressesConfKey)
+	var addrList []string
+	if rawAddresses := strings.TrimSpace(nodeAddresses.Load()); rawAddresses != "" {
+		addrList = append(strings.Split(rawAddresses, ","), address)
+	} else {
+		addrList = []string{address}
+	}
+	for _, c := range conf {
+		c.Set(nodeAddressesConfKey, strings.Join(addrList, ","))
+	}
+
+	// Set the Addresses function to return our modifiable slice
+	nodeConfig.Addresses = func() []string {
+		return strings.Split(nodeAddresses.Load(), ",")
+	}
+	nodeConfig.BackupFolderName = defaultBackupFolderName
+
+	log := logger.NOP
+	if testing.Verbose() {
+		log = logger.NewLogger()
+	}
+	conf[nodeConfig.NodeID].Set("BadgerDB.Dedup.NopLogger", true)
+	service, err := node.NewService(ctx, nodeConfig, cs, conf[nodeConfig.NodeID], stats.NOP, log)
+	require.NoError(t, err)
+
+	// Create a gRPC server
+	server := grpc.NewServer()
+	pb.RegisterNodeServiceServer(server, service)
+
+	lis, err := net.Listen("tcp", address)
+	require.NoError(t, err)
+
+	// Start the server
+	go func() {
+		require.NoError(t, server.Serve(lis))
+	}()
+	t.Cleanup(func() {
+		server.GracefulStop()
+		_ = lis.Close()
+	})
+
+	return service, address
+}
+
+// TODO merge getService with getServiceWithProxy
+func getServiceWithProxy(
+	ctx context.Context, t testing.TB, cs *filemanager.S3Manager, nodeConfig node.Config,
+	proxy *tcpproxy.Proxy, conf ...*config.Config,
+) (*node.Service, string) {
+	t.Helper()
+	if len(conf) < 1 {
+		t.Fatal("no config provided")
+	}
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	listenAddr := "localhost:" + strconv.Itoa(freePort)
+	address := proxy.LocalAddr
+	proxy.RemoteAddr = listenAddr
+	t.Logf("Using proxy, client will connect to %s but node is %s", address, listenAddr)
+
+	// Simulating reloadable addresses for all configs
+	nodeAddresses := conf[0].GetReloadableStringVar("", nodeAddressesConfKey)
+	var addrList []string
+	if rawAddresses := strings.TrimSpace(nodeAddresses.Load()); rawAddresses != "" {
+		addrList = append(strings.Split(rawAddresses, ","), address)
+	} else {
+		addrList = []string{address}
+	}
+	for _, c := range conf {
+		c.Set(nodeAddressesConfKey, strings.Join(addrList, ","))
+	}
+
+	// Set the Addresses function to return our modifiable slice
+	nodeConfig.Addresses = func() []string {
+		return strings.Split(nodeAddresses.Load(), ",")
+	}
+	nodeConfig.BackupFolderName = defaultBackupFolderName
+
+	log := logger.NOP
+	if testing.Verbose() {
+		log = logger.NewLogger()
+	}
+	conf[nodeConfig.NodeID].Set("BadgerDB.Dedup.NopLogger", true)
+	service, err := node.NewService(ctx, nodeConfig, cs, conf[nodeConfig.NodeID], stats.NOP, log)
+	require.NoError(t, err)
+
+	// Create a gRPC server
+	server := grpc.NewServer()
+	pb.RegisterNodeServiceServer(server, service)
+
+	lis, err := net.Listen("tcp", listenAddr)
+	require.NoError(t, err)
+
+	// Start the server
+	go func() {
+		require.NoError(t, server.Serve(lis))
+	}()
+	t.Cleanup(func() {
+		server.GracefulStop()
+		_ = lis.Close()
+	})
+
+	return service, address
+}
+
+func startScalerHTTPServer(t testing.TB, totalHashRanges int64, rp scaler.RetryPolicy, addresses ...string) *opClient {
+	t.Helper()
+
+	log := logger.NOP
+	if testing.Verbose() {
+		lf := logger.NewFactory(config.New())
+		require.NoError(t, lf.SetLogLevel("", "DEBUG"))
+		log = lf.NewLogger()
+	}
+
+	c, err := client.NewClient(client.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+	}, log)
+	require.NoError(t, err)
+
+	op, err := scaler.NewClient(scaler.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+		RetryPolicy:     rp,
+	}, log)
+	require.NoError(t, err)
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+
+	addr := fmt.Sprintf(":%d", freePort)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	opServer := newHTTPServer(c, op, addr, stats.NOP, log)
+	go func() {
+		err := opServer.Start(ctx)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Scaler server error: %v", err)
+		}
+	}()
+
+	oc := &opClient{
+		t:        t,
+		client:   http.DefaultClient,
+		url:      fmt.Sprintf("http://localhost:%d", freePort),
+		scaler:   op,
+		c:        c,
+		opServer: opServer,
+		cancel:   cancel,
+	}
+	t.Cleanup(func() {
+		oc.Close()
+	})
+
+	return oc
+}
+
+type opClient struct {
+	t        testing.TB
+	client   *http.Client
+	url      string
+	scaler   *scaler.Client
+	c        *client.Client
+	opServer *httpServer
+	cancel   context.CancelFunc
+	closed   sync.Once
+}
+
+func (oc *opClient) Close() {
+	oc.closed.Do(func() {
+		// Close gRPC clients first to terminate connections cleanly
+		_ = oc.c.Close()
+		_ = oc.scaler.Close()
+		// Then cancel context and stop HTTP server
+		oc.cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = oc.opServer.Stop(shutdownCtx)
+	})
+}
+
+func (oc *opClient) Do(endpoint string, data any, success ...bool) string {
+	oc.t.Helper()
+
+	buf, err := jsonrs.Marshal(data)
+	require.NoError(oc.t, err)
+	req, err := http.NewRequest(http.MethodPost, oc.url+endpoint, bytes.NewBuffer(buf))
+	require.NoError(oc.t, err)
+
+	resp, err := oc.client.Do(req)
+	require.NoError(oc.t, err)
+
+	defer func() { httputil.CloseResponse(resp) }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(oc.t, err)
+
+	if resp.StatusCode != http.StatusOK {
+		oc.t.Fatalf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	if len(success) > 0 && success[0] {
+		require.JSONEq(oc.t, `{"success":true}`, string(body))
+	}
+
+	return string(body)
+}
+
+type mockNodeServiceServer struct {
+	pb.UnimplementedNodeServiceServer
+
+	t          testing.TB
+	address    string
+	identifier string
+
+	createSnapshotsCalls       atomic.Uint64
+	createSnapshotsReturnError atomic.Bool
+
+	loadSnapshotsCalls atomic.Uint64
+
+	loadSnapshotsReturnError atomic.Bool
+}
+
+func (m *mockNodeServiceServer) CreateSnapshots(_ context.Context, _ *pb.CreateSnapshotsRequest) (
+	*pb.CreateSnapshotsResponse, error,
+) {
+	m.t.Logf("mockNodeServiceServer.CreateSnapshots called on %s", m.identifier)
+	defer m.createSnapshotsCalls.Add(1)
+	if m.createSnapshotsReturnError.Load() {
+		return nil, errors.New("create snapshots mock error on " + m.identifier)
+	}
+	return &pb.CreateSnapshotsResponse{Success: true}, nil
+}
+
+func (m *mockNodeServiceServer) LoadSnapshots(_ context.Context, _ *pb.LoadSnapshotsRequest) (
+	*pb.LoadSnapshotsResponse, error,
+) {
+	m.t.Logf("mockNodeServiceServer.LoadSnapshots called on %s", m.identifier)
+	defer m.loadSnapshotsCalls.Add(1)
+	if m.loadSnapshotsReturnError.Load() {
+		return nil, errors.New("load snapshots mock error on " + m.identifier)
+	}
+	return &pb.LoadSnapshotsResponse{Success: true}, nil
+}
+
+func startMockNodeService(t testing.TB, identifier string) *mockNodeServiceServer {
+	t.Helper()
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+
+	address := "localhost:" + strconv.Itoa(freePort)
+	lis, err := net.Listen("tcp", address)
+	require.NoError(t, err)
+
+	grpcServer := grpc.NewServer()
+	mockServer := &mockNodeServiceServer{
+		t:          t,
+		identifier: identifier,
+		address:    lis.Addr().String(),
+	}
+	pb.RegisterNodeServiceServer(grpcServer, mockServer)
+
+	go func() { _ = grpcServer.Serve(lis) }()
+	t.Cleanup(func() {
+		grpcServer.GracefulStop()
+		_ = lis.Close()
+	})
+
+	return mockServer
 }

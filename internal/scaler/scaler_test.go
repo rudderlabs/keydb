@@ -41,17 +41,17 @@ func TestExecuteScalingWithRollback_Success(t *testing.T) {
 func TestExecuteScalingWithRollback_FailureWithRollback(t *testing.T) {
 	// Counters for tracking calls
 	var (
-		scaleCalls int
-		mu         sync.Mutex
+		getNodeInfoCalls int
+		mu               sync.Mutex
 	)
 
 	// Setup mock gRPC server
 	addr, cleanup := startMockNodeService(t,
-		func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
+		func(ctx context.Context, req *pb.GetNodeInfoRequest) (*pb.GetNodeInfoResponse, error) {
 			mu.Lock()
-			scaleCalls++
+			getNodeInfoCalls++
 			mu.Unlock()
-			return &pb.ScaleResponse{Success: true}, nil
+			return &pb.GetNodeInfoResponse{NodeId: req.NodeId}, nil
 		},
 	)
 	defer cleanup()
@@ -84,46 +84,7 @@ func TestExecuteScalingWithRollback_FailureWithRollback(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Equal(t, 1, scaleCalls)
-}
-
-func TestExecuteScalingWithRollback_RollbackFailure(t *testing.T) {
-	// Setup mock gRPC server that fails on Scale
-	addr, cleanup := startMockNodeService(t,
-		func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
-			return nil, errors.New("scale error")
-		},
-	)
-	defer cleanup()
-
-	// Setup test client
-	testClient, err := NewClient(Config{
-		Addresses:       []string{addr},
-		TotalHashRanges: 16,
-		RetryPolicy: RetryPolicy{
-			InitialInterval: time.Millisecond,
-			Multiplier:      1.0,
-			MaxInterval:     time.Millisecond,
-			MaxElapsedTime:  250 * time.Millisecond,
-		},
-	}, logger.NOP)
-	require.NoError(t, err)
-
-	// Test failed operation that also fails to rollback
-	testErr := errors.New("test error")
-	err = testClient.ExecuteScalingWithRollback(ScaleUp,
-		[]string{addr, addr}, []string{"node1", "node2", "node3"}, func() error {
-			return testErr // Simulate operation failure
-		})
-
-	// Assertions
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "scaling failed")
-	require.Contains(t, err.Error(), "rollback failed")
-	lastOp := testClient.GetLastOperation()
-	require.NotNil(t, lastOp)
-	require.Equal(t, ScaleUp, lastOp.Type)
-	require.Equal(t, Failed, lastOp.Status)
+	require.Equal(t, 1, getNodeInfoCalls)
 }
 
 func TestRecordAndGetOperation(t *testing.T) {
@@ -224,21 +185,20 @@ func TestOperationRecordingTable(t *testing.T) {
 // mockNodeServiceServer is a mock implementation of the NodeServiceServer
 type mockNodeServiceServer struct {
 	pb.UnimplementedNodeServiceServer
-	scaleFunc func(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error)
+	getNodeInfoFunc func(ctx context.Context, req *pb.GetNodeInfoRequest) (*pb.GetNodeInfoResponse, error)
 }
 
-func (m *mockNodeServiceServer) Scale(ctx context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
-	if m.scaleFunc != nil {
-		return m.scaleFunc(ctx, req)
+func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (*pb.GetNodeInfoResponse, error) {
+	if m.getNodeInfoFunc != nil {
+		return m.getNodeInfoFunc(ctx, req)
 	}
-	return &pb.ScaleResponse{Success: true}, nil
+	return &pb.GetNodeInfoResponse{NodeId: req.NodeId}, nil
 }
 
 // startMockNodeService starts a mock gRPC server
 func startMockNodeService(t *testing.T,
-	scaleFunc func(context.Context, *pb.ScaleRequest) (*pb.ScaleResponse, error)) (
-	string, func(),
-) {
+	getNodeInfoFunc func(ctx context.Context, req *pb.GetNodeInfoRequest) (*pb.GetNodeInfoResponse, error),
+) (string, func()) {
 	t.Helper()
 
 	lis, err := net.Listen("tcp", "localhost:0")
@@ -246,7 +206,7 @@ func startMockNodeService(t *testing.T,
 
 	grpcServer := grpc.NewServer()
 	mockServer := &mockNodeServiceServer{
-		scaleFunc: scaleFunc,
+		getNodeInfoFunc: getNodeInfoFunc,
 	}
 	pb.RegisterNodeServiceServer(grpcServer, mockServer)
 

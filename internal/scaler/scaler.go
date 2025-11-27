@@ -12,6 +12,7 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"google.golang.org/grpc"
 	grpcbackoff "google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
@@ -449,89 +450,10 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64
 	return nil
 }
 
-// Scale changes the number of nodes in the cluster
-func (c *Client) Scale(ctx context.Context, nodeIDs []int64) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if len(nodeIDs) == 0 {
-		return fmt.Errorf("at least one node ID must be provided")
-	}
-
-	// Send ScaleRequest to all nodes
-	group, ctx := kitsync.NewEagerGroup(ctx, len(nodeIDs))
-	for _, nodeID := range nodeIDs {
-		group.Go(func() error {
-			// Get the client for this node
-			client, ok := c.clients[int(nodeID)]
-			if !ok {
-				return fmt.Errorf("no client for node %d", nodeID)
-			}
-			conn, ok := c.connections[int(nodeID)]
-			if !ok {
-				return fmt.Errorf("no connection for node %d", nodeID)
-			}
-
-			req := &pb.ScaleRequest{
-				NodesAddresses: c.config.Addresses,
-			}
-
-			var (
-				err         error
-				resp        *pb.ScaleResponse
-				nextBackoff = c.getNextBackoffFunc()
-			)
-			for attempt := int64(1); ; attempt++ {
-				resp, err = client.Scale(ctx, req)
-				if err == nil && resp != nil && resp.Success {
-					break
-				}
-
-				if err == nil {
-					if resp != nil {
-						err = errors.New(resp.ErrorMessage)
-					} else {
-						err = errors.New("unknown error")
-					}
-				}
-
-				retryDelay := nextBackoff()
-				if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
-					return fmt.Errorf("failed to scale node %d: %w", nodeID, err)
-				}
-
-				c.logger.Warnn("Cannot scale node",
-					logger.NewIntField("nodeID", nodeID),
-					logger.NewIntField("attempt", attempt),
-					logger.NewDurationField("retryDelay", retryDelay),
-					logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
-					logger.NewStringField("connState", conn.GetState().String()),
-					obskit.Error(err))
-
-				// Wait before retrying
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(retryDelay):
-				}
-			}
-
-			return nil
-		})
-	}
-
-	err := group.Wait()
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // UpdateClusterData updates the cluster size in a race-condition safe manner.
 // It takes a new cluster size and the current keys being processed.
 // It returns a slice of keys that need to be fetched again.
-func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
+func (c *Client) UpdateClusterData(ctx context.Context, nodesAddresses ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -561,7 +483,44 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 	c.config.Addresses = nodesAddresses
 	c.clusterSize = int64(len(nodesAddresses))
 
-	return nil
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second) // TODO make this configurable
+	defer cancel()
+
+	group, gCtx := kitsync.NewEagerGroup(ctx, len(nodesAddresses))
+	for i := range c.connections {
+		group.Go(func() error {
+			// use GetNodeInfo to force the clients to connect
+			_, err := c.clients[i].GetNodeInfo(gCtx, &pb.GetNodeInfoRequest{NodeId: int64(i)})
+			// we use the error only to return the routines early
+			// the cluster update will be successful as long as there is connectivity
+			return err
+		})
+	}
+
+	// Checking connectivity since the gRPC client has its own backoff policy, the above group might not return on time
+	// to honour the context within the given timeout.
+	ticker := time.NewTicker(50 * time.Millisecond) // TODO make this configurable
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			ok := true
+			for i, conn := range c.connections {
+				if conn.GetState() != connectivity.Ready {
+					ok = false
+					c.logger.Warnn("Detected connectivity issue",
+						logger.NewIntField("nodeId", int64(i)),
+						logger.NewStringField("addr", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
+					)
+				}
+			}
+			if ok {
+				return nil
+			}
+		}
+	}
 }
 
 // RecordOperation records the last scaling operation for potential rollback
@@ -664,20 +623,9 @@ func (c *Client) rollbackToOldConfiguration(ctx context.Context, operation *Scal
 	c.logger.Infon("Rolling back operation",
 		logger.NewStringField("operationType", string(operation.Type)))
 
-	// Restore cluster to old configuration
-	if err := c.UpdateClusterData(operation.OldAddresses...); err != nil {
+	// Restore scaler's cluster data to old configuration
+	if err := c.UpdateClusterData(ctx, operation.OldAddresses...); err != nil {
 		return fmt.Errorf("failed to restore cluster data: %w", err)
-	}
-
-	// Scale back to old cluster size
-	oldNodeIDs := make([]int64, operation.OldClusterSize)
-	for i := int64(0); i < operation.OldClusterSize; i++ {
-		oldNodeIDs[i] = i
-	}
-
-	// restore correct behavior
-	if err := c.Scale(ctx, oldNodeIDs); err != nil {
-		return fmt.Errorf("failed to scale back nodes: %w", err)
 	}
 
 	return nil
