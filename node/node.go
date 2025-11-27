@@ -343,6 +343,23 @@ func (s *Service) initCaches(
 		maxConcurrency = int64(len(currentRanges))
 	}
 
+	// Check which snapshots are already loaded BEFORE starting concurrent downloads.
+	// This avoids a data race with badger.Load() which is not thread-safe with other operations.
+	loadedSnapshots := make(map[string]bool)
+	for _, snapshotFiles := range filesByHashRange {
+		for _, sf := range snapshotFiles {
+			loaded, err := s.isSnapshotLoaded(sf.filename)
+			if err != nil {
+				s.logger.Warnn("Checking if snapshot already loaded",
+					logger.NewStringField("filename", sf.filename),
+					obskit.Error(err),
+				)
+				// Default to false on error (fail-open: will download)
+			}
+			loadedSnapshots[sf.filename] = loaded
+		}
+	}
+
 	var (
 		loadCtx, loadCancel = context.WithCancel(ctx)
 		loadDone            = make(chan error, 1)
@@ -351,6 +368,19 @@ func (s *Service) initCaches(
 		readers             = make(chan snapshotReader, maxConcurrency)
 	)
 	defer loadCancel()
+	var loadedFilenames []string
+	defer func() {
+		// Mark all successfully loaded snapshots AFTER all Load() operations complete.
+		// This avoids a data race since badger's Load() is not thread-safe with other operations.
+		for _, filename := range loadedFilenames {
+			if err := s.markSnapshotLoaded(filename); err != nil {
+				s.logger.Warnn("Marking snapshot as loaded",
+					logger.NewStringField("filename", filename),
+					obskit.Error(err),
+				)
+			}
+		}
+	}()
 	go func() {
 		defer close(loadDone)
 		for sn := range readers {
@@ -369,14 +399,7 @@ func (s *Service) initCaches(
 			}
 			s.metrics.loadSnapshotToDiskDuration.Since(loadStart)
 			filesLoaded++
-
-			// Mark snapshot as loaded after successful load
-			if err := s.markSnapshotLoaded(sn.filename); err != nil {
-				s.logger.Warnn("Marking snapshot as loaded",
-					logger.NewStringField("filename", sn.filename),
-					obskit.Error(err),
-				)
-			}
+			loadedFilenames = append(loadedFilenames, sn.filename)
 		}
 	}()
 	for r := range filesByHashRange {
@@ -388,15 +411,8 @@ func (s *Service) initCaches(
 
 		for _, snapshotFile := range snapshotFiles {
 			group.Go(func() error {
-				// Check if this snapshot was already loaded
-				loaded, err := s.isSnapshotLoaded(snapshotFile.filename)
-				if err != nil {
-					s.logger.Warnn("Checking if snapshot already loaded",
-						logger.NewStringField("filename", snapshotFile.filename),
-						obskit.Error(err),
-					)
-					// Continue with download since we cannot determine if this snapshot was already loaded
-				} else if loaded {
+				// Check if this snapshot was already loaded (using pre-computed map to avoid data race)
+				if loadedSnapshots[snapshotFile.filename] {
 					s.logger.Infon("Skipping already loaded snapshot",
 						logger.NewStringField("filename", snapshotFile.filename),
 					)
@@ -409,7 +425,7 @@ func (s *Service) initCaches(
 
 				startDownload := time.Now()
 				buf := manager.NewWriteAtBuffer([]byte{})
-				err = s.storage.Download(gCtx, buf, snapshotFile.filename)
+				err := s.storage.Download(gCtx, buf, snapshotFile.filename)
 				if err != nil {
 					if errors.Is(err, filemanager.ErrKeyNotFound) {
 						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", r))
