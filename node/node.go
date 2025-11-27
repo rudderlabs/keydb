@@ -41,6 +41,15 @@ const (
 
 	// DefaultMaxFilesToList defines the default maximum number of files to list in a single operation, set to 1000.
 	DefaultMaxFilesToList int64 = 1000
+
+	// DefaultLoadedSnapshotTTL is the default TTL for loaded snapshot tracking keys
+	DefaultLoadedSnapshotTTL = 24 * time.Hour
+
+	// internalKeysHashRange is a reserved hash range for internal keys
+	internalKeysHashRange = int64(-1)
+
+	// loadedSnapshotKeyPrefix is the prefix for keys tracking loaded snapshots
+	loadedSnapshotKeyPrefix = "_snapshot_loaded:"
 )
 
 // file format is hr_<hash_range>_s_<from_timestamp>_<to_timestamp>.snapshot
@@ -147,6 +156,9 @@ func NewService(
 	}
 	if config.MaxFilesToList == 0 {
 		config.MaxFilesToList = DefaultMaxFilesToList
+	}
+	if config.LoadedSnapshotTTL == 0 {
+		config.LoadedSnapshotTTL = DefaultLoadedSnapshotTTL
 	}
 
 	service := &Service{
@@ -357,6 +369,14 @@ func (s *Service) initCaches(
 			}
 			s.metrics.loadSnapshotToDiskDuration.Since(loadStart)
 			filesLoaded++
+
+			// Mark snapshot as loaded after successful load
+			if err := s.markSnapshotLoaded(sn.filename); err != nil {
+				s.logger.Warnn("Marking snapshot as loaded",
+					logger.NewStringField("filename", sn.filename),
+					obskit.Error(err),
+				)
+			}
 		}
 	}()
 	for r := range filesByHashRange {
@@ -368,13 +388,28 @@ func (s *Service) initCaches(
 
 		for _, snapshotFile := range snapshotFiles {
 			group.Go(func() error {
+				// Check if this snapshot was already loaded
+				loaded, err := s.isSnapshotLoaded(snapshotFile.filename)
+				if err != nil {
+					s.logger.Warnn("Checking if snapshot already loaded",
+						logger.NewStringField("filename", snapshotFile.filename),
+						obskit.Error(err),
+					)
+					// Continue with download since we cannot determine if this snapshot was already loaded
+				} else if loaded {
+					s.logger.Infon("Skipping already loaded snapshot",
+						logger.NewStringField("filename", snapshotFile.filename),
+					)
+					return nil
+				}
+
 				s.logger.Infon("Starting download of snapshot file from cloud storage",
 					logger.NewStringField("filename", snapshotFile.filename),
 				)
 
 				startDownload := time.Now()
 				buf := manager.NewWriteAtBuffer([]byte{})
-				err := s.storage.Download(gCtx, buf, snapshotFile.filename)
+				err = s.storage.Download(gCtx, buf, snapshotFile.filename)
 				if err != nil {
 					if errors.Is(err, filemanager.ErrKeyNotFound) {
 						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", r))
@@ -945,6 +980,30 @@ func (s *Service) getNonDegradedAddresses() []string {
 		}
 	}
 	return nonDegraded
+}
+
+// isSnapshotLoaded checks if a snapshot has already been loaded
+func (s *Service) isSnapshotLoaded(filename string) (bool, error) {
+	key := loadedSnapshotKeyPrefix + filename
+	keysByHashRange := map[int64][]string{internalKeysHashRange: {key}}
+	indexes := map[string]int{key: 0}
+
+	results, err := s.cache.Get(keysByHashRange, indexes)
+	if err != nil {
+		return false, fmt.Errorf("checking if snapshot loaded: %w", err)
+	}
+	return results[0], nil
+}
+
+// markSnapshotLoaded marks a snapshot as successfully loaded
+func (s *Service) markSnapshotLoaded(filename string) error {
+	key := loadedSnapshotKeyPrefix + filename
+	keysByHashRange := map[int64][]string{internalKeysHashRange: {key}}
+
+	if err := s.cache.Put(keysByHashRange, s.config.LoadedSnapshotTTL); err != nil {
+		return fmt.Errorf("marking snapshot as loaded: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) getSnapshotFilenamePrefix() string {

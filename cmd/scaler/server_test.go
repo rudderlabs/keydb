@@ -317,7 +317,9 @@ func TestAutoScale(t *testing.T) {
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
+		// cache.Put() used to mark the snapshot as loaded incremented badger's version counter, so the next
+		// snapshot file won't be hr_2_s_1_2.snapshot but hr_2_s_1_3.snapshot
+		regexp.MustCompile("^.+/hr_2_s_1_3.snapshot$"),
 	)
 
 	// Verify scale down worked - check node info
@@ -481,7 +483,9 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 
 	keydbth.RequireExpectedFiles(ctx, t, minioContainer, defaultBackupFolderName,
 		regexp.MustCompile("^.+/hr_2_s_0_1.snapshot$"),
-		regexp.MustCompile("^.+/hr_2_s_1_2.snapshot$"),
+		// cache.Put() used to mark the snapshot as loaded incremented badger's version counter, so the next
+		// snapshot file won't be hr_2_s_1_2.snapshot but hr_2_s_1_3.snapshot
+		regexp.MustCompile("^.+/hr_2_s_1_3.snapshot$"),
 	)
 
 	// Verify scale down worked - check node info

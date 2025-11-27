@@ -883,6 +883,172 @@ func TestDegradedMode(t *testing.T) {
 	})
 }
 
+func TestSkipAlreadyLoadedSnapshots(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, newConf func() *config.Config) {
+		t.Parallel()
+
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Create the node service
+		totalHashRanges := int64(4)
+		node0Conf := newConf()
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+		}, node0Conf)
+		c := getClient(t, totalHashRanges, node0Address)
+		op := getScaler(t, totalHashRanges, node0Address)
+
+		// Test Put
+		require.NoError(t, c.Put(ctx, []string{"key1", "key2", "key3"}, testTTL))
+
+		exists, err := c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		err = op.CreateSnapshots(ctx, 0, false)
+		require.NoError(t, err)
+
+		// Load snapshots for the first time
+		firstLoadStart := time.Now()
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
+		firstLoadDuration := time.Since(firstLoadStart)
+		loaded, err := node0.isSnapshotLoaded("default/hr_1_s_0_1.snapshot")
+		require.True(t, loaded, err)
+		loaded, err = node0.isSnapshotLoaded("default/hr_2_s_0_1.snapshot")
+		require.True(t, loaded, err)
+		loaded, err = node0.isSnapshotLoaded("default/hr_3_s_0_1.snapshot")
+		require.True(t, loaded, err)
+
+		// Verify that after loading snapshots, we can still read the keys
+		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		// Load snapshots again - this time they should be skipped
+		secondLoadStart := time.Now()
+		require.NoError(t, op.LoadSnapshots(ctx, 0, 0))
+		secondLoadDuration := time.Since(secondLoadStart)
+		require.Less(t, secondLoadDuration, firstLoadDuration)
+
+		t.Logf("1st LoadSnapshots took %v", firstLoadDuration)
+		t.Logf("2nd LoadSnapshots took %v", secondLoadDuration)
+
+		// Verify data is still intact
+		exists, err = c.Get(ctx, []string{"key1", "key2", "key3", "key4"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true, true, true, false}, exists)
+
+		cancel()
+		node0.Close()
+	}
+
+	run(t, func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		return conf
+	})
+}
+
+func TestIsSnapshotLoadedAndMark(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", false)
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	totalHashRanges := int64(4)
+	node0Conf := newConf()
+	node0, _ := getService(ctx, t, cloudStorage, Config{
+		NodeID:            0,
+		TotalHashRanges:   totalHashRanges,
+		SnapshotInterval:  60 * time.Second,
+		LoadedSnapshotTTL: 1 * time.Hour,
+	}, node0Conf)
+
+	// Test isSnapshotLoaded returns false for unknown snapshot
+	loaded, err := node0.isSnapshotLoaded("unknown_snapshot.snapshot")
+	require.NoError(t, err)
+	require.False(t, loaded, "Unknown snapshot should not be marked as loaded")
+
+	// Test markSnapshotLoaded
+	testFilename := "test/hr_1_s_0_100.snapshot"
+	err = node0.markSnapshotLoaded(testFilename)
+	require.NoError(t, err)
+
+	// Test isSnapshotLoaded returns true after marking
+	loaded, err = node0.isSnapshotLoaded(testFilename)
+	require.NoError(t, err)
+	require.True(t, loaded, "Marked snapshot should be reported as loaded")
+
+	// Test that a different snapshot is still not marked
+	loaded, err = node0.isSnapshotLoaded("different_snapshot.snapshot")
+	require.NoError(t, err)
+	require.False(t, loaded, "Different snapshot should not be marked as loaded")
+
+	cancel()
+	node0.Close()
+}
+
+func TestLoadedSnapshotTTLDefault(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	totalHashRanges := int64(4)
+	node0Conf := newConf()
+	node0, _ := getService(ctx, t, cloudStorage, Config{
+		NodeID:           0,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		// LoadedSnapshotTTL not set - should default to 24h
+	}, node0Conf)
+
+	require.Equal(t, DefaultLoadedSnapshotTTL, node0.config.LoadedSnapshotTTL,
+		"LoadedSnapshotTTL should default to 24 hours")
+
+	cancel()
+	node0.Close()
+}
+
 func getService(
 	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf ...*config.Config,
 ) (*Service, string) {
