@@ -32,6 +32,9 @@ type Config struct {
 
 	// backupFolderName is the name of the folder in the S3 bucket where snapshots are stored
 	BackupFolderName string
+
+	// LoadedSnapshotTTL is how long to remember loaded snapshots to avoid re-loading them
+	LoadedSnapshotTTL time.Duration
 }
 
 func (c *Config) getClusterSize() int64 {

@@ -41,6 +41,15 @@ const (
 
 	// DefaultMaxFilesToList defines the default maximum number of files to list in a single operation, set to 1000.
 	DefaultMaxFilesToList int64 = 1000
+
+	// DefaultLoadedSnapshotTTL is the default TTL for loaded snapshot tracking keys
+	DefaultLoadedSnapshotTTL = 24 * time.Hour
+
+	// internalKeysHashRange is a reserved hash range for internal keys
+	internalKeysHashRange = int64(-1)
+
+	// loadedSnapshotKeyPrefix is the prefix for keys tracking loaded snapshots
+	loadedSnapshotKeyPrefix = "_snapshot_loaded:"
 )
 
 // file format is hr_<hash_range>_s_<from_timestamp>_<to_timestamp>.snapshot
@@ -147,6 +156,9 @@ func NewService(
 	}
 	if config.MaxFilesToList == 0 {
 		config.MaxFilesToList = DefaultMaxFilesToList
+	}
+	if config.LoadedSnapshotTTL == 0 {
+		config.LoadedSnapshotTTL = DefaultLoadedSnapshotTTL
 	}
 
 	service := &Service{
@@ -331,6 +343,23 @@ func (s *Service) initCaches(
 		maxConcurrency = int64(len(currentRanges))
 	}
 
+	// Check which snapshots are already loaded BEFORE starting concurrent downloads.
+	// This avoids a data race with badger.Load() which is not thread-safe with other operations.
+	loadedSnapshots := make(map[string]bool)
+	for _, snapshotFiles := range filesByHashRange {
+		for _, sf := range snapshotFiles {
+			loaded, err := s.isSnapshotLoaded(sf.filename)
+			if err != nil {
+				s.logger.Warnn("Checking if snapshot already loaded",
+					logger.NewStringField("filename", sf.filename),
+					obskit.Error(err),
+				)
+				// Default to false on error (fail-open: will download)
+			}
+			loadedSnapshots[sf.filename] = loaded
+		}
+	}
+
 	var (
 		loadCtx, loadCancel = context.WithCancel(ctx)
 		loadDone            = make(chan error, 1)
@@ -339,6 +368,19 @@ func (s *Service) initCaches(
 		readers             = make(chan snapshotReader, maxConcurrency)
 	)
 	defer loadCancel()
+	var loadedFilenames []string
+	defer func() {
+		// Mark all successfully loaded snapshots AFTER all Load() operations complete.
+		// This avoids a data race since badger's Load() is not thread-safe with other operations.
+		for _, filename := range loadedFilenames {
+			if err := s.markSnapshotLoaded(filename); err != nil {
+				s.logger.Warnn("Marking snapshot as loaded",
+					logger.NewStringField("filename", filename),
+					obskit.Error(err),
+				)
+			}
+		}
+	}()
 	go func() {
 		defer close(loadDone)
 		for sn := range readers {
@@ -357,6 +399,7 @@ func (s *Service) initCaches(
 			}
 			s.metrics.loadSnapshotToDiskDuration.Since(loadStart)
 			filesLoaded++
+			loadedFilenames = append(loadedFilenames, sn.filename)
 		}
 	}()
 	for r := range filesByHashRange {
@@ -368,6 +411,14 @@ func (s *Service) initCaches(
 
 		for _, snapshotFile := range snapshotFiles {
 			group.Go(func() error {
+				// Check if this snapshot was already loaded (using pre-computed map to avoid data race)
+				if loadedSnapshots[snapshotFile.filename] {
+					s.logger.Infon("Skipping already loaded snapshot",
+						logger.NewStringField("filename", snapshotFile.filename),
+					)
+					return nil
+				}
+
 				s.logger.Infon("Starting download of snapshot file from cloud storage",
 					logger.NewStringField("filename", snapshotFile.filename),
 				)
@@ -945,6 +996,30 @@ func (s *Service) getNonDegradedAddresses() []string {
 		}
 	}
 	return nonDegraded
+}
+
+// isSnapshotLoaded checks if a snapshot has already been loaded
+func (s *Service) isSnapshotLoaded(filename string) (bool, error) {
+	key := loadedSnapshotKeyPrefix + filename
+	keysByHashRange := map[int64][]string{internalKeysHashRange: {key}}
+	indexes := map[string]int{key: 0}
+
+	results, err := s.cache.Get(keysByHashRange, indexes)
+	if err != nil {
+		return false, fmt.Errorf("checking if snapshot loaded: %w", err)
+	}
+	return results[0], nil
+}
+
+// markSnapshotLoaded marks a snapshot as successfully loaded
+func (s *Service) markSnapshotLoaded(filename string) error {
+	key := loadedSnapshotKeyPrefix + filename
+	keysByHashRange := map[int64][]string{internalKeysHashRange: {key}}
+
+	if err := s.cache.Put(keysByHashRange, s.config.LoadedSnapshotTTL); err != nil {
+		return fmt.Errorf("marking snapshot as loaded: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) getSnapshotFilenamePrefix() string {
