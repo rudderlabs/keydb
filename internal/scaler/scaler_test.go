@@ -188,7 +188,9 @@ type mockNodeServiceServer struct {
 	getNodeInfoFunc func(ctx context.Context, req *pb.GetNodeInfoRequest) (*pb.GetNodeInfoResponse, error)
 }
 
-func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *pb.GetNodeInfoRequest) (*pb.GetNodeInfoResponse, error) {
+func (m *mockNodeServiceServer) GetNodeInfo(
+	ctx context.Context, req *pb.GetNodeInfoRequest,
+) (*pb.GetNodeInfoResponse, error) {
 	if m.getNodeInfoFunc != nil {
 		return m.getNodeInfoFunc(ctx, req)
 	}

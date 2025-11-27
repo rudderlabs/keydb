@@ -36,6 +36,9 @@ const (
 	DefaultGrpcBackoffJitter     = 0.2
 	DefaultGrpcMaxDelay          = 2 * time.Minute
 	DefaultGrpcMinConnectTimeout = 20 * time.Second
+
+	DefaultClusterUpdateTimeout           = 10 * time.Second
+	DefaultClusterUpdateConnCheckInterval = 50 * time.Millisecond
 )
 
 // RetryPolicy defines the retry policy configuration
@@ -81,6 +84,12 @@ type Config struct {
 
 	// GrpcConfig defines the gRPC connection configuration
 	GrpcConfig GrpcConfig
+
+	// ClusterUpdateTimeout is the timeout for UpdateClusterData operations
+	ClusterUpdateTimeout time.Duration
+
+	// ClusterUpdateConnCheckInterval is the interval for checking node connectivity during cluster updates
+	ClusterUpdateConnCheckInterval time.Duration
 }
 
 type ScalingOperationType string
@@ -179,6 +188,12 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 	}
 	if config.GrpcConfig.MinConnectTimeout == 0 {
 		config.GrpcConfig.MinConnectTimeout = DefaultGrpcMinConnectTimeout
+	}
+	if config.ClusterUpdateTimeout == 0 {
+		config.ClusterUpdateTimeout = DefaultClusterUpdateTimeout
+	}
+	if config.ClusterUpdateConnCheckInterval == 0 {
+		config.ClusterUpdateConnCheckInterval = DefaultClusterUpdateConnCheckInterval
 	}
 
 	client := &Client{
@@ -483,7 +498,7 @@ func (c *Client) UpdateClusterData(ctx context.Context, nodesAddresses ...string
 	c.config.Addresses = nodesAddresses
 	c.clusterSize = int64(len(nodesAddresses))
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second) // TODO make this configurable
+	ctx, cancel := context.WithTimeout(ctx, c.config.ClusterUpdateTimeout)
 	defer cancel()
 
 	group, gCtx := kitsync.NewEagerGroup(ctx, len(nodesAddresses))
@@ -499,7 +514,7 @@ func (c *Client) UpdateClusterData(ctx context.Context, nodesAddresses ...string
 
 	// Checking connectivity since the gRPC client has its own backoff policy, the above group might not return on time
 	// to honour the context within the given timeout.
-	ticker := time.NewTicker(50 * time.Millisecond) // TODO make this configurable
+	ticker := time.NewTicker(c.config.ClusterUpdateConnCheckInterval)
 	for {
 		select {
 		case <-ctx.Done():
