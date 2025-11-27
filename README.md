@@ -44,12 +44,11 @@ config := client.Config{
     Addresses:          []string{"localhost:50051", "localhost:50052"}, // List of node addresses
     TotalHashRanges:    271,                                            // Optional, defaults to 271
     ConnectionPoolSize: 10,                                             // Optional, defaults to 10
-    RetryCount:         3,                                              // Optional, defaults to 3
     RetryPolicy:        client.RetryPolicy{
         Disabled:        false,
-        InitialInterval: 1 * time.Second,
-        Multiplier:      1.5,
-        MaxInterval:     1 * time.Minute,
+        InitialInterval: 100 * time.Millisecond, // Optional, defaults to 100ms
+        Multiplier:      1.5,                    // Optional, defaults to 1.5
+        MaxInterval:     30 * time.Second,       // Optional, defaults to 30s
     },
 }
 
@@ -131,7 +130,7 @@ To start a KeyDB node, configure it with environment variables (all prefixed wit
 ```bash
 # Configure node with environment variables
 export KEYDB_NODE_ID=0
-export KEYDB_NODE_ADDRESSES='["localhost:50051","localhost:50052","localhost:50053"]'
+export KEYDB_NODE_ADDRESSES="localhost:50051,localhost:50052,localhost:50053"
 export KEYDB_PORT=50051
 export KEYDB_SNAPSHOT_INTERVAL=60s
 export KEYDB_TOTAL_HASH_RANGES=271
@@ -150,6 +149,15 @@ export KEYDB_STORAGE_ACCESSKEY="your-secret-access-key"
 go run cmd/node/main.go
 ```
 
+### Dynamic Cluster Configuration
+
+Node addresses can be updated dynamically without restarting the node. The `KEYDB_NODE_ADDRESSES` environment variable
+is reloadable, meaning changes to the configuration will be picked up by running nodes.
+
+In order to do that, update the `nodeAddresses` via the configmap (i.e. `/etc/rudderstack/config.yaml`).
+
+This is useful during scaling operations along with `degradedNodes`.
+
 ## Scaling the Cluster
 
 To scale the KeyDB cluster, you can leverage the `Scaler` HTTP API.
@@ -158,12 +166,19 @@ Internally the `Scaler` API uses the `internal/scaler` gRPC client to manage the
 
 ### Scaling via HTTP API
 
-Here is an example of how to scale the cluster via the HTTP API:
+Here is a `SCALE UP` example of how to scale the cluster via the HTTP API.
+
+The below example will depict the scenario of scaling from 1 node to 3 nodes. 
+
 1. Use the `/hashRangeMovements` to preview the number of hash ranges that will be moved when scaling
    * see [Previewing a Scaling Operation](#previewing-a-scaling-operation) for more details
-2. If necessary merge a `rudder-devops` PR to increase the CPU and memory of the nodes prior to the scaling operation
-   * This might be useful since creating and loading snapshots can have a significant impact on CPU and memory, 
-     especially when we have to load big snapshots (which can also be compressed) from S3
+2. Merge a `rudder-devops` PR what will:
+   * Increase the CPU and memory of the nodes to give more power for the creation of the snapshots
+     * Consider increasing IOPS and disk throughput as well if necessary
+   * Increase the number of replicas (e.g. from 1 to 3) i.e. `replicaCount: 3`
+   * Set the `degradedNodes` 
+     * i.e. `false,true,true` which means that the 1st node will continue to receive traffic as usual whilst the 2
+       new nodes will not receive traffic but will be available to receive new snapshots
 3. If necessary call `/hashRangeMovements` again with `upload=true,full_sync=true` to start uploading the snapshots to
    the cloud storage
    * Pre-uploads and pre-download can be useful for several reasons:
@@ -174,10 +189,19 @@ Here is an example of how to scale the cluster via the HTTP API:
        they can just be small files that contain only the most recent data (see `since` in 
        [node/node.go](./node/node.go))
 4. Call `/autoScale`
+   * You can do this if you haven't already moved the data via `/hashRangeMovements`
    * You can call it with `skip_create_snapshots=true` if you already created the snapshots in the previous operation
-5. Merge a `rudder-devops` PR to trigger the scaling operation to add/remove the nodes as per the desired cluster size
-   * The PR will also update the nodes configuration in a way that would survive a node restart (e.g. `config.yaml`)
+5. Merge another `rudder-devops` PR to set `degradedNodes` to either empty or `false,false,false`
    * If necessary you should reduce the CPU and memory if you ended up increasing them in point 2
+
+Here is a `SCALE DOWN` example of how to scale the cluster via the HTTP API.
+
+The below example will depict the scenario of scaling from 3 to 1 node.
+
+1. Use the `/hashRangeMovements` to preview the number of hash ranges that will be moved when scaling
+   * see [Previewing a Scaling Operation](#previewing-a-scaling-operation) for more details
+2. Call `/hashRangeMovements` again with `upload=true,full_sync=true` to move the data
+3. Merge a `rudder-devops` PR to decrease the `replicaCount`
 
 ### Previewing a Scaling Operation
 
@@ -239,20 +263,26 @@ Supported options:
 
 ```go
 type HashRangeMovementsRequest struct {
-	OldClusterSize              int64      `json:"old_cluster_size"`
-	NewClusterSize              int64      `json:"new_cluster_size"`
-	TotalHashRanges             int64      `json:"total_hash_ranges"`
-	Upload                      bool        `json:"upload,omitempty"`
-	Download                    bool        `json:"download,omitempty"`
-	FullSync                    bool        `json:"full_sync,omitempty"`
-	LoadSnapshotsMaxConcurrency int64      `json:"load_snapshots_max_concurrency,omitempty"`
+	OldClusterSize                     int64 `json:"old_cluster_size"`
+	NewClusterSize                     int64 `json:"new_cluster_size"`
+	TotalHashRanges                    int64 `json:"total_hash_ranges"`
+	Upload                             bool  `json:"upload,omitempty"`
+	Download                           bool  `json:"download,omitempty"`
+	FullSync                           bool  `json:"full_sync,omitempty"`
+	CreateSnapshotsMaxConcurrency      int   `json:"create_snapshots_max_concurrency,omitempty"`
+	LoadSnapshotsMaxConcurrency        int   `json:"load_snapshots_max_concurrency,omitempty"`
+	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
 }
 ```
 
-Consider using `LoadSnapshotsMaxConcurrency` if a node has to load a large number of big snapshots to avoid OOM kills.
+Consider using `CreateSnapshotsMaxConcurrency` and `LoadSnapshotsMaxConcurrency` to control resource usage:
+- `CreateSnapshotsMaxConcurrency`: Limits how many snapshots can be created concurrently (default: 10)
+- `LoadSnapshotsMaxConcurrency`: Limits how many snapshots can be loaded concurrently from S3 (default: 10)
+
+This is useful if a node has to handle a large number of big snapshots to avoid OOM kills.
 Alternatively you can give the nodes more memory, although a balance of the two is usually a good idea.
-This could happen because snapshots are usually compressed and uploaded to S3, so the download and uncompression
-of big snapshots could take a big portion of memory.
+Snapshots are usually compressed and uploaded to S3, so the download and decompression
+of big snapshots could take a significant portion of memory.
 
 ### AutoScale
 
@@ -273,7 +303,9 @@ follows this schema:
     ],
     "full_sync": false,
     "skip_create_snapshots": false,
-    "load_snapshots_max_concurrency": 3
+    "create_snapshots_max_concurrency": 10,
+    "load_snapshots_max_concurrency": 3,
+    "disable_create_snapshots_sequentially": false
 }
 ```
 
@@ -287,7 +319,10 @@ Usage:
   * useful to avoid having nodes download data from S3 that might be too old (thus containing expired data)
 * if `skip_create_snapshots` == `true` → it does not ask nodes to create snapshots
   * useful if you did a pre-upload via `/hashRangeMovements`
-* if `load_snapshots_max_concurrency` > 0 → it limits how many snapshots can be loaded concurrently from S3
+* if `create_snapshots_max_concurrency` > 0 → it limits how many snapshots can be created concurrently (default: 10)
+* if `load_snapshots_max_concurrency` > 0 → it limits how many snapshots can be loaded concurrently from S3 (default: 10)
+* if `disable_create_snapshots_sequentially` == `true` → snapshots are created in parallel instead of sequentially
+  * By default, snapshots are created sequentially to reduce resource pressure on nodes
 * if the operation does not succeed after all the retries, then a rollback to the "last operation" is triggered
   * to see what was the "last recorded operation" you can call `/lastOperation`
 
@@ -329,7 +364,7 @@ This approach ensures that if any old node restarts during scaling, it won't use
   * If you don't want to restart the nodes you can use `/autoScale` in auto-healing mode (i.e. with `old_cluster_size`
     equal to `new_cluster_size`)
 * You can do everything manually by calling the single endpoints yourself, although it might be burdensome with a lot
-  of hash ranges to move, so this would mean calling `/createSnapshots`, `/loadSnapshots`, and `/scale`
+  of hash ranges to move, so this would mean calling `/createSnapshots`, `/loadSnapshots`, and `/updateClusterData`
   manually (which is what the `/autoScale` endpoint does under the hood)
  
 ### Postman collection
@@ -343,7 +378,6 @@ This approach ensures that if any old node restarts during scaling, it won't use
 - `POST /info` - Get node information (e.g. node ID, cluster size, addresses, hash ranges managed by that node, etc...)
 - `POST /createSnapshots` - Create snapshots and upload them to cloud storage
 - `POST /loadSnapshots` - Downloads snapshots from cloud storage and loads them into BadgerDB
-- `POST /scale` - Scale the cluster
 - `POST /updateClusterData` - Update the scaler internal information with the addresses of all the nodes that comprise
   the cluster
 - `POST /autoScale` - Automatic scaling with retry and rollback logic
@@ -408,5 +442,6 @@ For a comprehensive list of available settings you can refer to the constructor 
   * We might need to create a `checkpoints` table to store what snapshots file a node has already loaded, so that we can
     skip them during a scaling operation
 * Scaling operations require additional resources
-  * For deployments with VPA enabled, resources can be automatically adjusted in-place (though restarts may still occur depending on configuration)
+  * For deployments with VPA enabled, resources can be automatically adjusted in-place (though restarts may still occur 
+    depending on configuration)
   * For deployments without VPA, resources must be manually increased before scaling, which will cause a restart

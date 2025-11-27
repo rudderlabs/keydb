@@ -35,8 +35,7 @@ const (
 )
 
 type scalerClient interface {
-	Scale(ctx context.Context, nodeIDs []int64) error
-	UpdateClusterData(addresses ...string) error
+	UpdateClusterData(ctx context.Context, addresses ...string) error
 	CreateSnapshots(ctx context.Context, nodeID int64, fullSync bool, hashRanges ...int64) error
 	LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64, hashRanges ...int64) error
 	ExecuteScalingWithRollback(opType scaler.ScalingOperationType, oldAddresses, newAddresses []string,
@@ -79,7 +78,6 @@ func newHTTPServer(
 	mux.Post("/info", s.handleInfo)
 	mux.Post("/createSnapshots", s.handleCreateSnapshots)
 	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
-	mux.Post("/scale", s.handleScale)
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
 	mux.Post("/autoScale", s.handleAutoScale)
 	mux.Post("/hashRangeMovements", s.handleHashRangeMovements)
@@ -261,33 +259,6 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
-// handleScale handles POST /scale requests
-func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
-	// Parse request body
-	var req ScaleRequest
-	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// Validate request
-	if len(req.NodeIDs) == 0 {
-		http.Error(w, "No node IDs provided", http.StatusBadRequest)
-		return
-	}
-
-	// Scale cluster
-	if err := s.scaler.Scale(r.Context(), req.NodeIDs); err != nil {
-		http.Error(w, fmt.Sprintf("Error scaling cluster: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Write response
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"success":true}`))
-}
-
 // handleUpdateClusterData handles POST /updateClusterData requests
 func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
@@ -304,7 +275,7 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Complete scale operation
-	if err := s.scaler.UpdateClusterData(req.Addresses...); err != nil {
+	if err := s.scaler.UpdateClusterData(r.Context(), req.Addresses...); err != nil {
 		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -395,7 +366,7 @@ func (s *httpServer) handleScaleUp(
 
 	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleUp, oldAddresses, newAddresses, func() error {
 		// Step 1: Update cluster data with new addresses
-		if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
+		if err := s.scaler.UpdateClusterData(ctx, newAddresses...); err != nil {
 			log.Errorn("Cannot update cluster data", obskit.Error(err))
 			return fmt.Errorf("updating cluster data: %w", err)
 		}
@@ -409,16 +380,10 @@ func (s *httpServer) handleScaleUp(
 			log.Infon("Scale up to start creating and loading snapshots")
 		}
 
-		err := s.processHashRangeMovements(
+		return s.processHashRangeMovements(
 			ctx, movements, fullSync, skipCreateSnapshots, createSnapshotsMaxConcurrency,
 			loadSnapshotsMaxConcurrency, disableCreateSnapshotsSequentially,
 		)
-		if err != nil {
-			return err
-		}
-
-		// Step 5: Scale all nodes
-		return s.completeScaleOperation(ctx, newClusterSize)
 	})
 }
 
@@ -466,15 +431,14 @@ func (s *httpServer) handleScaleDown(
 		}
 
 		// Step 2: Update cluster data with new addresses
-		if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
+		if err := s.scaler.UpdateClusterData(ctx, newAddresses...); err != nil {
 			log.Errorn("Cannot update cluster data", obskit.Error(err))
 			return fmt.Errorf("updating cluster data: %w", err)
 		}
 
 		log.Infon("Cluster data updated")
 
-		// Step 4: Scale remaining nodes
-		return s.completeScaleOperation(ctx, newClusterSize)
+		return nil
 	})
 }
 
@@ -495,32 +459,14 @@ func (s *httpServer) handleAutoHealing(ctx context.Context, oldAddresses, newAdd
 	}()
 
 	return s.scaler.ExecuteScalingWithRollback(scaler.AutoHealing, oldAddresses, newAddresses, func() error {
-		// Step 1: Update cluster data with current addresses to ensure consistency
-		if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
+		// Update cluster data with current addresses to ensure consistency
+		if err := s.scaler.UpdateClusterData(ctx, newAddresses...); err != nil {
 			log.Errorn("Cannot update cluster data", obskit.Error(err))
 			return fmt.Errorf("updating cluster data for auto-healing: %w", err)
 		}
 
-		// Step 2: Scale all nodes to refresh their cluster information
-		return s.completeScaleOperation(ctx, int64(len(newAddresses)))
+		return nil
 	})
-}
-
-func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize int64) error {
-	nodeIDs := make([]int64, clusterSize)
-	for i := int64(0); i < clusterSize; i++ {
-		nodeIDs[i] = i
-	}
-
-	s.logger.Infon("Starting scale operation")
-
-	if err := s.scaler.Scale(ctx, nodeIDs); err != nil {
-		return fmt.Errorf("scaling nodes: %w", err)
-	}
-
-	s.logger.Infon("Scale command sent to all nodes")
-
-	return nil
 }
 
 // handleHashRangeMovements handles POST /hashRangeMovements requests

@@ -42,6 +42,7 @@ var (
 )
 
 const (
+	nodeAddressesConfKey = "nodeAddresses"
 	degradedNodesConfKey = "degradedNodes"
 )
 
@@ -105,8 +106,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	if err != nil {
 		return err
 	}
-	nodeAddresses := conf.GetString("nodeAddresses", "")
-	if len(nodeAddresses) == 0 {
+
+	// nodeAddresses is reloadable to support dynamic cluster configuration updates
+	nodeAddresses := conf.GetReloadableStringVar("", nodeAddressesConfKey)
+	if len(strings.TrimSpace(nodeAddresses.Load())) == 0 {
 		return fmt.Errorf("no node addresses provided")
 	}
 	degradedNodes := conf.GetReloadableStringVar("", degradedNodesConfKey)
@@ -121,7 +124,13 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		GarbageCollectionInterval: conf.GetDuration("gcInterval", // node.DefaultGarbageCollectionInterval will be used
 			0, time.Nanosecond,
 		),
-		Addresses: strings.Split(nodeAddresses, ","),
+		Addresses: func() []string {
+			raw := strings.TrimSpace(nodeAddresses.Load())
+			if raw == "" {
+				return nil
+			}
+			return strings.Split(raw, ",")
+		},
 		DegradedNodes: func() []bool {
 			raw := strings.TrimSpace(degradedNodes.Load())
 			if raw == "" {
@@ -146,10 +155,14 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
 		logger.NewIntField("nodeId", nodeConfig.NodeID),
-		logger.NewIntField("clusterSize", int64(len(nodeConfig.Addresses))),
 		logger.NewIntField("totalHashRanges", nodeConfig.TotalHashRanges),
-		logger.NewStringField("nodeAddresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
-		logger.NewIntField("noOfAddresses", int64(len(nodeConfig.Addresses))),
+	)
+
+	addresses := nodeConfig.Addresses()
+	log.Infon("Creating service",
+		logger.NewIntField("clusterSize", int64(len(addresses))),
+		logger.NewIntField("noOfAddresses", int64(len(addresses))),
+		logger.NewStringField("nodeAddresses", strings.Join(addresses, ",")),
 	)
 
 	service, err := node.NewService(ctx, nodeConfig, cloudStorage, conf, stat, log.Child("service"))
@@ -239,8 +252,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	log.Infon("Starting node",
-		logger.NewStringField("addresses", fmt.Sprintf("%+v", nodeConfig.Addresses)),
+	log.Infon("Starting node service server",
+		logger.NewStringField("addresses", strings.Join(addresses, ",")),
 		logger.NewStringField("degradedNodes", degradedNodes.Load()),
 	)
 

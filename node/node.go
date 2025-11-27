@@ -645,47 +645,6 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 	}, nil
 }
 
-// Scale implements the Scale RPC method
-func (s *Service) Scale(_ context.Context, req *pb.ScaleRequest) (*pb.ScaleResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	log := s.logger.Withn(logger.NewIntField("newClusterSize", int64(len(req.NodesAddresses))))
-	log.Infon("Scale request received")
-
-	previousClusterSize := s.config.getClusterSize()
-
-	// Validate new cluster size
-	if len(req.NodesAddresses) == 0 {
-		log.Warnn("New cluster size must be greater than 0")
-		return &pb.ScaleResponse{
-			Success:             false,
-			ErrorMessage:        "new cluster size must be greater than 0",
-			PreviousClusterSize: previousClusterSize,
-			NewClusterSize:      previousClusterSize,
-		}, nil
-	}
-
-	// WARNING!
-	// We don't check if the cluster size is already at the desired size to allow for auto-healing
-	// and to force the node to load the desired snapshots from S3.
-
-	// Update cluster size
-	s.config.Addresses = req.NodesAddresses
-	newClusterSize := int64(len(s.config.Addresses))
-
-	log.Infon("Scale completed successfully, you can now update the degraded nodes list",
-		logger.NewIntField("previousClusterSize", previousClusterSize),
-		logger.NewIntField("newClusterSize", newClusterSize),
-	)
-
-	return &pb.ScaleResponse{
-		Success:             true,
-		PreviousClusterSize: previousClusterSize,
-		NewClusterSize:      newClusterSize,
-	}, nil
-}
-
 // LoadSnapshots forces the node to load all snapshots from cloud storage
 func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsRequest) (*pb.LoadSnapshotsResponse, error) {
 	s.mu.Lock()
@@ -968,15 +927,19 @@ func (s *Service) isDegraded() (int64, bool) {
 
 // getNonDegradedAddresses returns the list of node addresses excluding degraded nodes
 func (s *Service) getNonDegradedAddresses() []string {
+	var addresses []string
+	if s.config.Addresses != nil {
+		addresses = s.config.Addresses()
+	}
 	if s.config.DegradedNodes == nil {
-		return s.config.Addresses
+		return addresses
 	}
 	degradedNodes := s.config.DegradedNodes()
 	if len(degradedNodes) == 0 {
-		return s.config.Addresses
+		return addresses
 	}
-	nonDegraded := make([]string, 0, len(s.config.Addresses))
-	for i, addr := range s.config.Addresses {
+	nonDegraded := make([]string, 0, len(addresses))
+	for i, addr := range addresses {
 		if i >= len(degradedNodes) || !degradedNodes[i] {
 			nonDegraded = append(nonDegraded, addr)
 		}

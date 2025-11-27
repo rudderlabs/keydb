@@ -35,16 +35,17 @@ func BenchmarkSingleNode(b *testing.B) {
 		defaultTTL               = time.Hour
 	)
 
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(b, err)
+	address := "localhost:" + strconv.Itoa(freePort)
+	addresses := []string{address}
+
 	nodeConfig := node.Config{
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 24 * time.Hour,
+		Addresses:        func() []string { return addresses },
 	}
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(b, err)
-	address := "localhost:" + strconv.Itoa(freePort)
-	nodeConfig.Addresses = append(nodeConfig.Addresses, address)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -72,7 +73,7 @@ func BenchmarkSingleNode(b *testing.B) {
 	})
 
 	clientConfig := client.Config{
-		Addresses:       nodeConfig.Addresses,
+		Addresses:       addresses,
 		TotalHashRanges: totalHashRanges,
 	}
 
