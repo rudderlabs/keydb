@@ -70,7 +70,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address)
@@ -102,7 +102,7 @@ func TestScaleUpAndDown(t *testing.T) {
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf, node1Conf)
+	}, []*config.Config{node0Conf, node1Conf})
 
 	// Test scaling procedure
 	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{
@@ -221,7 +221,7 @@ func TestAutoScale(t *testing.T) {
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -247,7 +247,7 @@ func TestAutoScale(t *testing.T) {
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf, node1Conf)
+	}, []*config.Config{node0Conf, node1Conf})
 
 	// Test Scale Up using autoScale
 	_ = s.Do("/autoScale", AutoScaleRequest{
@@ -373,11 +373,11 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 	// Create the node service
 	totalHashRanges := int64(3)
 	node0Conf := newConf()
-	node0, node0Address := getServiceWithProxy(ctx, t, cloudStorage, node.Config{
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, proxy, node0Conf)
+	}, []*config.Config{node0Conf}, withProxy(proxy))
 	go proxy.Start(t) // Starting the proxy after we get the service to populate RemoteAddr
 
 	// Start the Scaler HTTP Server
@@ -407,7 +407,7 @@ func TestAutoScaleTransientNetworkFailure(t *testing.T) {
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf, node1Conf)
+	}, []*config.Config{node0Conf, node1Conf})
 
 	// Test Scale Up using autoScale
 	t.Log("Stopping proxy to simulate transient failure...")
@@ -588,7 +588,7 @@ func TestHandleAutoScaleErrors(t *testing.T) {
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 	t.Cleanup(node0.Close)
 
 	// Start the Scaler HTTP Server
@@ -671,7 +671,7 @@ func TestAutoHealing(t *testing.T) {
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 	t.Cleanup(node0.Close)
 
 	// Start the Scaler HTTP Server
@@ -740,7 +740,7 @@ func TestHashRangeMovements(t *testing.T) {
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 	t.Cleanup(node0.Close)
 
 	// Start the Scaler HTTP Server
@@ -972,7 +972,7 @@ func TestHashRangeMovements(t *testing.T) {
 			NodeID:           1,
 			TotalHashRanges:  totalHashRanges,
 			SnapshotInterval: 60 * time.Second,
-		}, node0Conf, newNodeConf)
+		}, []*config.Config{node0Conf, newNodeConf})
 
 		s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{}, node0Address, newNodeAddress)
 
@@ -1086,7 +1086,7 @@ func TestScaleUpFailureAndRollback(t *testing.T) {
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 	t.Cleanup(node0.Close)
 
 	// Start the Scaler HTTP Server
@@ -1194,14 +1194,14 @@ func TestScaleDownFailureAndRollback(t *testing.T) {
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf, node1Conf)
+	}, []*config.Config{node0Conf, node1Conf})
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -1313,7 +1313,7 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 		NodeID:           0,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 	t.Cleanup(node0.Close)
 
 	node1Conf := newConf()
@@ -1321,7 +1321,7 @@ func TestAutoHealingFailureAndRollback(t *testing.T) {
 		NodeID:           1,
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
-	}, node0Conf, node1Conf)
+	}, []*config.Config{node0Conf, node1Conf})
 	t.Cleanup(node1.Close)
 
 	// Start the Scaler HTTP Server
@@ -1463,9 +1463,9 @@ type serviceConfig struct {
 	proxy *tcpproxy.Proxy
 }
 
-type option func(*serviceConfig)
+type serviceOption func(*serviceConfig)
 
-func withProxy(proxy *tcpproxy.Proxy) option {
+func withProxy(proxy *tcpproxy.Proxy) serviceOption {
 	return func(c *serviceConfig) { c.proxy = proxy }
 }
 
@@ -1502,7 +1502,7 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 		DegradedNodes: func() []bool {
 			return degradedNodes
 		},
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
@@ -1511,7 +1511,7 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 		DegradedNodes: func() []bool {
 			return degradedNodes
 		},
-	}, node0Conf, node1Conf)
+	}, []*config.Config{node0Conf, node1Conf})
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -1594,7 +1594,7 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 		NodeID:          0,
 		TotalHashRanges: totalHashRanges,
 		DegradedNodes:   func() []bool { return degradedNodes },
-	}, node0Conf)
+	}, []*config.Config{node0Conf})
 
 	// Start the Scaler HTTP Server
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -1623,7 +1623,7 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 		NodeID:          1,
 		TotalHashRanges: totalHashRanges,
 		DegradedNodes:   func() []bool { return degradedNodes },
-	}, node0Conf, node1Conf)
+	}, []*config.Config{node0Conf, node1Conf})
 
 	// Step 4: Update degradedNodes - mark node 1 as degraded
 	degradedNodes = append(degradedNodes, true) //nolint:makezero
@@ -1744,78 +1744,33 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 }
 
 func getService(
-	ctx context.Context, t testing.TB, cs *filemanager.S3Manager, nodeConfig node.Config, conf ...*config.Config,
-) (*node.Service, string) {
-	t.Helper()
-	if len(conf) < 1 {
-		t.Fatal("no config provided")
-	}
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-	address := "localhost:" + strconv.Itoa(freePort)
-
-	// Simulating reloadable addresses for all configs
-	nodeAddresses := conf[0].GetReloadableStringVar("", nodeAddressesConfKey)
-	var addrList []string
-	if rawAddresses := strings.TrimSpace(nodeAddresses.Load()); rawAddresses != "" {
-		addrList = append(strings.Split(rawAddresses, ","), address)
-	} else {
-		addrList = []string{address}
-	}
-	for _, c := range conf {
-		c.Set(nodeAddressesConfKey, strings.Join(addrList, ","))
-	}
-
-	// Set the Addresses function to return our modifiable slice
-	nodeConfig.Addresses = func() []string {
-		return strings.Split(nodeAddresses.Load(), ",")
-	}
-	nodeConfig.BackupFolderName = defaultBackupFolderName
-
-	log := logger.NOP
-	if testing.Verbose() {
-		log = logger.NewLogger()
-	}
-	conf[nodeConfig.NodeID].Set("BadgerDB.Dedup.NopLogger", true)
-	service, err := node.NewService(ctx, nodeConfig, cs, conf[nodeConfig.NodeID], stats.NOP, log)
-	require.NoError(t, err)
-
-	// Create a gRPC server
-	server := grpc.NewServer()
-	pb.RegisterNodeServiceServer(server, service)
-
-	lis, err := net.Listen("tcp", address)
-	require.NoError(t, err)
-
-	// Start the server
-	go func() {
-		require.NoError(t, server.Serve(lis))
-	}()
-	t.Cleanup(func() {
-		server.GracefulStop()
-		_ = lis.Close()
-	})
-
-	return service, address
-}
-
-// TODO merge getService with getServiceWithProxy
-func getServiceWithProxy(
 	ctx context.Context, t testing.TB, cs *filemanager.S3Manager, nodeConfig node.Config,
-	proxy *tcpproxy.Proxy, conf ...*config.Config,
+	conf []*config.Config, opts ...serviceOption,
 ) (*node.Service, string) {
 	t.Helper()
 	if len(conf) < 1 {
 		t.Fatal("no config provided")
+	}
+
+	// Apply options
+	cfg := &serviceConfig{}
+	for _, opt := range opts {
+		opt(cfg)
 	}
 
 	freePort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
 	listenAddr := "localhost:" + strconv.Itoa(freePort)
-	address := proxy.LocalAddr
-	proxy.RemoteAddr = listenAddr
-	t.Logf("Using proxy, client will connect to %s but node is %s", address, listenAddr)
+
+	// Determine the address clients will use
+	var address string
+	if cfg.proxy != nil {
+		address = cfg.proxy.LocalAddr
+		cfg.proxy.RemoteAddr = listenAddr
+		t.Logf("Using proxy, client will connect to %s but node is %s", address, listenAddr)
+	} else {
+		address = listenAddr
+	}
 
 	// Simulating reloadable addresses for all configs
 	nodeAddresses := conf[0].GetReloadableStringVar("", nodeAddressesConfKey)
