@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -109,6 +110,13 @@ type Cache interface {
 
 	// Put adds or updates keys inside the cache with the specified TTL and returns an error if the operation failed
 	Put(keysByHashRange map[int64][]string, ttl time.Duration) error
+
+	// GetValue retrieves the value associated with a key.
+	// Returns the value, a boolean indicating if the key exists, and an error if the operation failed.
+	GetValue(key string, hashRange int64) ([]byte, bool, error)
+
+	// PutValue stores a key-value pair with the specified TTL.
+	PutValue(key string, hashRange int64, value []byte, ttl time.Duration) error
 
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
@@ -1396,48 +1404,38 @@ func (s *Service) closeNodeConnection(conn *grpc.ClientConn) {
 
 // getSnapshotTimestamp retrieves the stored timestamp for a hash range.
 func (s *Service) getSnapshotTimestamp(hashRange int64) (uint64, error) {
-	key := snapshotTimestampKeyPrefix + strconv.FormatInt(hashRange, 10)
-	keysByHashRange := map[int64][]string{internalKeysHashRange: {key}}
-	indexes := map[string]int{key: 0}
-
-	results, err := s.cache.Get(keysByHashRange, indexes)
+	key := getSnapshotTimestampKey(hashRange)
+	value, found, err := s.cache.GetValue(key, internalKeysHashRange)
 	if err != nil {
 		return 0, fmt.Errorf("getting snapshot timestamp: %w", err)
 	}
 
 	// If the key doesn't exist, return 0 (full sync needed)
-	if !results[0] {
+	if !found || len(value) < 8 {
 		return 0, nil
 	}
 
-	// The timestamp is encoded in the key itself for simplicity
-	// We use a special key format: _snapshot_timestamp:<hashRange>:<timestamp>
-	// But since we only store the existence of keys, we need a different approach.
-	// Let's use a dedicated internal storage mechanism.
-
-	// For now, we'll use the simpler approach of listing cloud snapshots if available,
-	// but for streaming we need to track timestamps differently.
-	// The current implementation returns 0 to indicate full sync.
-	// This is a simplification that can be enhanced later.
-	return 0, nil
+	return binary.BigEndian.Uint64(value), nil
 }
 
 // setSnapshotTimestamp stores the timestamp for a hash range.
 func (s *Service) setSnapshotTimestamp(hashRange int64, timestamp uint64) error {
-	// Store a marker key to indicate we have loaded data for this hash range
-	// The actual timestamp tracking would require extending the cache interface
-	// For now, we just mark that the hash range has been loaded
-	key := snapshotTimestampKeyPrefix + strconv.FormatInt(hashRange, 10)
-	keysByHashRange := map[int64][]string{internalKeysHashRange: {key}}
+	value := make([]byte, 8) // Encode timestamp as big-endian uint64
+	binary.BigEndian.PutUint64(value, timestamp)
 
-	if err := s.cache.Put(keysByHashRange, s.config.LoadedSnapshotTTL); err != nil {
+	key := getSnapshotTimestampKey(hashRange)
+	if err := s.cache.PutValue(key, internalKeysHashRange, value, 0); err != nil {
 		return fmt.Errorf("setting snapshot timestamp: %w", err)
 	}
 
-	s.logger.Debugn("Stored snapshot timestamp marker",
+	s.logger.Debugn("Stored snapshot timestamp",
 		logger.NewIntField("hashRange", hashRange),
 		logger.NewIntField("timestamp", int64(timestamp)),
 	)
 
 	return nil
+}
+
+func getSnapshotTimestampKey(hashRange int64) string {
+	return snapshotTimestampKeyPrefix + strconv.FormatInt(hashRange, 10)
 }
