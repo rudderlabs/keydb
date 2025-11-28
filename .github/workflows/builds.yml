@@ -54,13 +54,13 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{env.docker_images_keydb}}
           tags: ${{env.docker_tags_keydb}}
       - name: Docker arm64 meta
         id: arm64_meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{env.docker_images_keydb}}
           tags: ${{env.docker_tags_keydb}}
@@ -68,7 +68,7 @@ jobs:
             suffix=-${{env.arch_arm64}},onlatest=true
       - name: Docker amd64 meta
         id: amd64_meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{env.docker_images_keydb}}
           tags: ${{env.docker_tags_keydb}}
@@ -165,13 +165,13 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{env.docker_images_keydb_scaler}}
           tags: ${{env.docker_tags_keydb_scaler}}
       - name: Docker arm64 meta
         id: arm64_meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{env.docker_images_keydb_scaler}}
           tags: ${{env.docker_tags_keydb_scaler}}
@@ -179,7 +179,7 @@ jobs:
             suffix=-${{env.arch_arm64}},onlatest=true
       - name: Docker amd64 meta
         id: amd64_meta
-        uses: docker/metadata-action@318604b99e75e41977312d83839a89be02ca4893 # v5.9.0
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ${{env.docker_images_keydb_scaler}}
           tags: ${{env.docker_tags_keydb_scaler}}
