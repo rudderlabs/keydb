@@ -505,9 +505,13 @@ func (c *Client) SendSnapshot(
 				return fmt.Errorf("sending snapshot from node %d to %s: %w", sourceNodeID, destinationAddress, err)
 			}
 			if resp != nil {
-				return fmt.Errorf("sending snapshot from node %d to %s: %s", sourceNodeID, destinationAddress, resp.ErrorMessage)
+				return fmt.Errorf("sending snapshot from node %d to %s: %s",
+					sourceNodeID, destinationAddress, resp.ErrorMessage,
+				)
 			}
-			return fmt.Errorf("sending snapshot from node %d to %s: both error and response are nil", sourceNodeID, destinationAddress)
+			return fmt.Errorf("sending snapshot from node %d to %s: both error and response are nil",
+				sourceNodeID, destinationAddress,
+			)
 		}
 
 		loggerFields := func(fields ...logger.Field) []logger.Field {
@@ -529,7 +533,9 @@ func (c *Client) SendSnapshot(
 				obskit.Error(errors.New(resp.ErrorMessage)),
 			)...)
 		} else {
-			return fmt.Errorf("sending snapshot from node %d to %s: both error and response are nil", sourceNodeID, destinationAddress)
+			return fmt.Errorf("sending snapshot from node %d to %s: both error and response are nil",
+				sourceNodeID, destinationAddress,
+			)
 		}
 
 		// Wait before retrying
