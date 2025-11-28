@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,6 +309,125 @@ func TestScaleUpAndDown(t *testing.T) {
 		conf := config.New()
 		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
 		return conf
+	})
+}
+
+func TestScaleUpAndDownStreaming(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	run := func(t *testing.T, newConf func() *config.Config) {
+		minioContainer, err := miniokit.Setup(pool, t)
+		require.NoError(t, err)
+
+		cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Create node0 service
+		totalHashRanges := int64(3)
+		node0Conf := newConf()
+		degradedNodes := degradedNodesConfig{}
+		node0, node0Address := getService(ctx, t, cloudStorage, Config{
+			NodeID:           0,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+			DegradedNodes:    degradedNodes.load,
+		}, node0Conf)
+		degradedNodes.addNode(node0, false)
+		c := getClient(t, totalHashRanges, node0Address)
+
+		// Test Put - add keys that will be distributed across hash ranges
+		// Using more keys ensures data exists in hash ranges that will be transferred
+		keysToAdd := []string{
+			"key1", "key2", "key3", "key4", "key5",
+			"key6", "key7", "key8", "key9", "key10",
+		}
+		require.NoError(t, c.Put(ctx, keysToAdd, testTTL))
+
+		keys := append(keysToAdd, "nonexistent")
+		exists, err := c.Get(ctx, keys)
+		require.NoError(t, err)
+		expected := make([]bool, len(keys))
+		for i := range keysToAdd {
+			expected[i] = true
+		}
+		expected[len(keys)-1] = false // "nonexistent" should be false
+		require.Equal(t, expected, exists)
+
+		op := getScaler(t, totalHashRanges, node0Address)
+
+		// Create node1 - it starts empty
+		node1Conf := newConf()
+		node1, node1Address := getService(ctx, t, cloudStorage, Config{
+			NodeID:           1,
+			TotalHashRanges:  totalHashRanges,
+			SnapshotInterval: 60 * time.Second,
+			DegradedNodes:    degradedNodes.load,
+		}, node0Conf, node1Conf)
+		degradedNodes.addNode(node1, true)
+		require.NoError(t, op.UpdateClusterData(context.Background(), node0Address, node1Address))
+
+		// Get hash ranges that node1 will handle
+		node0HashRanges := node0.hasher.GetNodeHashRangesList(0)
+		require.Greater(t, len(node0HashRanges), 0, "Each node should handle at least one hash range")
+		t.Logf("Node 0 hash ranges: %+v", node0HashRanges)
+		node1HashRanges := node1.hasher.GetNodeHashRangesList(1)
+		require.Greater(t, len(node1HashRanges), 0, "Each node should handle at least one hash range")
+		t.Logf("Node 1 hash ranges: %+v", node1HashRanges)
+
+		// Use streaming to transfer data from node0 to node1 for the hash ranges node1 will handle
+		for _, hashRange := range node1HashRanges {
+			t.Logf("Sending hash range %d to node 1", hashRange)
+			resp, sendErr := node0.SendSnapshot(ctx, &pb.SendSnapshotRequest{
+				HashRange:          hashRange,
+				DestinationAddress: node1Address,
+			})
+			require.NoError(t, sendErr)
+			require.True(t, resp.Success, "SendSnapshot failed: %s", resp.ErrorMessage)
+		}
+
+		// Trigger hasher reinitialization based on updated addresses
+		degradedNodes.set(false, false)
+
+		respNode0, err := op.GetNodeInfo(ctx, 0)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, respNode0.ClusterSize)
+		require.Len(t, respNode0.HashRanges, 2)
+
+		respNode1, err := op.GetNodeInfo(ctx, 1)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, respNode1.ClusterSize)
+		require.Len(t, respNode1.HashRanges, 1)
+
+		// Verify data is accessible via the client (which will route to the correct node)
+		exists, err = c.Get(ctx, keys)
+		require.NoError(t, err)
+		require.Equal(t, expected, exists)
+
+		cancel()
+		node0.Close()
+		node1.Close()
+	}
+
+	t.Run("badger", func(t *testing.T) {
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", false)
+			return conf
+		})
+	})
+
+	t.Run("badger compressed", func(t *testing.T) {
+		run(t, func() *config.Config {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+			conf.Set("BadgerDB.Dedup.Compress", true)
+			return conf
+		})
 	})
 }
 
@@ -1136,4 +1256,35 @@ func getScaler(t testing.TB, totalHashRanges int64, addresses ...string) *scaler
 	t.Cleanup(func() { _ = op.Close() })
 
 	return op
+}
+
+type degradedNodesConfig struct {
+	nodes           []*Service
+	degradedNodes   []bool
+	degradedNodesMu sync.RWMutex
+}
+
+func (d *degradedNodesConfig) addNode(node *Service, degraded bool) {
+	d.nodes = append(d.nodes, node)
+	d.degradedNodesMu.Lock()
+	d.degradedNodes = append(d.degradedNodes, degraded)
+	d.degradedNodesMu.Unlock()
+	for _, node := range d.nodes {
+		node.DegradedNodesChanged()
+	}
+}
+
+func (d *degradedNodesConfig) set(b ...bool) {
+	d.degradedNodesMu.Lock()
+	d.degradedNodes = b
+	d.degradedNodesMu.Unlock()
+	for _, node := range d.nodes {
+		node.DegradedNodesChanged()
+	}
+}
+
+func (d *degradedNodesConfig) load() []bool {
+	d.degradedNodesMu.RLock()
+	defer d.degradedNodesMu.RUnlock()
+	return d.degradedNodes
 }
