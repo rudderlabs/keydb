@@ -2012,3 +2012,205 @@ func startMockNodeService(t testing.TB, identifier string) *mockNodeServiceServe
 
 	return mockServer
 }
+
+func TestAutoScaleStreaming(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create initial cluster with 1 node
+	totalHashRanges := int64(6)
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, []*config.Config{node0Conf})
+
+	// Start the Scaler HTTP Server
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, withAddress(node0Address))
+
+	// Put initial data
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH"},
+		TTL:  testTTL,
+	}, true)
+
+	// Verify data exists
+	body := s.Do("/get", GetRequest{
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH", "keyZ"},
+	})
+	require.JSONEq(t,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":true,
+		"keyE":true,"keyF":true,"keyG":true,"keyH":true,"keyZ":false}`,
+		body,
+	)
+
+	// Verify node 0 info before scaling
+	body = s.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse := pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 1, infoResponse.ClusterSize)
+	require.ElementsMatch(t, []int64{0, 1, 2, 3, 4, 5}, infoResponse.HashRanges)
+
+	// Create node 1 and node 2 for scale up to 3 nodes
+	node1Conf := newConf()
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, []*config.Config{node0Conf, node1Conf})
+
+	node2Conf := newConf()
+	node2, node2Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, []*config.Config{node0Conf, node1Conf, node2Conf})
+
+	// Scale up from 1 to 3 nodes using streaming
+	t.Log("Scaling up from 1 node to 3 nodes using streaming...")
+	_ = s.Do("/autoScale", AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address},
+		NewNodesAddresses: []string{node0Address, node1Address, node2Address},
+		Streaming:         true,
+	}, true)
+
+	// Trigger hasher reinitialization
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
+	node2.DegradedNodesChanged()
+
+	// Calculate expected hash ranges for 3 nodes
+	hasher3Nodes := hash.New(3, totalHashRanges)
+	expectedNode0HRs := hasher3Nodes.GetNodeHashRangesList(0)
+	require.Greater(t, len(expectedNode0HRs), 0)
+	expectedNode1HRs := hasher3Nodes.GetNodeHashRangesList(1)
+	require.Greater(t, len(expectedNode1HRs), 0)
+	expectedNode2HRs := hasher3Nodes.GetNodeHashRangesList(2)
+	require.Greater(t, len(expectedNode2HRs), 0)
+
+	// Verify scale up worked - check node info for all 3 nodes
+	body = s.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 3, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 3)
+	require.ElementsMatch(t, expectedNode0HRs, infoResponse.HashRanges)
+
+	body = s.Do("/info", InfoRequest{NodeID: 1})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 3, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 3)
+	require.ElementsMatch(t, expectedNode1HRs, infoResponse.HashRanges)
+
+	body = s.Do("/info", InfoRequest{NodeID: 2})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 3, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 3)
+	require.ElementsMatch(t, expectedNode2HRs, infoResponse.HashRanges)
+
+	// Verify all data is still accessible after scale up
+	body = s.Do("/get", GetRequest{
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH", "keyZ"},
+	})
+	require.JSONEq(t,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":true,"keyE":true,
+		"keyF":true,"keyG":true,"keyH":true,"keyZ":false}`,
+		body,
+	)
+
+	// Add more data after scale up
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"key1", "key2", "key3", "key4"},
+		TTL:  testTTL,
+	}, true)
+
+	// Verify all keys including new ones
+	body = s.Do("/get", GetRequest{
+		Keys: []string{
+			"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH",
+			"key1", "key2", "key3", "key4",
+		},
+	})
+	require.JSONEq(t,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":true,"keyE":true,"keyF":true,
+		"keyG":true,"keyH":true,"key1":true,"key2":true,"key3":true,"key4":true}`,
+		body,
+	)
+
+	// Scale down from 3 to 2 nodes using streaming
+	t.Log("Scaling down from 3 nodes to 2 nodes using streaming...")
+	_ = s.Do("/autoScale", AutoScaleRequest{
+		OldNodesAddresses: []string{node0Address, node1Address, node2Address},
+		NewNodesAddresses: []string{node0Address, node1Address},
+		Streaming:         true,
+	}, true)
+
+	// Update addresses on remaining nodes (simulating DevOps config change for scale down)
+	node0Conf.Set(nodeAddressesConfKey, node0Address+","+node1Address)
+	node1Conf.Set(nodeAddressesConfKey, node0Address+","+node1Address)
+
+	// Trigger hasher reinitialization
+	node0.DegradedNodesChanged()
+	node1.DegradedNodesChanged()
+
+	// Calculate expected hash ranges for 2 nodes
+	hasher2Nodes := hash.New(2, totalHashRanges)
+	expectedNode0HRs = hasher2Nodes.GetNodeHashRangesList(0)
+	expectedNode1HRs = hasher2Nodes.GetNodeHashRangesList(1)
+
+	// Verify scale down worked - check node info
+	body = s.Do("/info", InfoRequest{NodeID: 0})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 2)
+	require.ElementsMatch(t, expectedNode0HRs, infoResponse.HashRanges)
+
+	body = s.Do("/info", InfoRequest{NodeID: 1})
+	infoResponse = pb.GetNodeInfoResponse{}
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+	require.EqualValues(t, 2, infoResponse.ClusterSize)
+	require.Len(t, infoResponse.NodesAddresses, 2)
+	require.ElementsMatch(t, expectedNode1HRs, infoResponse.HashRanges)
+
+	// Verify all data is still accessible after scale down
+	body = s.Do("/get", GetRequest{
+		Keys: []string{
+			"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH",
+			"key1", "key2", "key3", "key4",
+			"keyZ", // should not exist
+		},
+	})
+	require.JSONEq(t,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":true,"keyE":true,"keyF":true,"keyG":true,
+		"keyH":true,"key1":true,"key2":true,"key3":true,"key4":true,"keyZ":false}`,
+		body,
+	)
+
+	s.Close()
+	cancel()
+	node0.Close()
+	node1.Close()
+	node2.Close()
+}
