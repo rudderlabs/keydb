@@ -1288,3 +1288,360 @@ func (d *degradedNodesConfig) load() []bool {
 	defer d.degradedNodesMu.RUnlock()
 	return d.degradedNodes
 }
+
+// TestStreamingParallelFromMultipleSources tests that multiple source nodes can stream
+// data in parallel to destination nodes during a scale operation.
+func TestStreamingParallelFromMultipleSources(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	cloudStorage := keydbth.GetCloudStorage(t, conf, minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create 3 nodes - scale from 2 to 3
+	totalHashRanges := int64(6)
+	degradedNodes := degradedNodesConfig{}
+
+	// Node 0
+	node0Conf := config.New()
+	node0Conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	node0, node0Address := getService(ctx, t, cloudStorage, Config{
+		NodeID:           0,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		DegradedNodes:    degradedNodes.load,
+	}, node0Conf)
+	degradedNodes.addNode(node0, false)
+
+	// Node 1
+	node1Conf := config.New()
+	node1Conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	node1, node1Address := getService(ctx, t, cloudStorage, Config{
+		NodeID:           1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		DegradedNodes:    degradedNodes.load,
+	}, node0Conf, node1Conf)
+	degradedNodes.addNode(node1, false)
+
+	c := getClient(t, totalHashRanges, node0Address, node1Address)
+	op := getScaler(t, totalHashRanges, node0Address, node1Address)
+
+	// Add keys that will be distributed across multiple hash ranges
+	keysToAdd := make([]string, 20)
+	for i := range keysToAdd {
+		keysToAdd[i] = fmt.Sprintf("parallel-test-key-%d", i)
+	}
+	require.NoError(t, c.Put(ctx, keysToAdd, testTTL))
+
+	// Node 2 - starts in degraded mode
+	node2Conf := config.New()
+	node2Conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	node2, node2Address := getService(ctx, t, cloudStorage, Config{
+		NodeID:           2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		DegradedNodes:    degradedNodes.load,
+	}, node0Conf, node1Conf, node2Conf)
+	degradedNodes.addNode(node2, true)
+
+	require.NoError(t, op.UpdateClusterData(context.Background(), node0Address, node1Address, node2Address))
+
+	// Get hash range movements using the same algorithm the scaler uses
+	movements := hash.GetHashRangeMovementsByRange(2, 3, totalHashRanges)
+	require.Greater(t, len(movements), 0, "Should have movements to transfer")
+	t.Logf("Movements: %+v", movements)
+
+	// Stream hash ranges in parallel from source nodes to node2
+	// This simulates what the scaler does - parallel streaming from multiple sources
+	var (
+		wg    sync.WaitGroup
+		errCh = make(chan error, len(movements))
+		nodes = []*Service{node0, node1}
+	)
+	for hr, mv := range movements {
+		wg.Go(func() {
+			sourceNode := nodes[mv.SourceNodeID]
+			t.Logf("Streaming hash range %d from node %d to node %d", hr, mv.SourceNodeID, mv.DestinationNodeID)
+
+			resp, sendErr := sourceNode.SendSnapshot(ctx, &pb.SendSnapshotRequest{
+				HashRange:          hr,
+				DestinationAddress: node2Address,
+			})
+			if sendErr != nil {
+				errCh <- fmt.Errorf("hash range %d: %w", hr, sendErr)
+				return
+			}
+			if !resp.Success {
+				errCh <- fmt.Errorf("hash range %d: %s", hr, resp.ErrorMessage)
+				return
+			}
+		})
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+
+	// Activate node2
+	degradedNodes.set(false, false, false)
+
+	// Verify cluster state
+	respNode2, err := op.GetNodeInfo(ctx, 2)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, respNode2.ClusterSize)
+	require.Greater(t, len(respNode2.HashRanges), 0)
+
+	// Verify data is accessible
+	exists, err := c.Get(ctx, keysToAdd)
+	require.NoError(t, err)
+	for i, key := range keysToAdd {
+		require.True(t, exists[i], "Key %s should exist", key)
+	}
+
+	cancel()
+	node0.Close()
+	node1.Close()
+	node2.Close()
+}
+
+// TestStreamingSinceTimestamp tests incremental sync using the "since" timestamp feature.
+// When a destination already has some data, streaming should only send newer data.
+func TestStreamingSinceTimestamp(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	cloudStorage := keydbth.GetCloudStorage(t, conf, minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	totalHashRanges := int64(3)
+	degradedNodes := degradedNodesConfig{}
+
+	// Create node0 and node1
+	node0Conf := config.New()
+	node0Conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	node0, node0Address := getService(ctx, t, cloudStorage, Config{
+		NodeID:           0,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		DegradedNodes:    degradedNodes.load,
+	}, node0Conf)
+	degradedNodes.addNode(node0, false)
+
+	node1Conf := config.New()
+	node1Conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	node1, node1Address := getService(ctx, t, cloudStorage, Config{
+		NodeID:           1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		DegradedNodes:    degradedNodes.load,
+	}, node0Conf, node1Conf)
+	degradedNodes.addNode(node1, true)
+
+	c := getClient(t, totalHashRanges, node0Address)
+	op := getScaler(t, totalHashRanges, node0Address)
+
+	require.NoError(t, op.UpdateClusterData(context.Background(), node0Address, node1Address))
+
+	// Get hash range movements - find which hash ranges move from node0 to node1
+	movements := hash.GetHashRangeMovementsByRange(1, 2, totalHashRanges)
+	require.Greater(t, len(movements), 0, "Should have movements")
+
+	// Pick a hash range that will be transferred
+	var targetHashRange int64
+	for hr := range movements {
+		targetHashRange = hr
+		break
+	}
+	t.Logf("Testing incremental sync for hash range %d", targetHashRange)
+
+	// Generate keys that hash to the target hash range using the node's hasher
+	hasher := hash.New(1, totalHashRanges) // 1 node cluster - all keys go to node 0
+	var initialKeys []string
+	for i := 0; i < 100; i++ {
+		key := fmt.Sprintf("since-test-key-%d", i)
+		keysByHashRange, err := hasher.GetKeysByHashRange([]string{key}, 0)
+		require.NoError(t, err)
+		for hr := range keysByHashRange {
+			if hr == targetHashRange {
+				initialKeys = append(initialKeys, key)
+				break
+			}
+		}
+		if len(initialKeys) > 0 {
+			break
+		}
+	}
+	require.Len(t, initialKeys, 1, "Should find at least one key for target hash range")
+	t.Logf("Initial keys for hash range %d: %v", targetHashRange, initialKeys)
+
+	// Add initial keys
+	require.NoError(t, c.Put(ctx, initialKeys, testTTL))
+
+	// First sync - full transfer
+	resp, err := node0.SendSnapshot(ctx, &pb.SendSnapshotRequest{
+		HashRange:          targetHashRange,
+		DestinationAddress: node1Address,
+	})
+	require.NoError(t, err)
+	require.True(t, resp.Success, "First sync failed: %s", resp.ErrorMessage)
+
+	// Get the timestamp that was stored on node1
+	sinceResp, err := node1.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{
+		HashRange: targetHashRange,
+	})
+	require.NoError(t, err)
+	firstTimestamp := sinceResp.SinceTimestamp
+	require.Greater(t, firstTimestamp, uint64(0), "Should have a non-zero timestamp after first sync")
+	t.Logf("First sync timestamp: %d", firstTimestamp)
+
+	// Generate more keys for the same hash range
+	var newKeys []string
+	for i := 100; i < 200; i++ {
+		key := fmt.Sprintf("since-test-key-%d", i)
+		keysByHashRange, _ := hasher.GetKeysByHashRange([]string{key}, 0)
+		for hr := range keysByHashRange {
+			if hr == targetHashRange {
+				newKeys = append(newKeys, key)
+				break
+			}
+		}
+		if len(newKeys) > 0 {
+			break
+		}
+	}
+	require.Len(t, newKeys, 1, "Should find at least one new key for target hash range")
+	t.Logf("New keys for hash range %d: %v", targetHashRange, newKeys)
+
+	require.NoError(t, c.Put(ctx, newKeys, testTTL))
+
+	// Second sync - should be incremental
+	resp, err = node0.SendSnapshot(ctx, &pb.SendSnapshotRequest{
+		HashRange:          targetHashRange,
+		DestinationAddress: node1Address,
+	})
+	require.NoError(t, err)
+	require.True(t, resp.Success, "Second sync failed: %s", resp.ErrorMessage)
+
+	// Verify the timestamp was updated
+	sinceResp, err = node1.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{
+		HashRange: targetHashRange,
+	})
+	require.NoError(t, err)
+	secondTimestamp := sinceResp.SinceTimestamp
+	require.Greater(t, secondTimestamp, firstTimestamp, "Timestamp should increase after second sync")
+	t.Logf("Second sync timestamp: %d", secondTimestamp)
+
+	// Verify all keys are accessible
+	degradedNodes.set(false, false)
+	allKeys := append(initialKeys, newKeys...)
+	exists, err := c.Get(ctx, allKeys)
+	require.NoError(t, err)
+	for i, key := range allKeys {
+		require.True(t, exists[i], "Key %s should exist", key)
+	}
+
+	cancel()
+	node0.Close()
+	node1.Close()
+}
+
+// TestStreamingFailureScenarios tests error handling during streaming operations.
+func TestStreamingFailureScenarios(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	cloudStorage := keydbth.GetCloudStorage(t, conf, minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	totalHashRanges := int64(3)
+	degradedNodes := degradedNodesConfig{}
+
+	node0Conf := config.New()
+	node0Conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	node0, node0Address := getService(ctx, t, cloudStorage, Config{
+		NodeID:           0,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+		DegradedNodes:    degradedNodes.load,
+	}, node0Conf)
+	degradedNodes.addNode(node0, false)
+
+	c := getClient(t, totalHashRanges, node0Address)
+
+	// Add some keys
+	require.NoError(t, c.Put(ctx, []string{"failure-test-key"}, testTTL))
+
+	t.Run("invalid destination address", func(t *testing.T) {
+		resp, err := node0.SendSnapshot(ctx, &pb.SendSnapshotRequest{
+			HashRange:          0,
+			DestinationAddress: "invalid-address:99999",
+		})
+		// Should return response with error, not gRPC error
+		require.NoError(t, err)
+		require.False(t, resp.Success)
+		require.NotEmpty(t, resp.ErrorMessage)
+		t.Logf("Expected error message: %s", resp.ErrorMessage)
+	})
+
+	t.Run("connection refused", func(t *testing.T) {
+		// Use a valid address format but no server listening
+		resp, err := node0.SendSnapshot(ctx, &pb.SendSnapshotRequest{
+			HashRange:          0,
+			DestinationAddress: "localhost:59999",
+		})
+		require.NoError(t, err)
+		require.False(t, resp.Success)
+		require.NotEmpty(t, resp.ErrorMessage)
+		t.Logf("Expected error message: %s", resp.ErrorMessage)
+	})
+
+	t.Run("context cancellation", func(t *testing.T) {
+		cancelCtx, cancelFunc := context.WithCancel(ctx)
+		cancelFunc() // Cancel immediately
+
+		resp, err := node0.SendSnapshot(cancelCtx, &pb.SendSnapshotRequest{
+			HashRange:          0,
+			DestinationAddress: node0Address, // Valid address but context is cancelled
+		})
+		// Either gRPC error or response with error is acceptable
+		if err != nil {
+			require.Contains(t, err.Error(), "canceled")
+		} else {
+			require.False(t, resp.Success)
+		}
+	})
+
+	cancel()
+	node0.Close()
+}

@@ -63,6 +63,9 @@ type AutoScaleRequest struct {
 	CreateSnapshotsMaxConcurrency      int  `json:"create_snapshots_max_concurrency,omitempty"`
 	LoadSnapshotsMaxConcurrency        int  `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool `json:"disable_create_snapshots_sequentially,omitempty"`
+	// Streaming enables node-to-node streaming instead of using cloud storage for data transfer.
+	// When true, source nodes stream hash ranges directly to destination nodes.
+	Streaming bool `json:"streaming,omitempty"`
 }
 
 // HashRangeMovementsRequest represents a request to preview hash range movements
@@ -76,6 +79,9 @@ type HashRangeMovementsRequest struct {
 	CreateSnapshotsMaxConcurrency      int   `json:"create_snapshots_max_concurrency,omitempty"`
 	LoadSnapshotsMaxConcurrency        int   `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
+	// Streaming enables node-to-node streaming instead of using cloud storage for data transfer.
+	// When true, source nodes stream hash ranges directly to destination nodes.
+	Streaming bool `json:"streaming,omitempty"`
 }
 
 type HashRangeMovementsResponse struct {

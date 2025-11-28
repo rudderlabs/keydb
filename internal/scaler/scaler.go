@@ -465,6 +465,95 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64
 	return nil
 }
 
+// SendSnapshot instructs a node to stream a hash range to a destination node.
+// This method is meant to be used by a Scaler process only!
+func (c *Client) SendSnapshot(
+	ctx context.Context, sourceNodeID int64, destinationAddress string, hashRange int64,
+) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Get the client for the source node
+	client, ok := c.clients[int(sourceNodeID)]
+	if !ok {
+		return fmt.Errorf("no client for node %d", sourceNodeID)
+	}
+	conn, ok := c.connections[int(sourceNodeID)]
+	if !ok {
+		return fmt.Errorf("no connection for node %d", sourceNodeID)
+	}
+
+	req := &pb.SendSnapshotRequest{
+		HashRange:          hashRange,
+		DestinationAddress: destinationAddress,
+	}
+
+	var (
+		err         error
+		resp        *pb.SendSnapshotResponse
+		nextBackoff = c.getNextBackoffFunc()
+	)
+	for attempt := int64(1); ; attempt++ {
+		resp, err = client.SendSnapshot(ctx, req)
+		if err == nil && resp != nil && resp.Success {
+			break
+		}
+
+		retryDelay := nextBackoff()
+		if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
+			if err != nil {
+				return fmt.Errorf("sending snapshot from node %d to %s: %w", sourceNodeID, destinationAddress, err)
+			}
+			if resp != nil {
+				return fmt.Errorf("sending snapshot from node %d to %s: %s", sourceNodeID, destinationAddress, resp.ErrorMessage)
+			}
+			return fmt.Errorf("sending snapshot from node %d to %s: both error and response are nil", sourceNodeID, destinationAddress)
+		}
+
+		loggerFields := func(fields ...logger.Field) []logger.Field {
+			return append(fields,
+				logger.NewIntField("sourceNodeID", sourceNodeID),
+				logger.NewStringField("destinationAddress", destinationAddress),
+				logger.NewIntField("hashRange", hashRange),
+				logger.NewIntField("attempt", attempt),
+				logger.NewDurationField("retryDelay", retryDelay),
+				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+				logger.NewStringField("connState", conn.GetState().String()),
+			)
+		}
+		if err != nil {
+			c.logger.Warnn("Cannot send snapshot", loggerFields(obskit.Error(err))...)
+		} else if resp != nil {
+			c.logger.Warnn("Send snapshot unsuccessful", loggerFields(
+				logger.NewBoolField("success", resp.Success),
+				obskit.Error(errors.New(resp.ErrorMessage)),
+			)...)
+		} else {
+			return fmt.Errorf("sending snapshot from node %d to %s: both error and response are nil", sourceNodeID, destinationAddress)
+		}
+
+		// Wait before retrying
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryDelay):
+		}
+	}
+
+	return nil
+}
+
+// GetNodeAddress returns the address of a node by its ID.
+func (c *Client) GetNodeAddress(nodeID int64) (string, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if nodeID < 0 || int(nodeID) >= len(c.config.Addresses) {
+		return "", fmt.Errorf("node ID %d out of range (0-%d)", nodeID, len(c.config.Addresses)-1)
+	}
+	return c.config.Addresses[nodeID], nil
+}
+
 // UpdateClusterData updates the cluster size in a race-condition safe manner.
 // It takes a new cluster size and the current keys being processed.
 // It returns a slice of keys that need to be fetched again.
