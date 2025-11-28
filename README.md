@@ -272,6 +272,7 @@ type HashRangeMovementsRequest struct {
 	CreateSnapshotsMaxConcurrency      int   `json:"create_snapshots_max_concurrency,omitempty"`
 	LoadSnapshotsMaxConcurrency        int   `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
+	Streaming                          bool  `json:"streaming,omitempty"`
 }
 ```
 
@@ -280,6 +281,36 @@ Consider using `CreateSnapshotsMaxConcurrency` and `LoadSnapshotsMaxConcurrency`
 - `LoadSnapshotsMaxConcurrency`: Limits how many snapshots can be loaded concurrently from S3 (default: 10)
 
 This is useful if a node has to handle a large number of big snapshots to avoid OOM kills.
+
+### Streaming Mode
+
+When `streaming=true` is set, data is transferred directly between nodes without using cloud storage as an
+intermediary. This can significantly reduce scaling operation time by eliminating the upload/download steps to S3.
+
+**How streaming works:**
+1. The scaler instructs source nodes to send hash ranges directly to destination nodes
+2. Source nodes connect to destination nodes via gRPC
+3. Destination nodes inform source nodes of their last known timestamp (for incremental sync)
+4. Source nodes create snapshots and stream them in chunks to destinations
+5. Destination nodes load the received data and store the timestamp for future incremental syncs
+
+**Streaming constraints:**
+- One source node can only send one hash range at a time (prevents resource exhaustion)
+- Multiple source nodes can send in parallel (maximizes throughput)
+- Incremental syncs are supported via timestamp negotiation
+
+**Example streaming request:**
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 2,
+    "new_cluster_size": 3,
+    "total_hash_ranges": 271,
+    "streaming": true
+}'
+```
+
 Alternatively you can give the nodes more memory, although a balance of the two is usually a good idea.
 Snapshots are usually compressed and uploaded to S3, so the download and decompression
 of big snapshots could take a significant portion of memory.
@@ -305,7 +336,8 @@ follows this schema:
     "skip_create_snapshots": false,
     "create_snapshots_max_concurrency": 10,
     "load_snapshots_max_concurrency": 3,
-    "disable_create_snapshots_sequentially": false
+    "disable_create_snapshots_sequentially": false,
+    "streaming": false
 }
 ```
 

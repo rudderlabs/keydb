@@ -174,6 +174,53 @@ func (c *Cache) Put(keysByHashRange map[int64][]string, ttl time.Duration) error
 	return bw.Flush()
 }
 
+// GetValue retrieves the value associated with a key.
+// Returns the value, a boolean indicating if the key exists, and an error if the operation failed.
+func (c *Cache) GetValue(key string, hashRange int64) ([]byte, bool, error) {
+	var value []byte
+	var found bool
+
+	err := c.cache.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(getKey(key, hashRange))
+		if err != nil {
+			if errors.Is(err, badger.ErrKeyNotFound) {
+				found = false
+				return nil
+			}
+			return fmt.Errorf("getting key %s: %w", key, err)
+		}
+
+		found = true
+		value, err = item.ValueCopy(nil)
+		if err != nil {
+			return fmt.Errorf("copying value for key %s: %w", key, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+
+	return value, found, nil
+}
+
+// PutValue stores a key-value pair with the specified TTL.
+func (c *Cache) PutValue(key string, hashRange int64, value []byte, ttl time.Duration) error {
+	modifiedTTL := c.getTTL(ttl)
+
+	return c.cache.Update(func(txn *badger.Txn) error {
+		cacheKey := getKey(key, hashRange)
+		entry := badger.NewEntry(cacheKey, value)
+		if ttl > 0 {
+			entry = entry.WithTTL(modifiedTTL)
+		}
+		if err := txn.SetEntry(entry); err != nil {
+			return fmt.Errorf("putting key %s: %w", key, err)
+		}
+		return nil
+	})
+}
+
 func (c *Cache) getTTL(ttl time.Duration) time.Duration {
 	if ttl > 0 && c.jitterEnabled && c.jitterDuration > 0 {
 		jitter := time.Duration(rand.Int63n(int64(c.jitterDuration)))

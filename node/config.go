@@ -1,6 +1,10 @@
 package node
 
-import "time"
+import (
+	"time"
+
+	"github.com/rudderlabs/keydb/client"
+)
 
 // Config holds the configuration for a node
 type Config struct {
@@ -35,6 +39,9 @@ type Config struct {
 
 	// LoadedSnapshotTTL is how long to remember loaded snapshots to avoid re-loading them
 	LoadedSnapshotTTL time.Duration
+
+	// GrpcConfig holds gRPC connection configuration for node-to-node communication
+	GrpcConfig client.GrpcConfig
 }
 
 func (c *Config) getClusterSize() int64 {

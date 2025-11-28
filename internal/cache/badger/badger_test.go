@@ -3,6 +3,7 @@ package badger
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -186,6 +187,113 @@ func TestCancelSnapshot(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, files, 1)
 		t.Logf("Snapshot created: %+v", uploadedFile1)
+	}
+
+	t.Run("no compression", func(t *testing.T) {
+		run(t, false)
+	})
+
+	t.Run("compression", func(t *testing.T) {
+		run(t, true)
+	})
+}
+
+func TestGetPutValue(t *testing.T) {
+	run := func(t *testing.T, compress bool) {
+		t.Parallel()
+
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Compress", compress)
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		bdb, err := New(conf, logger.NOP)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, bdb.Close())
+		})
+
+		hashRange := int64(5)
+
+		// Test GetValue on non-existent key
+		value, found, err := bdb.GetValue("nonexistent", hashRange)
+		require.NoError(t, err)
+		require.False(t, found)
+		require.Nil(t, value)
+
+		// Test PutValue and GetValue with string data
+		testKey := "test-key"
+		testValue := []byte("test-value-123")
+		err = bdb.PutValue(testKey, hashRange, testValue, time.Hour)
+		require.NoError(t, err)
+
+		value, found, err = bdb.GetValue(testKey, hashRange)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, testValue, value)
+
+		// Test PutValue and GetValue with binary data (uint64 timestamp)
+		timestampKey := "snapshot-timestamp"
+		var timestamp uint64 = 1234567890123456789
+		timestampBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(timestampBytes, timestamp)
+
+		err = bdb.PutValue(timestampKey, hashRange, timestampBytes, time.Hour)
+		require.NoError(t, err)
+
+		value, found, err = bdb.GetValue(timestampKey, hashRange)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Len(t, value, 8)
+		retrievedTimestamp := binary.BigEndian.Uint64(value)
+		require.Equal(t, timestamp, retrievedTimestamp)
+
+		// Test updating an existing value
+		var newTimestamp uint64 = 9876543210987654321
+		binary.BigEndian.PutUint64(timestampBytes, newTimestamp)
+		err = bdb.PutValue(timestampKey, hashRange, timestampBytes, time.Hour)
+		require.NoError(t, err)
+
+		value, found, err = bdb.GetValue(timestampKey, hashRange)
+		require.NoError(t, err)
+		require.True(t, found)
+		retrievedTimestamp = binary.BigEndian.Uint64(value)
+		require.Equal(t, newTimestamp, retrievedTimestamp)
+
+		// Test different hash ranges are independent
+		otherHashRange := int64(10)
+		err = bdb.PutValue(testKey, otherHashRange, []byte("other-value"), time.Hour)
+		require.NoError(t, err)
+
+		// Original hash range should still have original value
+		value, found, err = bdb.GetValue(testKey, hashRange)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, testValue, value)
+
+		// Other hash range should have different value
+		value, found, err = bdb.GetValue(testKey, otherHashRange)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, []byte("other-value"), value)
+
+		// Test PutValue with empty value
+		emptyKey := "empty-value-key"
+		err = bdb.PutValue(emptyKey, hashRange, []byte{}, time.Hour)
+		require.NoError(t, err)
+
+		value, found, err = bdb.GetValue(emptyKey, hashRange)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Empty(t, value)
+
+		// Test PutValue with nil value (should work like Put)
+		nilKey := "nil-value-key"
+		err = bdb.PutValue(nilKey, hashRange, nil, time.Hour)
+		require.NoError(t, err)
+
+		value, found, err = bdb.GetValue(nilKey, hashRange)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Nil(t, value)
 	}
 
 	t.Run("no compression", func(t *testing.T) {
