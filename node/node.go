@@ -104,6 +104,8 @@ type Service struct {
 		loadSnapshotToDiskDuration  stats.Timer
 		uploadSnapshotDuration      stats.Timer
 		createSnapshotsDuration     stats.Timer
+		sendSnapshotDuration        stats.Timer
+		receiveSnapshotDuration     stats.Timer
 	}
 }
 
@@ -231,6 +233,8 @@ func NewService(
 	)
 	service.metrics.uploadSnapshotDuration = stat.NewStat("keydb_upload_snapshot_duration_seconds", stats.TimerType)
 	service.metrics.createSnapshotsDuration = stat.NewStat("keydb_create_snapshots_duration_seconds", stats.TimerType)
+	service.metrics.sendSnapshotDuration = stat.NewStat("keydb_send_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.receiveSnapshotDuration = stat.NewStat("keydb_receive_snapshot_duration_seconds", stats.TimerType)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
@@ -1097,6 +1101,8 @@ func (s *Service) GetSnapshotSince(
 func (s *Service) ReceiveSnapshot(
 	stream grpc.ClientStreamingServer[pb.SnapshotChunk, pb.ReceiveSnapshotResponse],
 ) error {
+	defer s.metrics.receiveSnapshotDuration.RecordDuration()()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1185,6 +1191,8 @@ func (s *Service) ReceiveSnapshot(
 func (s *Service) SendSnapshot(
 	ctx context.Context, req *pb.SendSnapshotRequest,
 ) (*pb.SendSnapshotResponse, error) {
+	defer s.metrics.sendSnapshotDuration.RecordDuration()()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
