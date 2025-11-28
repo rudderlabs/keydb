@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path"
 	"regexp"
 	"sort"
@@ -17,10 +18,13 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"google.golang.org/grpc"
+	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
+	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/cache/badger"
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -1190,7 +1194,7 @@ func (s *Service) SendSnapshot(
 	)
 
 	// Connect to the destination node
-	conn, client, err := s.connectToNode(ctx, req.DestinationAddress)
+	conn, nodeClient, err := s.connectToNode(req.DestinationAddress)
 	if err != nil {
 		s.logger.Errorn("Connecting to destination node",
 			logger.NewStringField("destinationAddress", req.DestinationAddress),
@@ -1205,7 +1209,7 @@ func (s *Service) SendSnapshot(
 	defer s.closeNodeConnection(conn)
 
 	// Get the "since" timestamp from the destination
-	sinceResp, err := client.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{
+	sinceResp, err := nodeClient.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{
 		HashRange: req.HashRange,
 	})
 	if err != nil {
@@ -1246,7 +1250,7 @@ func (s *Service) SendSnapshot(
 			logger.NewIntField("hashRange", req.HashRange),
 		)
 		// Send an empty chunk with is_last=true to signal completion
-		stream, streamErr := client.ReceiveSnapshot(ctx)
+		stream, streamErr := nodeClient.ReceiveSnapshot(ctx)
 		if streamErr != nil {
 			return &pb.SendSnapshotResponse{
 				Success:      false,
@@ -1294,7 +1298,7 @@ func (s *Service) SendSnapshot(
 	)
 
 	// Stream the snapshot data to the destination
-	stream, err := client.ReceiveSnapshot(ctx)
+	stream, err := nodeClient.ReceiveSnapshot(ctx)
 	if err != nil {
 		s.logger.Errorn("Starting receive snapshot stream", obskit.Error(err))
 		return &pb.SendSnapshotResponse{
@@ -1380,19 +1384,75 @@ func (s *Service) SendSnapshot(
 }
 
 // connectToNode establishes a gRPC connection to another node.
-func (s *Service) connectToNode(
-	ctx context.Context, address string,
-) (*grpc.ClientConn, pb.NodeServiceClient, error) {
-	conn, err := grpc.NewClient(
-		address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+func (s *Service) connectToNode(address string) (*grpc.ClientConn, pb.NodeServiceClient, error) {
+	conn, err := grpc.NewClient(address, s.getGrpcDialOptions()...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating gRPC client: %w", err)
 	}
+	return conn, pb.NewNodeServiceClient(conn), nil
+}
 
-	client := pb.NewNodeServiceClient(conn)
-	return conn, client, nil
+// getGrpcDialOptions returns the gRPC dial options for creating connections
+func (s *Service) getGrpcDialOptions() []grpc.DialOption {
+	cfg := s.config.GrpcConfig
+
+	// Use defaults if not configured
+	keepAliveTime := cfg.KeepAliveTime
+	if keepAliveTime == 0 {
+		keepAliveTime = client.DefaultGrpcKeepAliveTime
+	}
+	keepAliveTimeout := cfg.KeepAliveTimeout
+	if keepAliveTimeout == 0 {
+		keepAliveTimeout = client.DefaultGrpcKeepAliveTimeout
+	}
+	backoffBaseDelay := cfg.BackoffBaseDelay
+	if backoffBaseDelay == 0 {
+		backoffBaseDelay = client.DefaultGrpcBackoffBaseDelay
+	}
+	backoffMultiplier := cfg.BackoffMultiplier
+	if backoffMultiplier == 0 {
+		backoffMultiplier = client.DefaultGrpcBackoffMultiplier
+	}
+	backoffJitter := cfg.BackoffJitter
+	if backoffJitter == 0 {
+		backoffJitter = client.DefaultGrpcBackoffJitter
+	}
+	backoffMaxDelay := cfg.BackoffMaxDelay
+	if backoffMaxDelay == 0 {
+		backoffMaxDelay = client.DefaultGrpcMaxDelay
+	}
+	minConnectTimeout := cfg.MinConnectTimeout
+	if minConnectTimeout == 0 {
+		minConnectTimeout = client.DefaultGrpcMinConnectTimeout
+	}
+
+	// Configure keepalive parameters to detect dead connections
+	kacp := keepalive.ClientParameters{
+		Time:                keepAliveTime,
+		Timeout:             keepAliveTimeout,
+		PermitWithoutStream: !cfg.DisableKeepAlivePermitWithoutStream,
+	}
+
+	// Configure connection backoff parameters
+	backoffConfig := grpcbackoff.Config{
+		BaseDelay:  backoffBaseDelay,
+		Multiplier: backoffMultiplier,
+		Jitter:     backoffJitter,
+		MaxDelay:   backoffMaxDelay,
+	}
+
+	return []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(kacp),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoffConfig,
+			MinConnectTimeout: minConnectTimeout,
+		}),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "tcp", addr)
+		}),
+	}
 }
 
 // closeNodeConnection closes a gRPC connection to another node.
