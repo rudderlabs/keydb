@@ -1169,126 +1169,6 @@ func TestLoadedSnapshotTTLDefault(t *testing.T) {
 	node0.Close()
 }
 
-func getService(
-	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf ...*config.Config,
-) (*Service, string) {
-	t.Helper()
-	if len(conf) < 1 {
-		t.Fatal("no config provided")
-	}
-
-	freePort, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-	address := "localhost:" + strconv.Itoa(freePort)
-
-	// Simulating reloadable addresses for all configs
-	nodeAddresses := conf[0].GetReloadableStringVar("", nodeAddressesConfKey)
-	var addrList []string
-	if rawAddresses := strings.TrimSpace(nodeAddresses.Load()); rawAddresses != "" {
-		addrList = append(strings.Split(rawAddresses, ","), address)
-	} else {
-		addrList = []string{address}
-	}
-	for _, c := range conf {
-		c.Set(nodeAddressesConfKey, strings.Join(addrList, ","))
-	}
-
-	// Set the Addresses function to return our modifiable slice
-	nodeConfig.Addresses = func() []string {
-		return strings.Split(nodeAddresses.Load(), ",")
-	}
-	nodeConfig.BackupFolderName = defaultBackupFolderName
-
-	log := logger.NOP
-	if testing.Verbose() {
-		log = logger.NewLogger()
-	}
-	conf[nodeConfig.NodeID].Set("BadgerDB.Dedup.NopLogger", true)
-	service, err := NewService(ctx, nodeConfig, cs, conf[nodeConfig.NodeID], stats.NOP, log)
-	require.NoError(t, err)
-
-	// Create a gRPC server
-	server := grpc.NewServer()
-	pb.RegisterNodeServiceServer(server, service)
-
-	lis, err := net.Listen("tcp", address)
-	require.NoError(t, err)
-
-	// Start the server
-	go func() {
-		require.NoError(t, server.Serve(lis))
-	}()
-	t.Cleanup(func() {
-		server.GracefulStop()
-		_ = lis.Close()
-	})
-
-	return service, address
-}
-
-func getClient(t testing.TB, totalHashRanges int64, addresses ...string) *client.Client {
-	t.Helper()
-
-	clientConfig := client.Config{
-		Addresses:       addresses,
-		TotalHashRanges: totalHashRanges,
-		RetryPolicy:     client.RetryPolicy{Disabled: true},
-	}
-
-	c, err := client.NewClient(clientConfig, logger.NOP)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-
-	return c
-}
-
-func getScaler(t testing.TB, totalHashRanges int64, addresses ...string) *scaler.Client {
-	t.Helper()
-
-	opConfig := scaler.Config{
-		Addresses:       addresses,
-		TotalHashRanges: totalHashRanges,
-		RetryPolicy:     scaler.RetryPolicy{Disabled: true},
-	}
-
-	op, err := scaler.NewClient(opConfig, logger.NOP)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = op.Close() })
-
-	return op
-}
-
-type degradedNodesConfig struct {
-	nodes           []*Service
-	degradedNodes   []bool
-	degradedNodesMu sync.RWMutex
-}
-
-func (d *degradedNodesConfig) addNode(node *Service, degraded bool) {
-	d.nodes = append(d.nodes, node)
-	d.degradedNodesMu.Lock()
-	d.degradedNodes = append(d.degradedNodes, degraded)
-	d.degradedNodesMu.Unlock()
-	for _, node := range d.nodes {
-		node.DegradedNodesChanged()
-	}
-}
-
-func (d *degradedNodesConfig) set(b ...bool) {
-	d.degradedNodesMu.Lock()
-	d.degradedNodes = b
-	d.degradedNodesMu.Unlock()
-	for _, node := range d.nodes {
-		node.DegradedNodesChanged()
-	}
-}
-
-func (d *degradedNodesConfig) load() []bool {
-	d.degradedNodesMu.RLock()
-	defer d.degradedNodesMu.RUnlock()
-	return d.degradedNodes
-}
-
 // TestStreamingParallelFromMultipleSources tests that multiple source nodes can stream
 // data in parallel to destination nodes during a scale operation.
 func TestStreamingParallelFromMultipleSources(t *testing.T) {
@@ -1644,4 +1524,124 @@ func TestStreamingFailureScenarios(t *testing.T) {
 
 	cancel()
 	node0.Close()
+}
+
+func getService(
+	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf ...*config.Config,
+) (*Service, string) {
+	t.Helper()
+	if len(conf) < 1 {
+		t.Fatal("no config provided")
+	}
+
+	freePort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	address := "localhost:" + strconv.Itoa(freePort)
+
+	// Simulating reloadable addresses for all configs
+	nodeAddresses := conf[0].GetReloadableStringVar("", nodeAddressesConfKey)
+	var addrList []string
+	if rawAddresses := strings.TrimSpace(nodeAddresses.Load()); rawAddresses != "" {
+		addrList = append(strings.Split(rawAddresses, ","), address)
+	} else {
+		addrList = []string{address}
+	}
+	for _, c := range conf {
+		c.Set(nodeAddressesConfKey, strings.Join(addrList, ","))
+	}
+
+	// Set the Addresses function to return our modifiable slice
+	nodeConfig.Addresses = func() []string {
+		return strings.Split(nodeAddresses.Load(), ",")
+	}
+	nodeConfig.BackupFolderName = defaultBackupFolderName
+
+	log := logger.NOP
+	if testing.Verbose() {
+		log = logger.NewLogger()
+	}
+	conf[nodeConfig.NodeID].Set("BadgerDB.Dedup.NopLogger", true)
+	service, err := NewService(ctx, nodeConfig, cs, conf[nodeConfig.NodeID], stats.NOP, log)
+	require.NoError(t, err)
+
+	// Create a gRPC server
+	server := grpc.NewServer()
+	pb.RegisterNodeServiceServer(server, service)
+
+	lis, err := net.Listen("tcp", address)
+	require.NoError(t, err)
+
+	// Start the server
+	go func() {
+		require.NoError(t, server.Serve(lis))
+	}()
+	t.Cleanup(func() {
+		server.GracefulStop()
+		_ = lis.Close()
+	})
+
+	return service, address
+}
+
+func getClient(t testing.TB, totalHashRanges int64, addresses ...string) *client.Client {
+	t.Helper()
+
+	clientConfig := client.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+		RetryPolicy:     client.RetryPolicy{Disabled: true},
+	}
+
+	c, err := client.NewClient(clientConfig, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	return c
+}
+
+func getScaler(t testing.TB, totalHashRanges int64, addresses ...string) *scaler.Client {
+	t.Helper()
+
+	opConfig := scaler.Config{
+		Addresses:       addresses,
+		TotalHashRanges: totalHashRanges,
+		RetryPolicy:     scaler.RetryPolicy{Disabled: true},
+	}
+
+	op, err := scaler.NewClient(opConfig, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = op.Close() })
+
+	return op
+}
+
+type degradedNodesConfig struct {
+	nodes           []*Service
+	degradedNodes   []bool
+	degradedNodesMu sync.RWMutex
+}
+
+func (d *degradedNodesConfig) addNode(node *Service, degraded bool) {
+	d.nodes = append(d.nodes, node)
+	d.degradedNodesMu.Lock()
+	d.degradedNodes = append(d.degradedNodes, degraded)
+	d.degradedNodesMu.Unlock()
+	for _, node := range d.nodes {
+		node.DegradedNodesChanged()
+	}
+}
+
+func (d *degradedNodesConfig) set(b ...bool) {
+	d.degradedNodesMu.Lock()
+	d.degradedNodes = b
+	d.degradedNodesMu.Unlock()
+	for _, node := range d.nodes {
+		node.DegradedNodesChanged()
+	}
+}
+
+func (d *degradedNodesConfig) load() []bool {
+	d.degradedNodesMu.RLock()
+	defer d.degradedNodesMu.RUnlock()
+	return d.degradedNodes
 }
