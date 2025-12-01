@@ -323,11 +323,7 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 		)
 	}()
 
-	// Set default concurrency limits
-	createSnapshotsMaxConcurrency := req.CreateSnapshotsMaxConcurrency
-	if createSnapshotsMaxConcurrency <= 0 {
-		createSnapshotsMaxConcurrency = defaultCreateSnapshotsMaxConcurrency
-	}
+	// Set default concurrency limit for loading snapshots
 	loadSnapshotsMaxConcurrency := req.LoadSnapshotsMaxConcurrency
 	if loadSnapshotsMaxConcurrency <= 0 {
 		loadSnapshotsMaxConcurrency = defaultLoadSnapshotsMaxConcurrency

@@ -1718,7 +1718,7 @@ func TestBackup(t *testing.T) {
 	require.NoError(t, err)
 	require.Greater(t, len(files), 0, "expected at least one snapshot file")
 	// Verify all files match the expected pattern
-	snapshotPattern := regexp.MustCompile("^.+/hr_[0-5]_s_\\d+_\\d+\\.snapshot$")
+	snapshotPattern := regexp.MustCompile(`^.+/hr_[0-5]_s_\d+_\d+\.snapshot$`)
 	for _, file := range files {
 		require.True(t, snapshotPattern.MatchString(file.Key), "unexpected file: %s", file.Key)
 	}

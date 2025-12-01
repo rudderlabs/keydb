@@ -68,7 +68,6 @@ type BackupRequest struct {
 	Upload                             bool `json:"upload,omitempty"`
 	Download                           bool `json:"download,omitempty"`
 	FullSync                           bool `json:"full_sync,omitempty"`
-	CreateSnapshotsMaxConcurrency      int  `json:"create_snapshots_max_concurrency,omitempty"`
 	LoadSnapshotsMaxConcurrency        int  `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool `json:"disable_create_snapshots_sequentially,omitempty"`
 }
