@@ -1782,10 +1782,6 @@ func withAddress(addr string) scalerHTTPServerOpt {
 	return func(o *scalerHTTPServerOpts) { o.addresses = append(o.addresses, addr) }
 }
 
-func withClusterUpdateTimeout(d time.Duration) scalerHTTPServerOpt { //nolint:unparam
-	return func(o *scalerHTTPServerOpts) { o.clusterUpdateTimeout = d }
-}
-
 func startScalerHTTPServer(
 	t testing.TB, totalHashRanges int64, rp scaler.RetryPolicy, opts ...scalerHTTPServerOpt,
 ) *opClient {
