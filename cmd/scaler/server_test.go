@@ -1627,6 +1627,123 @@ func TestScaleStreaming(t *testing.T) {
 	}
 }
 
+func TestBackup(t *testing.T) {
+	pool, err := dockertest.NewPool("")
+	require.NoError(t, err)
+	pool.MaxWait = 1 * time.Minute
+
+	newConf := func() *config.Config {
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+		conf.Set("BadgerDB.Dedup.Compress", true)
+		return conf
+	}
+
+	minioContainer, err := miniokit.Setup(pool, t)
+	require.NoError(t, err)
+
+	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create degraded config to manage degraded state across nodes
+	degradedConfig := &degradedNodesConfig{}
+
+	// Create 3 nodes
+	totalHashRanges := int64(6)
+	node0Conf := newConf()
+	node0, node0Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, withConfigs(node0Conf), withDegradedConfig(degradedConfig))
+	t.Cleanup(node0.Close)
+
+	node1Conf := newConf()
+	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, withConfigs(node0Conf, node1Conf), withDegradedConfig(degradedConfig))
+	t.Cleanup(node1.Close)
+
+	node2Conf := newConf()
+	node2, node2Address := getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, withConfigs(node0Conf, node1Conf, node2Conf), withDegradedConfig(degradedConfig))
+	t.Cleanup(node2.Close)
+
+	// Start the Scaler HTTP Server with all 3 nodes
+	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
+		Disabled: true,
+	}, withAddress(node0Address), withAddress(node1Address), withAddress(node2Address))
+	t.Cleanup(s.Close)
+
+	// Update cluster data to include all nodes
+	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{
+		Addresses: []string{node0Address, node1Address, node2Address},
+	}, true)
+
+	// Put initial data
+	_ = s.Do("/put", PutRequest{
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH"},
+		TTL:  testTTL,
+	}, true)
+
+	// Verify data exists before backup
+	body := s.Do("/get", GetRequest{
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH", "keyZ"},
+	})
+	require.JSONEq(t,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":true,
+		"keyE":true,"keyF":true,"keyG":true,"keyH":true,"keyZ":false}`,
+		body,
+	)
+
+	// Call backup with upload and download
+	body = s.Do("/backup", BackupRequest{
+		Upload:   true,
+		Download: true,
+	})
+	var backupResp BackupResponse
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &backupResp))
+	require.True(t, backupResp.Success)
+	require.Equal(t, 3, backupResp.Total)
+
+	// Verify snapshots were created in cloud storage (only hash ranges with data get snapshots)
+	files, err := minioContainer.Contents(context.Background(), defaultBackupFolderName+"/hr_")
+	require.NoError(t, err)
+	require.Greater(t, len(files), 0, "expected at least one snapshot file")
+	// Verify all files match the expected pattern
+	snapshotPattern := regexp.MustCompile("^.+/hr_[0-5]_s_\\d+_\\d+\\.snapshot$")
+	for _, file := range files {
+		require.True(t, snapshotPattern.MatchString(file.Key), "unexpected file: %s", file.Key)
+	}
+
+	// Verify data is still accessible after backup
+	body = s.Do("/get", GetRequest{
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH", "keyZ"},
+	})
+	require.JSONEq(t,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":true,
+		"keyE":true,"keyF":true,"keyG":true,"keyH":true,"keyZ":false}`,
+		body,
+	)
+
+	// Verify node info for all 3 nodes
+	for nodeID := int64(0); nodeID < 3; nodeID++ {
+		body = s.Do("/info", InfoRequest{NodeID: nodeID})
+		infoResponse := pb.GetNodeInfoResponse{}
+		require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))
+		require.EqualValues(t, 3, infoResponse.ClusterSize)
+		require.Len(t, infoResponse.NodesAddresses, 3)
+		require.Greater(t, infoResponse.LastSnapshotTimestamp, int64(0))
+	}
+}
+
 // Helper types and functions
 
 type serviceConfig struct {

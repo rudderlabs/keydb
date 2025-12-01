@@ -39,6 +39,7 @@ type scalerClient interface {
 	SendSnapshot(ctx context.Context, sourceNodeID int64, destinationAddress string, hashRange int64) error
 	GetNodeAddress(nodeID int64) (string, error)
 	TotalHashRanges() int64
+	ClusterSize() int
 	GetNodeInfo(ctx context.Context, id int64) (*pb.GetNodeInfoResponse, error)
 }
 
@@ -77,6 +78,7 @@ func newHTTPServer(
 	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
 	mux.Post("/hashRangeMovements", s.handleHashRangeMovements)
+	mux.Post("/backup", s.handleBackup)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -279,6 +281,115 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// handleBackup handles POST /backup requests
+// It creates and/or loads snapshots for all nodes in the cluster without scaling operations.
+func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
+	// Parse request body
+	var req BackupRequest
+	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate request
+	if !req.Upload && !req.Download {
+		http.Error(w, "at least one of upload or download must be true", http.StatusBadRequest)
+		return
+	}
+
+	clusterSize := s.scaler.ClusterSize()
+	if clusterSize == 0 {
+		http.Error(w, "cluster size is 0", http.StatusBadRequest)
+		return
+	}
+
+	totalHashRanges := s.scaler.TotalHashRanges()
+
+	log := s.logger.Withn(
+		logger.NewIntField("clusterSize", int64(clusterSize)),
+		logger.NewIntField("totalHashRanges", totalHashRanges),
+		logger.NewBoolField("upload", req.Upload),
+		logger.NewBoolField("download", req.Download),
+		logger.NewBoolField("fullSync", req.FullSync),
+	)
+	log.Infon("Received backup request")
+
+	start := time.Now()
+	defer func() {
+		log.Infon("Backup request completed",
+			logger.NewStringField("duration", time.Since(start).String()),
+		)
+	}()
+
+	// Set default concurrency limits
+	createSnapshotsMaxConcurrency := req.CreateSnapshotsMaxConcurrency
+	if createSnapshotsMaxConcurrency <= 0 {
+		createSnapshotsMaxConcurrency = defaultCreateSnapshotsMaxConcurrency
+	}
+	loadSnapshotsMaxConcurrency := req.LoadSnapshotsMaxConcurrency
+	if loadSnapshotsMaxConcurrency <= 0 {
+		loadSnapshotsMaxConcurrency = defaultLoadSnapshotsMaxConcurrency
+	}
+
+	ctx := r.Context()
+	hasher := hash.New(int64(clusterSize), totalHashRanges)
+
+	// Process all nodes in parallel
+	group, gCtx := kitsync.NewEagerGroup(ctx, clusterSize)
+	for nodeID := int64(0); nodeID < int64(clusterSize); nodeID++ {
+		hashRanges := hasher.GetNodeHashRangesList(nodeID)
+
+		group.Go(func() error {
+			// Upload: create snapshots
+			if req.Upload {
+				nodeStart := time.Now()
+				err := s.createSnapshotsWithProgress(
+					gCtx, nodeID, req.FullSync, req.DisableCreateSnapshotsSequentially, hashRanges,
+				)
+				if err != nil {
+					return fmt.Errorf("creating snapshots for node %d: %w", nodeID, err)
+				}
+				log.Infon("Node snapshots created",
+					logger.NewIntField("nodeId", nodeID),
+					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
+					logger.NewStringField("duration", time.Since(nodeStart).String()),
+				)
+			}
+
+			// Download: load snapshots
+			if req.Download {
+				nodeStart := time.Now()
+				err := s.scaler.LoadSnapshots(gCtx, nodeID, int64(loadSnapshotsMaxConcurrency), hashRanges...)
+				if err != nil {
+					return fmt.Errorf("loading snapshots for node %d: %w", nodeID, err)
+				}
+				log.Infon("Node snapshots loaded",
+					logger.NewIntField("nodeId", nodeID),
+					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
+					logger.NewStringField("duration", time.Since(nodeStart).String()),
+				)
+			}
+
+			return nil
+		})
+	}
+
+	if err := group.Wait(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Write response
+	w.Header().Set("Content-Type", "application/json")
+	if err := jsonrs.NewEncoder(w).Encode(BackupResponse{
+		Total:   clusterSize,
+		Success: true,
+	}); err != nil {
+		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
+		return
+	}
 }
 
 // handleHashRangeMovements handles POST /hashRangeMovements requests

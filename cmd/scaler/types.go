@@ -63,3 +63,17 @@ type HashRangeMovement struct {
 	From      int64 `json:"from"`
 	To        int64 `json:"to"`
 }
+
+type BackupRequest struct {
+	Upload                             bool `json:"upload,omitempty"`
+	Download                           bool `json:"download,omitempty"`
+	FullSync                           bool `json:"full_sync,omitempty"`
+	CreateSnapshotsMaxConcurrency      int  `json:"create_snapshots_max_concurrency,omitempty"`
+	LoadSnapshotsMaxConcurrency        int  `json:"load_snapshots_max_concurrency,omitempty"`
+	DisableCreateSnapshotsSequentially bool `json:"disable_create_snapshots_sequentially,omitempty"`
+}
+
+type BackupResponse struct {
+	Total   int  `json:"total"`
+	Success bool `json:"success"`
+}
