@@ -305,11 +305,29 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Determine target nodes
+	var targetNodes []int64
+	if len(req.Nodes) > 0 {
+		for _, nodeID := range req.Nodes {
+			if nodeID < 0 || nodeID >= int64(clusterSize) {
+				http.Error(w, fmt.Sprintf("invalid node ID %d: must be in range [0, %d)", nodeID, clusterSize), http.StatusBadRequest)
+				return
+			}
+		}
+		targetNodes = req.Nodes
+	} else {
+		targetNodes = make([]int64, clusterSize)
+		for i := int64(0); i < int64(clusterSize); i++ {
+			targetNodes[i] = i
+		}
+	}
+
 	totalHashRanges := s.scaler.TotalHashRanges()
 
 	log := s.logger.Withn(
 		logger.NewIntField("clusterSize", int64(clusterSize)),
 		logger.NewIntField("totalHashRanges", totalHashRanges),
+		logger.NewIntField("targetNodesCount", int64(len(targetNodes))),
 		logger.NewBoolField("upload", req.Upload),
 		logger.NewBoolField("download", req.Download),
 		logger.NewBoolField("fullSync", req.FullSync),
@@ -332,9 +350,9 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hasher := hash.New(int64(clusterSize), totalHashRanges)
 
-	// Process all nodes in parallel
-	group, gCtx := kitsync.NewEagerGroup(ctx, clusterSize)
-	for nodeID := int64(0); nodeID < int64(clusterSize); nodeID++ {
+	// Process target nodes in parallel
+	group, gCtx := kitsync.NewEagerGroup(ctx, len(targetNodes))
+	for _, nodeID := range targetNodes {
 		hashRanges := hasher.GetNodeHashRangesList(nodeID)
 
 		group.Go(func() error {
@@ -380,7 +398,7 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	if err := jsonrs.NewEncoder(w).Encode(BackupResponse{
-		Total:   clusterSize,
+		Total:   len(targetNodes),
 		Success: true,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
