@@ -315,6 +315,77 @@ Alternatively you can give the nodes more memory, although a balance of the two 
 Snapshots are usually compressed and uploaded to S3, so the download and decompression
 of big snapshots could take a significant portion of memory.
 
+### Backup
+
+The `/backup` endpoint allows you to create and/or load snapshots for all nodes (or specific nodes) in the cluster
+without performing any scaling operations. This is useful for:
+- Creating periodic backups to cloud storage
+- Restoring data from cloud storage after a disaster
+- Pre-populating nodes with data before they go live
+- Resizing PVCs
+
+**Request schema:**
+```go
+type BackupRequest struct {
+    Upload                             bool    `json:"upload,omitempty"`
+    Download                           bool    `json:"download,omitempty"`
+    FullSync                           bool    `json:"full_sync,omitempty"`
+    LoadSnapshotsMaxConcurrency        int     `json:"load_snapshots_max_concurrency,omitempty"`
+    DisableCreateSnapshotsSequentially bool    `json:"disable_create_snapshots_sequentially,omitempty"`
+    Nodes                              []int64 `json:"nodes,omitempty"`
+}
+```
+
+**Parameters:**
+- `upload`: Create snapshots and upload them to cloud storage
+- `download`: Download and load snapshots from cloud storage
+- `full_sync`: When true, performs a full sync that deletes old snapshot files on S3 before uploading
+- `load_snapshots_max_concurrency`: Limits how many snapshots can be loaded concurrently (default: 10)
+- `disable_create_snapshots_sequentially`: When true, creates snapshots in parallel instead of sequentially
+- `nodes`: Optional list of specific node IDs to backup/restore. If omitted, all nodes are processed
+
+**Note:** At least one of `upload` or `download` must be true. You cannot upload and download in the same request.
+
+**Example: Backup all nodes to cloud storage**
+```bash
+curl --location 'localhost:8080/backup' \
+--header 'Content-Type: application/json' \
+--data '{
+    "upload": true,
+    "full_sync": true
+}'
+```
+
+**Example: Restore all nodes from cloud storage**
+```bash
+curl --location 'localhost:8080/backup' \
+--header 'Content-Type: application/json' \
+--data '{
+    "download": true,
+    "load_snapshots_max_concurrency": 5
+}'
+```
+
+**Example: Backup specific nodes**
+```bash
+curl --location 'localhost:8080/backup' \
+--header 'Content-Type: application/json' \
+--data '{
+    "upload": true,
+    "nodes": [0, 2]
+}'
+```
+
+**Response:**
+```json
+{
+    "success": true,
+    "total": 271
+}
+```
+
+Where `total` is the number of hash ranges that were processed (either uploaded or downloaded).
+
 ### AutoScale
 
 The `AutoScale` scaler procedure can be used by sending an HTTP POST request to `/autoScale` with a JSON payload that
@@ -414,6 +485,7 @@ This approach ensures that if any old node restarts during scaling, it won't use
   the cluster
 - `POST /autoScale` - Automatic scaling with retry and rollback logic
 - `POST /hashRangeMovements` - Get hash range movement information (supports snapshot creation and loading)
+- `POST /backup` - Create and/or load snapshots for all (or specific) nodes without scaling
 - `GET /lastOperation` - Get last scaling operation status
 
 ## Performance
