@@ -272,6 +272,7 @@ type HashRangeMovementsRequest struct {
 	CreateSnapshotsMaxConcurrency      int   `json:"create_snapshots_max_concurrency,omitempty"`
 	LoadSnapshotsMaxConcurrency        int   `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
+	Streaming                          bool  `json:"streaming,omitempty"`
 }
 ```
 
@@ -280,9 +281,110 @@ Consider using `CreateSnapshotsMaxConcurrency` and `LoadSnapshotsMaxConcurrency`
 - `LoadSnapshotsMaxConcurrency`: Limits how many snapshots can be loaded concurrently from S3 (default: 10)
 
 This is useful if a node has to handle a large number of big snapshots to avoid OOM kills.
+
+### Streaming Mode
+
+When `streaming=true` is set, data is transferred directly between nodes without using cloud storage as an
+intermediary. This can significantly reduce scaling operation time by eliminating the upload/download steps to S3.
+
+**How streaming works:**
+1. The scaler instructs source nodes to send hash ranges directly to destination nodes
+2. Source nodes connect to destination nodes via gRPC
+3. Destination nodes inform source nodes of their last known timestamp (for incremental sync)
+4. Source nodes create snapshots and stream them in chunks to destinations
+5. Destination nodes load the received data and store the timestamp for future incremental syncs
+
+**Streaming constraints:**
+- One source node can only send one hash range at a time (prevents resource exhaustion)
+- Multiple source nodes can send in parallel (maximizes throughput)
+- Incremental syncs are supported via timestamp negotiation
+
+**Example streaming request:**
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 2,
+    "new_cluster_size": 3,
+    "total_hash_ranges": 271,
+    "streaming": true
+}'
+```
+
 Alternatively you can give the nodes more memory, although a balance of the two is usually a good idea.
 Snapshots are usually compressed and uploaded to S3, so the download and decompression
 of big snapshots could take a significant portion of memory.
+
+### Backup
+
+The `/backup` endpoint allows you to create and/or load snapshots for all nodes (or specific nodes) in the cluster
+without performing any scaling operations. This is useful for:
+- Creating periodic backups to cloud storage
+- Restoring data from cloud storage after a disaster
+- Pre-populating nodes with data before they go live
+- Resizing PVCs
+
+**Request schema:**
+```go
+type BackupRequest struct {
+    Upload                             bool    `json:"upload,omitempty"`
+    Download                           bool    `json:"download,omitempty"`
+    FullSync                           bool    `json:"full_sync,omitempty"`
+    LoadSnapshotsMaxConcurrency        int     `json:"load_snapshots_max_concurrency,omitempty"`
+    DisableCreateSnapshotsSequentially bool    `json:"disable_create_snapshots_sequentially,omitempty"`
+    Nodes                              []int64 `json:"nodes,omitempty"`
+}
+```
+
+**Parameters:**
+- `upload`: Create snapshots and upload them to cloud storage
+- `download`: Download and load snapshots from cloud storage
+- `full_sync`: When true, performs a full sync that deletes old snapshot files on S3 before uploading
+- `load_snapshots_max_concurrency`: Limits how many snapshots can be loaded concurrently (default: 10)
+- `disable_create_snapshots_sequentially`: When true, creates snapshots in parallel instead of sequentially
+- `nodes`: Optional list of specific node IDs to backup/restore. If omitted, all nodes are processed
+
+**Note:** At least one of `upload` or `download` must be true. You cannot upload and download in the same request.
+
+**Example: Backup all nodes to cloud storage**
+```bash
+curl --location 'localhost:8080/backup' \
+--header 'Content-Type: application/json' \
+--data '{
+    "upload": true,
+    "full_sync": true
+}'
+```
+
+**Example: Restore all nodes from cloud storage**
+```bash
+curl --location 'localhost:8080/backup' \
+--header 'Content-Type: application/json' \
+--data '{
+    "download": true,
+    "load_snapshots_max_concurrency": 5
+}'
+```
+
+**Example: Backup specific nodes**
+```bash
+curl --location 'localhost:8080/backup' \
+--header 'Content-Type: application/json' \
+--data '{
+    "upload": true,
+    "nodes": [0, 2]
+}'
+```
+
+**Response:**
+```json
+{
+    "success": true,
+    "total": 271
+}
+```
+
+Where `total` is the number of hash ranges that were processed (either uploaded or downloaded).
 
 ### AutoScale
 
@@ -305,7 +407,8 @@ follows this schema:
     "skip_create_snapshots": false,
     "create_snapshots_max_concurrency": 10,
     "load_snapshots_max_concurrency": 3,
-    "disable_create_snapshots_sequentially": false
+    "disable_create_snapshots_sequentially": false,
+    "streaming": false
 }
 ```
 
@@ -382,6 +485,7 @@ This approach ensures that if any old node restarts during scaling, it won't use
   the cluster
 - `POST /autoScale` - Automatic scaling with retry and rollback logic
 - `POST /hashRangeMovements` - Get hash range movement information (supports snapshot creation and loading)
+- `POST /backup` - Create and/or load snapshots for all (or specific) nodes without scaling
 - `GET /lastOperation` - Get last scaling operation status
 
 ## Performance
