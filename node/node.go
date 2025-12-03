@@ -3,9 +3,11 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path"
 	"regexp"
 	"sort"
@@ -15,9 +17,14 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"google.golang.org/grpc"
+	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
+	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/cache/badger"
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -41,6 +48,21 @@ const (
 
 	// DefaultMaxFilesToList defines the default maximum number of files to list in a single operation, set to 1000.
 	DefaultMaxFilesToList int64 = 1000
+
+	// DefaultLoadedSnapshotTTL is the default TTL for loaded snapshot tracking keys
+	DefaultLoadedSnapshotTTL = 24 * time.Hour
+
+	// DefaultStreamingChunkSize is the default chunk size for streaming snapshots (1MB)
+	DefaultStreamingChunkSize = 1024 * 1024
+
+	// internalKeysHashRange is a reserved hash range for internal keys
+	internalKeysHashRange = int64(-1)
+
+	// loadedSnapshotKeyPrefix is the prefix for keys tracking loaded snapshots
+	loadedSnapshotKeyPrefix = "_snapshot_loaded:"
+
+	// snapshotTimestampKeyPrefix is the prefix for keys tracking snapshot timestamps per hash range
+	snapshotTimestampKeyPrefix = "_snapshot_timestamp:"
 )
 
 // file format is hr_<hash_range>_s_<from_timestamp>_<to_timestamp>.snapshot
@@ -82,6 +104,8 @@ type Service struct {
 		loadSnapshotToDiskDuration  stats.Timer
 		uploadSnapshotDuration      stats.Timer
 		createSnapshotsDuration     stats.Timer
+		sendSnapshotDuration        stats.Timer
+		receiveSnapshotDuration     stats.Timer
 	}
 }
 
@@ -92,6 +116,13 @@ type Cache interface {
 
 	// Put adds or updates keys inside the cache with the specified TTL and returns an error if the operation failed
 	Put(keysByHashRange map[int64][]string, ttl time.Duration) error
+
+	// GetValue retrieves the value associated with a key.
+	// Returns the value, a boolean indicating if the key exists, and an error if the operation failed.
+	GetValue(key string, hashRange int64) ([]byte, bool, error)
+
+	// PutValue stores a key-value pair with the specified TTL.
+	PutValue(key string, hashRange int64, value []byte, ttl time.Duration) error
 
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
@@ -148,6 +179,9 @@ func NewService(
 	if config.MaxFilesToList == 0 {
 		config.MaxFilesToList = DefaultMaxFilesToList
 	}
+	if config.LoadedSnapshotTTL == 0 {
+		config.LoadedSnapshotTTL = DefaultLoadedSnapshotTTL
+	}
 
 	service := &Service{
 		now:            time.Now,
@@ -199,6 +233,8 @@ func NewService(
 	)
 	service.metrics.uploadSnapshotDuration = stat.NewStat("keydb_upload_snapshot_duration_seconds", stats.TimerType)
 	service.metrics.createSnapshotsDuration = stat.NewStat("keydb_create_snapshots_duration_seconds", stats.TimerType)
+	service.metrics.sendSnapshotDuration = stat.NewStat("keydb_send_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.receiveSnapshotDuration = stat.NewStat("keydb_receive_snapshot_duration_seconds", stats.TimerType)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
@@ -331,6 +367,23 @@ func (s *Service) initCaches(
 		maxConcurrency = int64(len(currentRanges))
 	}
 
+	// Check which snapshots are already loaded BEFORE starting concurrent downloads.
+	// This avoids a data race with badger.Load() which is not thread-safe with other operations.
+	loadedSnapshots := make(map[string]bool)
+	for _, snapshotFiles := range filesByHashRange {
+		for _, sf := range snapshotFiles {
+			loaded, err := s.isSnapshotLoaded(sf.filename)
+			if err != nil {
+				s.logger.Warnn("Checking if snapshot already loaded",
+					logger.NewStringField("filename", sf.filename),
+					obskit.Error(err),
+				)
+				// Default to false on error (fail-open: will download)
+			}
+			loadedSnapshots[sf.filename] = loaded
+		}
+	}
+
 	var (
 		loadCtx, loadCancel = context.WithCancel(ctx)
 		loadDone            = make(chan error, 1)
@@ -339,6 +392,19 @@ func (s *Service) initCaches(
 		readers             = make(chan snapshotReader, maxConcurrency)
 	)
 	defer loadCancel()
+	var loadedFilenames []string
+	defer func() {
+		// Mark all successfully loaded snapshots AFTER all Load() operations complete.
+		// This avoids a data race since badger's Load() is not thread-safe with other operations.
+		for _, filename := range loadedFilenames {
+			if err := s.markSnapshotLoaded(filename); err != nil {
+				s.logger.Warnn("Marking snapshot as loaded",
+					logger.NewStringField("filename", filename),
+					obskit.Error(err),
+				)
+			}
+		}
+	}()
 	go func() {
 		defer close(loadDone)
 		for sn := range readers {
@@ -357,6 +423,7 @@ func (s *Service) initCaches(
 			}
 			s.metrics.loadSnapshotToDiskDuration.Since(loadStart)
 			filesLoaded++
+			loadedFilenames = append(loadedFilenames, sn.filename)
 		}
 	}()
 	for r := range filesByHashRange {
@@ -368,6 +435,14 @@ func (s *Service) initCaches(
 
 		for _, snapshotFile := range snapshotFiles {
 			group.Go(func() error {
+				// Check if this snapshot was already loaded (using pre-computed map to avoid data race)
+				if loadedSnapshots[snapshotFile.filename] {
+					s.logger.Infon("Skipping already loaded snapshot",
+						logger.NewStringField("filename", snapshotFile.filename),
+					)
+					return nil
+				}
+
 				s.logger.Infon("Starting download of snapshot file from cloud storage",
 					logger.NewStringField("filename", snapshotFile.filename),
 				)
@@ -947,6 +1022,30 @@ func (s *Service) getNonDegradedAddresses() []string {
 	return nonDegraded
 }
 
+// isSnapshotLoaded checks if a snapshot has already been loaded
+func (s *Service) isSnapshotLoaded(filename string) (bool, error) {
+	key := loadedSnapshotKeyPrefix + filename
+	keysByHashRange := map[int64][]string{internalKeysHashRange: {key}}
+	indexes := map[string]int{key: 0}
+
+	results, err := s.cache.Get(keysByHashRange, indexes)
+	if err != nil {
+		return false, fmt.Errorf("checking if snapshot loaded: %w", err)
+	}
+	return results[0], nil
+}
+
+// markSnapshotLoaded marks a snapshot as successfully loaded
+func (s *Service) markSnapshotLoaded(filename string) error {
+	key := loadedSnapshotKeyPrefix + filename
+	keysByHashRange := map[int64][]string{internalKeysHashRange: {key}}
+
+	if err := s.cache.Put(keysByHashRange, s.config.LoadedSnapshotTTL); err != nil {
+		return fmt.Errorf("marking snapshot as loaded: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) getSnapshotFilenamePrefix() string {
 	return path.Join(s.config.BackupFolderName, "hr_")
 }
@@ -967,4 +1066,444 @@ type snapshotFile struct {
 	filename  string
 	hashRange int64
 	from, to  uint64
+}
+
+// GetSnapshotSince returns the "since" timestamp for a hash range.
+// This allows source nodes to ask destination nodes for incremental snapshot support.
+func (s *Service) GetSnapshotSince(
+	_ context.Context, req *pb.GetSnapshotSinceRequest,
+) (*pb.GetSnapshotSinceResponse, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	s.logger.Infon("GetSnapshotSince request received",
+		logger.NewIntField("hashRange", req.HashRange),
+	)
+
+	timestamp, err := s.getSnapshotTimestamp(req.HashRange)
+	if err != nil {
+		s.logger.Warnn("Getting snapshot timestamp",
+			logger.NewIntField("hashRange", req.HashRange), obskit.Error(err),
+		)
+		// Return 0 to indicate full sync needed
+		return &pb.GetSnapshotSinceResponse{SinceTimestamp: 0}, nil
+	}
+
+	s.logger.Infon("Returning snapshot since timestamp",
+		logger.NewIntField("hashRange", req.HashRange),
+		logger.NewIntField("sinceTimestamp", int64(timestamp)),
+	)
+
+	return &pb.GetSnapshotSinceResponse{SinceTimestamp: timestamp}, nil
+}
+
+// ReceiveSnapshot handles streaming snapshot data from another node.
+func (s *Service) ReceiveSnapshot(
+	stream grpc.ClientStreamingServer[pb.SnapshotChunk, pb.ReceiveSnapshotResponse],
+) error {
+	defer s.metrics.receiveSnapshotDuration.RecordDuration()()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var (
+		hashRange int64
+		timestamp uint64
+		buf       bytes.Buffer
+	)
+
+	s.logger.Infon("ReceiveSnapshot stream started")
+
+	for {
+		chunk, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			s.logger.Errorn("Receiving snapshot chunk", obskit.Error(err))
+			return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("receiving chunk: %v", err),
+			})
+		}
+
+		hashRange = chunk.HashRange
+		timestamp = chunk.Timestamp
+
+		if _, writeErr := buf.Write(chunk.Data); writeErr != nil {
+			s.logger.Errorn("Writing snapshot chunk to buffer", obskit.Error(writeErr))
+			return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("writing chunk to buffer: %v", writeErr),
+			})
+		}
+
+		if chunk.IsLast {
+			s.logger.Infon("Received last chunk",
+				logger.NewIntField("hashRange", hashRange),
+				logger.NewIntField("timestamp", int64(timestamp)),
+				logger.NewIntField("totalBytes", int64(buf.Len())),
+			)
+			break
+		}
+	}
+
+	if buf.Len() == 0 {
+		s.logger.Infon("Received empty snapshot, nothing to load",
+			logger.NewIntField("hashRange", hashRange),
+		)
+		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{Success: true})
+	}
+
+	// Load the snapshot data into the cache
+	// Note: LoadSnapshots handles decompression internally if compression is enabled
+	s.logger.Infon("Loading received snapshot",
+		logger.NewIntField("hashRange", hashRange),
+		logger.NewIntField("bufferSize", int64(buf.Len())),
+	)
+
+	if err := s.cache.LoadSnapshots(stream.Context(), &buf); err != nil {
+		s.logger.Errorn("Loading snapshot", obskit.Error(err))
+		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("loading snapshot: %v", err),
+		})
+	}
+
+	// Store the timestamp for future incremental snapshots
+	if err := s.setSnapshotTimestamp(hashRange, timestamp); err != nil {
+		s.logger.Warnn("Setting snapshot timestamp",
+			logger.NewIntField("hashRange", hashRange),
+			obskit.Error(err),
+		)
+		// Continue anyway, the data was loaded successfully
+	}
+
+	s.logger.Infon("Successfully received and loaded snapshot",
+		logger.NewIntField("hashRange", hashRange),
+		logger.NewIntField("timestamp", int64(timestamp)),
+	)
+
+	return stream.SendAndClose(&pb.ReceiveSnapshotResponse{Success: true})
+}
+
+// SendSnapshot streams a hash range snapshot to a destination node.
+func (s *Service) SendSnapshot(
+	ctx context.Context, req *pb.SendSnapshotRequest,
+) (*pb.SendSnapshotResponse, error) {
+	defer s.metrics.sendSnapshotDuration.RecordDuration()()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	s.logger.Infon("SendSnapshot request received",
+		logger.NewIntField("hashRange", req.HashRange),
+		logger.NewStringField("destinationAddress", req.DestinationAddress),
+	)
+
+	// Connect to the destination node
+	conn, nodeClient, err := s.connectToNode(req.DestinationAddress)
+	if err != nil {
+		s.logger.Errorn("Connecting to destination node",
+			logger.NewStringField("destinationAddress", req.DestinationAddress),
+			obskit.Error(err),
+		)
+		return &pb.SendSnapshotResponse{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("connecting to destination: %v", err),
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+	defer s.closeNodeConnection(conn)
+
+	// Get the "since" timestamp from the destination
+	sinceResp, err := nodeClient.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{
+		HashRange: req.HashRange,
+	})
+	if err != nil {
+		s.logger.Errorn("Getting since timestamp from destination",
+			logger.NewStringField("destinationAddress", req.DestinationAddress),
+			obskit.Error(err),
+		)
+		return &pb.SendSnapshotResponse{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("getting since timestamp: %v", err),
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	sinceTimestamp := sinceResp.SinceTimestamp
+	s.logger.Infon("Got since timestamp from destination",
+		logger.NewIntField("hashRange", req.HashRange),
+		logger.NewIntField("sinceTimestamp", int64(sinceTimestamp)),
+	)
+
+	// Create snapshot data
+	buf := bytes.NewBuffer(nil)
+	writers := map[int64]io.Writer{req.HashRange: buf}
+	since := map[int64]uint64{req.HashRange: sinceTimestamp}
+
+	newTimestamp, hasData, err := s.cache.CreateSnapshots(ctx, writers, since)
+	if err != nil {
+		s.logger.Errorn("Creating snapshot", obskit.Error(err))
+		return &pb.SendSnapshotResponse{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("creating snapshot: %v", err),
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	if !hasData[req.HashRange] {
+		s.logger.Infon("No data to send for hash range",
+			logger.NewIntField("hashRange", req.HashRange),
+		)
+		// Send an empty chunk with is_last=true to signal completion
+		stream, streamErr := nodeClient.ReceiveSnapshot(ctx)
+		if streamErr != nil {
+			return &pb.SendSnapshotResponse{
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("starting stream: %v", streamErr),
+				NodeId:       s.config.NodeID,
+			}, nil
+		}
+		if sendErr := stream.Send(&pb.SnapshotChunk{
+			HashRange: req.HashRange,
+			Data:      nil,
+			IsLast:    true,
+			Timestamp: newTimestamp,
+		}); sendErr != nil {
+			return &pb.SendSnapshotResponse{
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("sending empty chunk: %v", sendErr),
+				NodeId:       s.config.NodeID,
+			}, nil
+		}
+		resp, closeErr := stream.CloseAndRecv()
+		if closeErr != nil {
+			return &pb.SendSnapshotResponse{
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("closing stream: %v", closeErr),
+				NodeId:       s.config.NodeID,
+			}, nil
+		}
+		if !resp.Success {
+			return &pb.SendSnapshotResponse{
+				Success:      false,
+				ErrorMessage: resp.ErrorMessage,
+				NodeId:       s.config.NodeID,
+			}, nil
+		}
+		return &pb.SendSnapshotResponse{
+			Success: true,
+			NodeId:  s.config.NodeID,
+		}, nil
+	}
+
+	s.logger.Infon("Created snapshot, starting stream to destination",
+		logger.NewIntField("hashRange", req.HashRange),
+		logger.NewIntField("newTimestamp", int64(newTimestamp)),
+		logger.NewIntField("bufferSize", int64(buf.Len())),
+	)
+
+	// Stream the snapshot data to the destination
+	stream, err := nodeClient.ReceiveSnapshot(ctx)
+	if err != nil {
+		s.logger.Errorn("Starting receive snapshot stream", obskit.Error(err))
+		return &pb.SendSnapshotResponse{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("starting stream: %v", err),
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	// Send data in chunks
+	data := buf.Bytes()
+	chunkSize := DefaultStreamingChunkSize
+	totalChunks := (len(data) + chunkSize - 1) / chunkSize
+
+	for i := 0; i < len(data); i += chunkSize {
+		end := i + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		isLast := end >= len(data)
+		chunkNum := (i / chunkSize) + 1
+
+		chunk := &pb.SnapshotChunk{
+			HashRange: req.HashRange,
+			Data:      data[i:end],
+			IsLast:    isLast,
+			Timestamp: newTimestamp,
+		}
+
+		if err := stream.Send(chunk); err != nil {
+			s.logger.Errorn("Sending snapshot chunk",
+				logger.NewIntField("chunkNum", int64(chunkNum)),
+				logger.NewIntField("totalChunks", int64(totalChunks)),
+				obskit.Error(err),
+			)
+			return &pb.SendSnapshotResponse{
+				Success:      false,
+				ErrorMessage: fmt.Sprintf("sending chunk %d/%d: %v", chunkNum, totalChunks, err),
+				NodeId:       s.config.NodeID,
+			}, nil
+		}
+
+		s.logger.Debugn("Sent snapshot chunk",
+			logger.NewIntField("chunkNum", int64(chunkNum)),
+			logger.NewIntField("totalChunks", int64(totalChunks)),
+			logger.NewIntField("chunkSize", int64(end-i)),
+		)
+	}
+
+	// Close and receive response
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		s.logger.Errorn("Closing snapshot stream", obskit.Error(err))
+		return &pb.SendSnapshotResponse{
+			Success:      false,
+			ErrorMessage: fmt.Sprintf("closing stream: %v", err),
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	if !resp.Success {
+		s.logger.Errorn("Destination failed to receive snapshot",
+			logger.NewStringField("errorMessage", resp.ErrorMessage),
+		)
+		return &pb.SendSnapshotResponse{
+			Success:      false,
+			ErrorMessage: resp.ErrorMessage,
+			NodeId:       s.config.NodeID,
+		}, nil
+	}
+
+	s.logger.Infon("Successfully sent snapshot to destination",
+		logger.NewIntField("hashRange", req.HashRange),
+		logger.NewIntField("timestamp", int64(newTimestamp)),
+		logger.NewIntField("totalBytes", int64(len(data))),
+		logger.NewIntField("totalChunks", int64(totalChunks)),
+	)
+
+	return &pb.SendSnapshotResponse{
+		Success: true,
+		NodeId:  s.config.NodeID,
+	}, nil
+}
+
+// connectToNode establishes a gRPC connection to another node.
+func (s *Service) connectToNode(address string) (*grpc.ClientConn, pb.NodeServiceClient, error) {
+	conn, err := grpc.NewClient(address, s.getGrpcDialOptions()...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating gRPC client: %w", err)
+	}
+	return conn, pb.NewNodeServiceClient(conn), nil
+}
+
+// getGrpcDialOptions returns the gRPC dial options for creating connections
+func (s *Service) getGrpcDialOptions() []grpc.DialOption {
+	cfg := s.config.GrpcConfig
+
+	// Use defaults if not configured
+	keepAliveTime := cfg.KeepAliveTime
+	if keepAliveTime == 0 {
+		keepAliveTime = client.DefaultGrpcKeepAliveTime
+	}
+	keepAliveTimeout := cfg.KeepAliveTimeout
+	if keepAliveTimeout == 0 {
+		keepAliveTimeout = client.DefaultGrpcKeepAliveTimeout
+	}
+	backoffBaseDelay := cfg.BackoffBaseDelay
+	if backoffBaseDelay == 0 {
+		backoffBaseDelay = client.DefaultGrpcBackoffBaseDelay
+	}
+	backoffMultiplier := cfg.BackoffMultiplier
+	if backoffMultiplier == 0 {
+		backoffMultiplier = client.DefaultGrpcBackoffMultiplier
+	}
+	backoffJitter := cfg.BackoffJitter
+	if backoffJitter == 0 {
+		backoffJitter = client.DefaultGrpcBackoffJitter
+	}
+	backoffMaxDelay := cfg.BackoffMaxDelay
+	if backoffMaxDelay == 0 {
+		backoffMaxDelay = client.DefaultGrpcMaxDelay
+	}
+	minConnectTimeout := cfg.MinConnectTimeout
+	if minConnectTimeout == 0 {
+		minConnectTimeout = client.DefaultGrpcMinConnectTimeout
+	}
+
+	// Configure keepalive parameters to detect dead connections
+	kacp := keepalive.ClientParameters{
+		Time:                keepAliveTime,
+		Timeout:             keepAliveTimeout,
+		PermitWithoutStream: !cfg.DisableKeepAlivePermitWithoutStream,
+	}
+
+	// Configure connection backoff parameters
+	backoffConfig := grpcbackoff.Config{
+		BaseDelay:  backoffBaseDelay,
+		Multiplier: backoffMultiplier,
+		Jitter:     backoffJitter,
+		MaxDelay:   backoffMaxDelay,
+	}
+
+	return []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(kacp),
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           backoffConfig,
+			MinConnectTimeout: minConnectTimeout,
+		}),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "tcp", addr)
+		}),
+	}
+}
+
+// closeNodeConnection closes a gRPC connection to another node.
+func (s *Service) closeNodeConnection(conn *grpc.ClientConn) {
+	if err := conn.Close(); err != nil {
+		s.logger.Warnn("Closing node connection", obskit.Error(err))
+	}
+}
+
+// getSnapshotTimestamp retrieves the stored timestamp for a hash range.
+func (s *Service) getSnapshotTimestamp(hashRange int64) (uint64, error) {
+	key := getSnapshotTimestampKey(hashRange)
+	value, found, err := s.cache.GetValue(key, internalKeysHashRange)
+	if err != nil {
+		return 0, fmt.Errorf("getting snapshot timestamp: %w", err)
+	}
+
+	// If the key doesn't exist, return 0 (full sync needed)
+	if !found || len(value) < 8 {
+		return 0, nil
+	}
+
+	return binary.BigEndian.Uint64(value), nil
+}
+
+// setSnapshotTimestamp stores the timestamp for a hash range.
+func (s *Service) setSnapshotTimestamp(hashRange int64, timestamp uint64) error {
+	value := make([]byte, 8) // Encode timestamp as big-endian uint64
+	binary.BigEndian.PutUint64(value, timestamp)
+
+	key := getSnapshotTimestampKey(hashRange)
+	if err := s.cache.PutValue(key, internalKeysHashRange, value, 0); err != nil {
+		return fmt.Errorf("setting snapshot timestamp: %w", err)
+	}
+
+	s.logger.Debugn("Stored snapshot timestamp",
+		logger.NewIntField("hashRange", hashRange),
+		logger.NewIntField("timestamp", int64(timestamp)),
+	)
+
+	return nil
+}
+
+func getSnapshotTimestampKey(hashRange int64) string {
+	return snapshotTimestampKeyPrefix + strconv.FormatInt(hashRange, 10)
 }
