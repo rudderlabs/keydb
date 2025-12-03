@@ -692,10 +692,9 @@ func (s *httpServer) processHashRangeMovements(
 		)
 	}()
 
-	// Channel to coordinate between snapshot creation and loading
 	if !disableCreateSnapshotsSequentially {
 		createSnapshotsMaxConcurrency = 1
-		log.Warnn("Disabling concurrent snapshot creation due to disableCreateSnapshotsSequentially=true")
+		log.Warnn("Disabling concurrent snapshot creation due to disableCreateSnapshotsSequentially=false")
 	}
 	type snapshotCreated struct {
 		hashRange         int64
