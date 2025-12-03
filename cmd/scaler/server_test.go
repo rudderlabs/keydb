@@ -1658,7 +1658,6 @@ func TestBackup(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, withConfigs(node0Conf), withDegradedConfig(degradedConfig))
-	t.Cleanup(node0.Close)
 
 	node1Conf := newConf()
 	node1, node1Address := getService(ctx, t, cloudStorage, node.Config{
@@ -1666,7 +1665,6 @@ func TestBackup(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, withConfigs(node0Conf, node1Conf), withDegradedConfig(degradedConfig))
-	t.Cleanup(node1.Close)
 
 	node2Conf := newConf()
 	node2, node2Address := getService(ctx, t, cloudStorage, node.Config{
@@ -1674,7 +1672,8 @@ func TestBackup(t *testing.T) {
 		TotalHashRanges:  totalHashRanges,
 		SnapshotInterval: 60 * time.Second,
 	}, withConfigs(node0Conf, node1Conf, node2Conf), withDegradedConfig(degradedConfig))
-	t.Cleanup(node2.Close)
+
+	t.Logf("Cluster created: [%s, %s, %s]", node0Address, node1Address, node2Address)
 
 	// Start the Scaler HTTP Server with all 3 nodes
 	s := startScalerHTTPServer(t, totalHashRanges, scaler.RetryPolicy{
@@ -1703,15 +1702,14 @@ func TestBackup(t *testing.T) {
 		body,
 	)
 
-	// Call backup with upload and download
+	// Call backup with upload
 	body = s.Do("/backup", BackupRequest{
-		Upload:   true,
-		Download: true,
+		Upload: true,
 	})
 	var backupResp BackupResponse
 	require.NoError(t, jsonrs.Unmarshal([]byte(body), &backupResp))
 	require.True(t, backupResp.Success)
-	require.Equal(t, 3, backupResp.Total)
+	require.EqualValues(t, totalHashRanges, backupResp.Total)
 
 	// Verify snapshots were created in cloud storage (only hash ranges with data get snapshots)
 	files, err := minioContainer.Contents(context.Background(), defaultBackupFolderName+"/hr_")
@@ -1742,6 +1740,58 @@ func TestBackup(t *testing.T) {
 		require.Len(t, infoResponse.NodesAddresses, 3)
 		require.Greater(t, infoResponse.LastSnapshotTimestamp, int64(0))
 	}
+
+	cancel()
+	node0.Close()
+	node1.Close()
+	node2.Close()
+
+	// Recreate nodes from scratch and download the data from Cloud Storage
+	node0Conf = newConf()
+	node0, node0Address = getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           0,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, withConfigs(node0Conf), withDegradedConfig(degradedConfig))
+
+	node1Conf = newConf()
+	node1, node1Address = getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           1,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, withConfigs(node0Conf, node1Conf), withDegradedConfig(degradedConfig))
+
+	node2Conf = newConf()
+	node2, node2Address = getService(ctx, t, cloudStorage, node.Config{
+		NodeID:           2,
+		TotalHashRanges:  totalHashRanges,
+		SnapshotInterval: 60 * time.Second,
+	}, withConfigs(node0Conf, node1Conf, node2Conf), withDegradedConfig(degradedConfig))
+
+	t.Logf("Cluster created: [%s, %s, %s]", node0Address, node1Address, node2Address)
+
+	// Update cluster data to include all nodes
+	_ = s.Do("/updateClusterData", UpdateClusterDataRequest{
+		Addresses: []string{node0Address, node1Address, node2Address},
+	}, true)
+
+	// Call backup with download
+	body = s.Do("/backup", BackupRequest{
+		Download: true,
+	})
+	require.NoError(t, jsonrs.Unmarshal([]byte(body), &backupResp))
+	require.True(t, backupResp.Success)
+	require.EqualValues(t, totalHashRanges, backupResp.Total)
+
+	// Verify data is correct
+	body = s.Do("/get", GetRequest{
+		Keys: []string{"keyA", "keyB", "keyC", "keyD", "keyE", "keyF", "keyG", "keyH", "keyZ"},
+	})
+	require.JSONEq(t,
+		`{"keyA":true,"keyB":true,"keyC":true,"keyD":true,
+		"keyE":true,"keyF":true,"keyG":true,"keyH":true,"keyZ":false}`,
+		body,
+	)
 }
 
 // Helper types and functions
@@ -1915,12 +1965,6 @@ func startScalerHTTPServer(
 	for _, opt := range opts {
 		opt(&o)
 	}
-	c, err := client.NewClient(client.Config{
-		Addresses:       o.addresses,
-		TotalHashRanges: totalHashRanges,
-	}, log)
-	require.NoError(t, err)
-
 	op, err := scaler.NewClient(scaler.Config{
 		Addresses:            o.addresses,
 		TotalHashRanges:      totalHashRanges,
@@ -1931,11 +1975,15 @@ func startScalerHTTPServer(
 
 	freePort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
-
 	addr := fmt.Sprintf(":%d", freePort)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	opServer := newHTTPServer(c, op, addr, stats.NOP, log)
+	clientConfig := client.Config{
+		Addresses:       o.addresses,
+		TotalHashRanges: totalHashRanges,
+	}
+	opServer, err := newHTTPServer(clientConfig, op, addr, stats.NOP, log)
+	require.NoError(t, err)
 	go func() {
 		err := opServer.Start(ctx)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -1944,13 +1992,11 @@ func startScalerHTTPServer(
 	}()
 
 	oc := &opClient{
-		t:        t,
-		client:   http.DefaultClient,
-		url:      fmt.Sprintf("http://localhost:%d", freePort),
-		scaler:   op,
-		c:        c,
-		opServer: opServer,
-		cancel:   cancel,
+		t:      t,
+		client: http.DefaultClient,
+		url:    fmt.Sprintf("http://localhost:%d", freePort),
+		srv:    opServer,
+		cancel: cancel,
 	}
 	t.Cleanup(func() {
 		oc.Close()
@@ -1960,26 +2006,22 @@ func startScalerHTTPServer(
 }
 
 type opClient struct {
-	t        testing.TB
-	client   *http.Client
-	url      string
-	scaler   *scaler.Client
-	c        *client.Client
-	opServer *httpServer
-	cancel   context.CancelFunc
-	closed   sync.Once
+	t      testing.TB
+	client *http.Client
+	url    string
+	srv    *httpServer
+	cancel context.CancelFunc
+	closed sync.Once
 }
 
 func (oc *opClient) Close() {
 	oc.closed.Do(func() {
-		// Close gRPC clients first to terminate connections cleanly
-		_ = oc.c.Close()
-		_ = oc.scaler.Close()
-		// Then cancel context and stop HTTP server
-		oc.cancel()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		_ = oc.opServer.Stop(shutdownCtx)
+		if err := oc.srv.server.Shutdown(context.Background()); err != nil {
+			oc.t.Logf("Failed to shutdown server: %v", err)
+		}
+		if err := oc.srv.Close(); err != nil {
+			oc.t.Errorf("Failed to close server: %v", err)
+		}
 	})
 }
 

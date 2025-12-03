@@ -74,6 +74,6 @@ type BackupRequest struct {
 }
 
 type BackupResponse struct {
-	Total   int  `json:"total"`
 	Success bool `json:"success"`
+	Total   int  `json:"total"`
 }

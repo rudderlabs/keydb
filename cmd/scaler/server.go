@@ -21,6 +21,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
 const (
@@ -41,25 +42,32 @@ type scalerClient interface {
 	TotalHashRanges() int64
 	ClusterSize() int
 	GetNodeInfo(ctx context.Context, id int64) (*pb.GetNodeInfoResponse, error)
+	Close() error
 }
 
 type httpServer struct {
-	client *client.Client
-	scaler scalerClient
-	server *http.Server
-	stat   stats.Stats
-	logger logger.Logger
+	client       *client.Client
+	clientConfig client.Config
+	scaler       scalerClient
+	server       *http.Server
+	stat         stats.Stats
+	logger       logger.Logger
 }
 
 // newHTTPServer creates a new HTTP server
 func newHTTPServer(
-	client *client.Client, scaler *scaler.Client, addr string, stat stats.Stats, log logger.Logger,
-) *httpServer {
+	clientConfig client.Config, scaler *scaler.Client, addr string, stat stats.Stats, log logger.Logger,
+) (*httpServer, error) {
 	s := &httpServer{
-		client: client,
-		scaler: scaler,
-		stat:   stat,
-		logger: log,
+		clientConfig: clientConfig,
+		scaler:       scaler,
+		stat:         stat,
+		logger:       log,
+	}
+	var err error
+	s.client, err = client.NewClient(clientConfig, log.Child("client"), client.WithStats(stat))
+	if err != nil {
+		return nil, err
 	}
 
 	mux := chi.NewRouter()
@@ -88,7 +96,7 @@ func newHTTPServer(
 		IdleTimeout:  10 * time.Minute,
 	}
 
-	return s
+	return s, nil
 }
 
 // Start starts the HTTP server
@@ -96,6 +104,19 @@ func (s *httpServer) Start(ctx context.Context) error { return httputil.ListenAn
 
 // Stop stops the HTTP server
 func (s *httpServer) Stop(ctx context.Context) error { return s.server.Shutdown(ctx) }
+
+func (s *httpServer) Close() error {
+	if err := s.client.Close(); err != nil {
+		return fmt.Errorf("failed to close client: %w", err)
+	}
+	if err := s.scaler.Close(); err != nil {
+		return fmt.Errorf("failed to close scaler: %w", err)
+	}
+	if err := s.server.Close(); err != nil {
+		return fmt.Errorf("failed to close http server: %w", err)
+	}
+	return nil
+}
 
 // handleGet handles POST /get requests
 func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -277,6 +298,18 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Recreate client
+	err := s.client.Close()
+	if err != nil {
+		s.logger.Warnn("Cannot close client", obskit.Error(err))
+	}
+	s.clientConfig.Addresses = req.Addresses
+	s.client, err = client.NewClient(s.clientConfig, s.logger.Child("client"), client.WithStats(s.stat))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error creating client: %v", err), http.StatusInternalServerError)
+	}
+	s.logger.Infon("Client successfully recreated")
+
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -296,6 +329,10 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 	// Validate request
 	if !req.Upload && !req.Download {
 		http.Error(w, "at least one of upload or download must be true", http.StatusBadRequest)
+		return
+	}
+	if req.Upload && req.Download {
+		http.Error(w, "at most one of upload or download must be true", http.StatusBadRequest)
 		return
 	}
 
@@ -323,7 +360,6 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	totalHashRanges := s.scaler.TotalHashRanges()
-
 	log := s.logger.Withn(
 		logger.NewIntField("clusterSize", int64(clusterSize)),
 		logger.NewIntField("totalHashRanges", totalHashRanges),
@@ -347,16 +383,17 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 		loadSnapshotsMaxConcurrency = defaultLoadSnapshotsMaxConcurrency
 	}
 
-	ctx := r.Context()
-	hasher := hash.New(int64(clusterSize), totalHashRanges)
-
-	// Process target nodes in parallel
+	var (
+		ctx                 = r.Context()
+		hasher              = hash.New(int64(clusterSize), totalHashRanges)
+		processedHashRanges int
+	)
 	group, gCtx := kitsync.NewEagerGroup(ctx, len(targetNodes))
 	for _, nodeID := range targetNodes {
 		hashRanges := hasher.GetNodeHashRangesList(nodeID)
+		processedHashRanges += len(hashRanges)
 
 		group.Go(func() error {
-			// Upload: create snapshots
 			if req.Upload {
 				nodeStart := time.Now()
 				err := s.createSnapshotsWithProgress(
@@ -370,10 +407,7 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
 					logger.NewStringField("duration", time.Since(nodeStart).String()),
 				)
-			}
-
-			// Download: load snapshots
-			if req.Download {
+			} else if req.Download {
 				nodeStart := time.Now()
 				err := s.scaler.LoadSnapshots(gCtx, nodeID, int64(loadSnapshotsMaxConcurrency), hashRanges...)
 				if err != nil {
@@ -385,11 +419,9 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 					logger.NewStringField("duration", time.Since(nodeStart).String()),
 				)
 			}
-
 			return nil
 		})
 	}
-
 	if err := group.Wait(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -398,8 +430,8 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	if err := jsonrs.NewEncoder(w).Encode(BackupResponse{
-		Total:   len(targetNodes),
 		Success: true,
+		Total:   processedHashRanges,
 	}); err != nil {
 		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
 		return
