@@ -1747,6 +1747,9 @@ func TestBackup(t *testing.T) {
 	node2.Close()
 
 	// Recreate nodes from scratch and download the data from Cloud Storage
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
 	node0Conf = newConf()
 	node0, node0Address = getService(ctx, t, cloudStorage, node.Config{
 		NodeID:           0,
@@ -1792,6 +1795,10 @@ func TestBackup(t *testing.T) {
 		"keyE":true,"keyF":true,"keyG":true,"keyH":true,"keyZ":false}`,
 		body,
 	)
+	cancel()
+	node0.Close()
+	node1.Close()
+	node2.Close()
 }
 
 // Helper types and functions

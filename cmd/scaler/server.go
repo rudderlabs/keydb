@@ -347,7 +347,10 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 	if len(req.Nodes) > 0 {
 		for _, nodeID := range req.Nodes {
 			if nodeID < 0 || nodeID >= int64(clusterSize) {
-				http.Error(w, fmt.Sprintf("invalid node ID %d: must be in range [0, %d)", nodeID, clusterSize), http.StatusBadRequest)
+				http.Error(w,
+					fmt.Sprintf("invalid node ID %d: must be in range [0, %d)", nodeID, clusterSize),
+					http.StatusBadRequest,
+				)
 				return
 			}
 		}
