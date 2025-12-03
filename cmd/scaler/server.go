@@ -29,14 +29,13 @@ const (
 	currentSnapshotsToLoadMetricName     = "scaler_current_snapshots_loaded"
 	totalSnapshotsToCreateMetricName     = "scaler_total_snapshots_to_create"
 	currentSnapshotsToCreateMetricName   = "scaler_current_snapshots_created"
-	defaultCreateSnapshotsMaxConcurrency = 10
-	defaultLoadSnapshotsMaxConcurrency   = 10
+	defaultCreateSnapshotsMaxConcurrency = 2
 )
 
 type scalerClient interface {
 	UpdateClusterData(ctx context.Context, addresses ...string) error
 	CreateSnapshots(ctx context.Context, nodeID int64, fullSync bool, hashRanges ...int64) error
-	LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64, hashRanges ...int64) error
+	LoadSnapshots(ctx context.Context, nodeID int64, hashRanges ...int64) error
 	SendSnapshot(ctx context.Context, sourceNodeID int64, destinationAddress string, hashRange int64) error
 	GetNodeAddress(nodeID int64) (string, error)
 	TotalHashRanges() int64
@@ -263,13 +262,16 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	currentSnapshotsLoaded.Gauge(0)
 
 	// Load snapshots from cloud storage
-	if err := s.scaler.LoadSnapshots(r.Context(), req.NodeID, req.MaxConcurrency, req.HashRanges...); err != nil {
-		http.Error(w, fmt.Sprintf("Error loading snapshots: %v", err), http.StatusInternalServerError)
-		return
+	loaded := 0
+	for _, hashRange := range req.HashRanges {
+		// Calling LoadSnapshots with one hash range at a time to simplify internal retries
+		if err := s.scaler.LoadSnapshots(r.Context(), req.NodeID, hashRange); err != nil {
+			http.Error(w, fmt.Sprintf("Error loading snapshot %d: %v", hashRange, err), http.StatusInternalServerError)
+			return
+		}
+		loaded++
+		currentSnapshotsLoaded.Gauge(loaded)
 	}
-
-	// Update metrics after successful load
-	currentSnapshotsLoaded.Gauge(len(req.HashRanges))
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
@@ -380,12 +382,6 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 		)
 	}()
 
-	// Set default concurrency limit for loading snapshots
-	loadSnapshotsMaxConcurrency := req.LoadSnapshotsMaxConcurrency
-	if loadSnapshotsMaxConcurrency <= 0 {
-		loadSnapshotsMaxConcurrency = defaultLoadSnapshotsMaxConcurrency
-	}
-
 	var (
 		ctx                 = r.Context()
 		hasher              = hash.New(int64(clusterSize), totalHashRanges)
@@ -398,7 +394,7 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 
 		group.Go(func() error {
 			if req.Upload {
-				nodeStart := time.Now()
+				start := time.Now()
 				err := s.createSnapshotsWithProgress(
 					gCtx, nodeID, req.FullSync, req.DisableCreateSnapshotsSequentially, hashRanges,
 				)
@@ -408,19 +404,22 @@ func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 				log.Infon("Node snapshots created",
 					logger.NewIntField("nodeId", nodeID),
 					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
-					logger.NewStringField("duration", time.Since(nodeStart).String()),
+					logger.NewStringField("duration", time.Since(start).String()),
 				)
 			} else if req.Download {
-				nodeStart := time.Now()
-				err := s.scaler.LoadSnapshots(gCtx, nodeID, int64(loadSnapshotsMaxConcurrency), hashRanges...)
-				if err != nil {
-					return fmt.Errorf("loading snapshots for node %d: %w", nodeID, err)
+				for _, hashRange := range hashRanges {
+					// Calling LoadSnapshots with one hash range at a time to simplify internal retries
+					start := time.Now()
+					err := s.scaler.LoadSnapshots(gCtx, nodeID, hashRange)
+					if err != nil {
+						return fmt.Errorf("loading snapshots for node %d: %w", nodeID, err)
+					}
+					log.Infon("Node snapshot loaded",
+						logger.NewIntField("nodeId", nodeID),
+						logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
+						logger.NewStringField("duration", time.Since(start).String()),
+					)
 				}
-				log.Infon("Node snapshots loaded",
-					logger.NewIntField("nodeId", nodeID),
-					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
-					logger.NewStringField("duration", time.Since(nodeStart).String()),
-				)
 			}
 			return nil
 		})
@@ -480,7 +479,6 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		logger.NewBoolField("download", req.Download),
 		logger.NewBoolField("fullSync", req.FullSync),
 		logger.NewBoolField("streaming", req.Streaming),
-		logger.NewIntField("loadSnapshotsMaxConcurrency", int64(req.LoadSnapshotsMaxConcurrency)),
 	)
 	log.Infon("Received hash range movements request")
 
@@ -541,8 +539,9 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 
 		ctx := r.Context()
 		err := s.processHashRangeMovements(
-			ctx, movements, req.FullSync, false, req.CreateSnapshotsMaxConcurrency,
-			req.LoadSnapshotsMaxConcurrency, req.DisableCreateSnapshotsSequentially,
+			ctx, movements, req.FullSync, false,
+			req.CreateSnapshotsMaxConcurrency,
+			req.DisableCreateSnapshotsSequentially,
 		)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -607,18 +606,19 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		group, gCtx := errgroup.WithContext(ctx)
 		for destinationNodeID, hashRanges := range destinationNodeMovements {
 			group.Go(func() error {
-				start := time.Now()
-				err := s.scaler.LoadSnapshots(
-					gCtx, destinationNodeID, int64(req.LoadSnapshotsMaxConcurrency), hashRanges...,
-				)
-				if err != nil {
-					return fmt.Errorf("loading snapshots for node %d: %w", destinationNodeID, err)
+				for _, hashRange := range hashRanges {
+					// Calling LoadSnapshots with one hash range at a time to simplify internal retries
+					start := time.Now()
+					err := s.scaler.LoadSnapshots(gCtx, destinationNodeID, hashRange)
+					if err != nil {
+						return fmt.Errorf("loading snapshots for node %d: %w", destinationNodeID, err)
+					}
+					log.Infon("Node snapshot loaded",
+						logger.NewIntField("nodeId", destinationNodeID),
+						logger.NewIntField("hashRange", hashRange),
+						logger.NewStringField("duration", time.Since(start).String()),
+					)
 				}
-				log.Infon("Node snapshots loaded",
-					logger.NewIntField("nodeId", destinationNodeID),
-					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
-					logger.NewStringField("duration", time.Since(start).String()),
-				)
 				return nil
 			})
 		}
@@ -646,7 +646,6 @@ func (s *httpServer) processHashRangeMovements(
 	fullSync bool,
 	skipCreateSnapshots bool,
 	createSnapshotsMaxConcurrency int,
-	loadSnapshotsMaxConcurrency int,
 	disableCreateSnapshotsSequentially bool,
 ) error {
 	if len(movements) == 0 {
@@ -656,9 +655,6 @@ func (s *httpServer) processHashRangeMovements(
 	// Set default concurrency limits if not specified
 	if createSnapshotsMaxConcurrency <= 0 {
 		createSnapshotsMaxConcurrency = defaultCreateSnapshotsMaxConcurrency
-	}
-	if loadSnapshotsMaxConcurrency <= 0 {
-		loadSnapshotsMaxConcurrency = defaultLoadSnapshotsMaxConcurrency
 	}
 
 	// Initialize metrics for tracking progress
@@ -681,7 +677,6 @@ func (s *httpServer) processHashRangeMovements(
 		logger.NewBoolField("fullSync", fullSync),
 		logger.NewBoolField("skipCreateSnapshots", skipCreateSnapshots),
 		logger.NewIntField("createSnapshotsMaxConcurrency", int64(createSnapshotsMaxConcurrency)),
-		logger.NewIntField("loadSnapshotsMaxConcurrency", int64(loadSnapshotsMaxConcurrency)),
 		logger.NewBoolField("disableCreateSnapshotsSequentially", disableCreateSnapshotsSequentially),
 	)
 
@@ -705,45 +700,63 @@ func (s *httpServer) processHashRangeMovements(
 		createdCount, loadedCount  atomic.Int32
 		loadingDone                = make(chan error, 1)
 		snapshotsQueue             = make(chan snapshotCreated, len(movements))
+		snapshotsQueueMap          = make(map[int64]chan snapshotCreated)
 		sharedCtx, sharedCtxCancel = context.WithCancel(ctx)
 		creatingGroup, creatingCtx = kitsync.NewEagerGroup(sharedCtx, createSnapshotsMaxConcurrency)
 	)
 	defer sharedCtxCancel()
 
+	loadingGroup, loadingCtx := kitsync.NewEagerGroup(sharedCtx, 0)
+	for _, m := range movements {
+		if snapshotsQueueMap[m.DestinationNodeID] != nil {
+			continue
+		}
+		destinationCh := make(chan snapshotCreated, s.scaler.TotalHashRanges())
+		snapshotsQueueMap[m.DestinationNodeID] = destinationCh
+		loadingGroup.Go(func() error {
+			for {
+				select {
+				case <-loadingCtx.Done():
+					return loadingCtx.Err()
+				case snapshot, open := <-destinationCh:
+					if !open {
+						return nil
+					}
+					log.Infon("Received snapshot queued for loading",
+						logger.NewIntField("hashRange", snapshot.hashRange),
+						logger.NewIntField("sourceNodeId", snapshot.sourceNodeID),
+						logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
+					)
+
+					loadStart := time.Now()
+					err := s.scaler.LoadSnapshots(loadingCtx, snapshot.destinationNodeID, snapshot.hashRange)
+					if err != nil {
+						sharedCtxCancel()
+						return fmt.Errorf("loading snapshot for hash range %d to node %d: %w",
+							snapshot.hashRange, snapshot.destinationNodeID, err,
+						)
+					}
+
+					log.Infon("Snapshot loaded",
+						logger.NewIntField("hashRange", snapshot.hashRange),
+						logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
+						logger.NewStringField("duration", time.Since(loadStart).String()),
+					)
+
+					// Update progress
+					currentSnapshotsLoaded.Gauge(int(loadedCount.Add(1)))
+				}
+			}
+		})
+	}
 	// Start goroutine to load snapshots in parallel
 	go func() {
 		defer close(loadingDone)
-		loadingGroup, loadingCtx := kitsync.NewEagerGroup(sharedCtx, loadSnapshotsMaxConcurrency)
 		for snapshot := range snapshotsQueue {
-			loadingGroup.Go(func() error {
-				log.Infon("Received snapshot queued for loading",
-					logger.NewIntField("hashRange", snapshot.hashRange),
-					logger.NewIntField("sourceNodeId", snapshot.sourceNodeID),
-					logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
-				)
-
-				loadStart := time.Now()
-				err := s.scaler.LoadSnapshots(
-					loadingCtx, snapshot.destinationNodeID, int64(loadSnapshotsMaxConcurrency), snapshot.hashRange,
-				)
-				if err != nil {
-					sharedCtxCancel()
-					return fmt.Errorf("loading snapshot for hash range %d to node %d: %w",
-						snapshot.hashRange, snapshot.destinationNodeID, err,
-					)
-				}
-
-				log.Infon("Snapshot loaded",
-					logger.NewIntField("hashRange", snapshot.hashRange),
-					logger.NewIntField("destinationNodeId", snapshot.destinationNodeID),
-					logger.NewStringField("duration", time.Since(loadStart).String()),
-				)
-
-				// Update progress
-				currentSnapshotsLoaded.Gauge(int(loadedCount.Add(1)))
-
-				return nil
-			})
+			snapshotsQueueMap[snapshot.destinationNodeID] <- snapshot
+		}
+		for _, ch := range snapshotsQueueMap {
+			close(ch)
 		}
 		loadingDone <- loadingGroup.Wait()
 	}()

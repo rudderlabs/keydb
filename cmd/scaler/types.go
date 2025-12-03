@@ -26,9 +26,8 @@ type CreateSnapshotsRequest struct {
 
 // LoadSnapshotsRequest represents a request to load snapshots
 type LoadSnapshotsRequest struct {
-	NodeID         int64   `json:"node_id"`
-	HashRanges     []int64 `json:"hash_ranges,omitempty"`
-	MaxConcurrency int64   `json:"max_concurrency"`
+	NodeID     int64   `json:"node_id"`
+	HashRanges []int64 `json:"hash_ranges,omitempty"`
 }
 
 // UpdateClusterDataRequest represents a request to update the cluster size
@@ -45,7 +44,6 @@ type HashRangeMovementsRequest struct {
 	Download                           bool  `json:"download,omitempty"`
 	FullSync                           bool  `json:"full_sync,omitempty"`
 	CreateSnapshotsMaxConcurrency      int   `json:"create_snapshots_max_concurrency,omitempty"`
-	LoadSnapshotsMaxConcurrency        int   `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool  `json:"disable_create_snapshots_sequentially,omitempty"`
 	// Streaming enables node-to-node streaming instead of using cloud storage for data transfer.
 	// When true, source nodes stream hash ranges directly to destination nodes.
@@ -68,7 +66,6 @@ type BackupRequest struct {
 	Upload                             bool    `json:"upload,omitempty"`
 	Download                           bool    `json:"download,omitempty"`
 	FullSync                           bool    `json:"full_sync,omitempty"`
-	LoadSnapshotsMaxConcurrency        int     `json:"load_snapshots_max_concurrency,omitempty"`
 	DisableCreateSnapshotsSequentially bool    `json:"disable_create_snapshots_sequentially,omitempty"`
 	Nodes                              []int64 `json:"nodes,omitempty"`
 }
