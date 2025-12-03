@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -35,34 +34,40 @@ const (
 )
 
 type scalerClient interface {
-	Scale(ctx context.Context, nodeIDs []int64) error
-	UpdateClusterData(addresses ...string) error
+	UpdateClusterData(ctx context.Context, addresses ...string) error
 	CreateSnapshots(ctx context.Context, nodeID int64, fullSync bool, hashRanges ...int64) error
 	LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64, hashRanges ...int64) error
-	ExecuteScalingWithRollback(opType scaler.ScalingOperationType, oldAddresses, newAddresses []string,
-		fn func() error) error
-	GetLastOperation() *scaler.ScalingOperation
+	SendSnapshot(ctx context.Context, sourceNodeID int64, destinationAddress string, hashRange int64) error
+	GetNodeAddress(nodeID int64) (string, error)
 	TotalHashRanges() int64
+	ClusterSize() int
 	GetNodeInfo(ctx context.Context, id int64) (*pb.GetNodeInfoResponse, error)
+	Close() error
 }
 
 type httpServer struct {
-	client *client.Client
-	scaler scalerClient
-	server *http.Server
-	stat   stats.Stats
-	logger logger.Logger
+	client       *client.Client
+	clientConfig client.Config
+	scaler       scalerClient
+	server       *http.Server
+	stat         stats.Stats
+	logger       logger.Logger
 }
 
 // newHTTPServer creates a new HTTP server
 func newHTTPServer(
-	client *client.Client, scaler *scaler.Client, addr string, stat stats.Stats, log logger.Logger,
-) *httpServer {
+	clientConfig client.Config, scaler *scaler.Client, addr string, stat stats.Stats, log logger.Logger,
+) (*httpServer, error) {
 	s := &httpServer{
-		client: client,
-		scaler: scaler,
-		stat:   stat,
-		logger: log,
+		clientConfig: clientConfig,
+		scaler:       scaler,
+		stat:         stat,
+		logger:       log,
+	}
+	var err error
+	s.client, err = client.NewClient(clientConfig, log.Child("client"), client.WithStats(stat))
+	if err != nil {
+		return nil, err
 	}
 
 	mux := chi.NewRouter()
@@ -79,11 +84,9 @@ func newHTTPServer(
 	mux.Post("/info", s.handleInfo)
 	mux.Post("/createSnapshots", s.handleCreateSnapshots)
 	mux.Post("/loadSnapshots", s.handleLoadSnapshots)
-	mux.Post("/scale", s.handleScale)
 	mux.Post("/updateClusterData", s.handleUpdateClusterData)
-	mux.Post("/autoScale", s.handleAutoScale)
 	mux.Post("/hashRangeMovements", s.handleHashRangeMovements)
-	mux.Get("/lastOperation", s.handleLastOperation)
+	mux.Post("/backup", s.handleBackup)
 
 	s.server = &http.Server{
 		Addr:         addr,
@@ -93,7 +96,7 @@ func newHTTPServer(
 		IdleTimeout:  10 * time.Minute,
 	}
 
-	return s
+	return s, nil
 }
 
 // Start starts the HTTP server
@@ -101,6 +104,19 @@ func (s *httpServer) Start(ctx context.Context) error { return httputil.ListenAn
 
 // Stop stops the HTTP server
 func (s *httpServer) Stop(ctx context.Context) error { return s.server.Shutdown(ctx) }
+
+func (s *httpServer) Close() error {
+	if err := s.client.Close(); err != nil {
+		return fmt.Errorf("failed to close client: %w", err)
+	}
+	if err := s.scaler.Close(); err != nil {
+		return fmt.Errorf("failed to close scaler: %w", err)
+	}
+	if err := s.server.Close(); err != nil {
+		return fmt.Errorf("failed to close http server: %w", err)
+	}
+	return nil
+}
 
 // handleGet handles POST /get requests
 func (s *httpServer) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -261,33 +277,6 @@ func (s *httpServer) handleLoadSnapshots(w http.ResponseWriter, r *http.Request)
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
-// handleScale handles POST /scale requests
-func (s *httpServer) handleScale(w http.ResponseWriter, r *http.Request) {
-	// Parse request body
-	var req ScaleRequest
-	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// Validate request
-	if len(req.NodeIDs) == 0 {
-		http.Error(w, "No node IDs provided", http.StatusBadRequest)
-		return
-	}
-
-	// Scale cluster
-	if err := s.scaler.Scale(r.Context(), req.NodeIDs); err != nil {
-		http.Error(w, fmt.Sprintf("Error scaling cluster: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Write response
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"success":true}`))
-}
-
 // handleUpdateClusterData handles POST /updateClusterData requests
 func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
@@ -304,10 +293,22 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Complete scale operation
-	if err := s.scaler.UpdateClusterData(req.Addresses...); err != nil {
+	if err := s.scaler.UpdateClusterData(r.Context(), req.Addresses...); err != nil {
 		http.Error(w, fmt.Sprintf("Error completing scale operation: %v", err), http.StatusInternalServerError)
 		return
 	}
+
+	// Recreate client
+	err := s.client.Close()
+	if err != nil {
+		s.logger.Warnn("Cannot close client", obskit.Error(err))
+	}
+	s.clientConfig.Addresses = req.Addresses
+	s.client, err = client.NewClient(s.clientConfig, s.logger.Child("client"), client.WithStats(s.stat))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error creating client: %v", err), http.StatusInternalServerError)
+	}
+	s.logger.Infon("Client successfully recreated")
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
@@ -315,212 +316,129 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
-func (s *httpServer) handleAutoScale(w http.ResponseWriter, r *http.Request) {
+// handleBackup handles POST /backup requests
+// It creates and/or loads snapshots for all nodes in the cluster without scaling operations.
+func (s *httpServer) handleBackup(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
-	var req AutoScaleRequest
+	var req BackupRequest
 	if err := jsonrs.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, fmt.Sprintf("Error decoding request: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	// Validate request
-	if len(req.OldNodesAddresses) == 0 {
-		http.Error(w, "No old node addresses provided", http.StatusBadRequest)
+	if !req.Upload && !req.Download {
+		http.Error(w, "at least one of upload or download must be true", http.StatusBadRequest)
 		return
 	}
-	if len(req.NewNodesAddresses) == 0 {
-		http.Error(w, "No new node addresses provided", http.StatusBadRequest)
+	if req.Upload && req.Download {
+		http.Error(w, "at most one of upload or download must be true", http.StatusBadRequest)
 		return
 	}
 
-	oldClusterSize := int64(len(req.OldNodesAddresses))
-	newClusterSize := int64(len(req.NewNodesAddresses))
-	createSnapshotsMaxConcurrency := req.CreateSnapshotsMaxConcurrency
-	loadSnapshotsMaxConcurrency := req.LoadSnapshotsMaxConcurrency
+	clusterSize := s.scaler.ClusterSize()
+	if clusterSize == 0 {
+		http.Error(w, "cluster size is 0", http.StatusBadRequest)
+		return
+	}
 
-	var err error
-	if newClusterSize > oldClusterSize {
-		err = s.handleScaleUp(
-			r.Context(), req.OldNodesAddresses, req.NewNodesAddresses,
-			req.FullSync, req.SkipCreateSnapshots, createSnapshotsMaxConcurrency, loadSnapshotsMaxConcurrency,
-			req.DisableCreateSnapshotsSequentially,
-		)
-	} else if newClusterSize < oldClusterSize {
-		err = s.handleScaleDown(
-			r.Context(), req.OldNodesAddresses, req.NewNodesAddresses,
-			req.FullSync, req.SkipCreateSnapshots, createSnapshotsMaxConcurrency, loadSnapshotsMaxConcurrency,
-			req.DisableCreateSnapshotsSequentially,
-		)
+	// Determine target nodes
+	var targetNodes []int64
+	if len(req.Nodes) > 0 {
+		for _, nodeID := range req.Nodes {
+			if nodeID < 0 || nodeID >= int64(clusterSize) {
+				http.Error(w,
+					fmt.Sprintf("invalid node ID %d: must be in range [0, %d)", nodeID, clusterSize),
+					http.StatusBadRequest,
+				)
+				return
+			}
+		}
+		targetNodes = req.Nodes
 	} else {
-		// Auto-healing: propagate cluster addresses to all nodes for consistency
-		err = s.handleAutoHealing(r.Context(), req.OldNodesAddresses, req.NewNodesAddresses)
+		targetNodes = make([]int64, clusterSize)
+		for i := int64(0); i < int64(clusterSize); i++ {
+			targetNodes[i] = i
+		}
 	}
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error during auto scale operation: %v", err), http.StatusInternalServerError)
+
+	totalHashRanges := s.scaler.TotalHashRanges()
+	log := s.logger.Withn(
+		logger.NewIntField("clusterSize", int64(clusterSize)),
+		logger.NewIntField("totalHashRanges", totalHashRanges),
+		logger.NewIntField("targetNodesCount", int64(len(targetNodes))),
+		logger.NewBoolField("upload", req.Upload),
+		logger.NewBoolField("download", req.Download),
+		logger.NewBoolField("fullSync", req.FullSync),
+	)
+	log.Infon("Received backup request")
+
+	start := time.Now()
+	defer func() {
+		log.Infon("Backup request completed",
+			logger.NewStringField("duration", time.Since(start).String()),
+		)
+	}()
+
+	// Set default concurrency limit for loading snapshots
+	loadSnapshotsMaxConcurrency := req.LoadSnapshotsMaxConcurrency
+	if loadSnapshotsMaxConcurrency <= 0 {
+		loadSnapshotsMaxConcurrency = defaultLoadSnapshotsMaxConcurrency
+	}
+
+	var (
+		ctx                 = r.Context()
+		hasher              = hash.New(int64(clusterSize), totalHashRanges)
+		processedHashRanges int
+	)
+	group, gCtx := kitsync.NewEagerGroup(ctx, len(targetNodes))
+	for _, nodeID := range targetNodes {
+		hashRanges := hasher.GetNodeHashRangesList(nodeID)
+		processedHashRanges += len(hashRanges)
+
+		group.Go(func() error {
+			if req.Upload {
+				nodeStart := time.Now()
+				err := s.createSnapshotsWithProgress(
+					gCtx, nodeID, req.FullSync, req.DisableCreateSnapshotsSequentially, hashRanges,
+				)
+				if err != nil {
+					return fmt.Errorf("creating snapshots for node %d: %w", nodeID, err)
+				}
+				log.Infon("Node snapshots created",
+					logger.NewIntField("nodeId", nodeID),
+					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
+					logger.NewStringField("duration", time.Since(nodeStart).String()),
+				)
+			} else if req.Download {
+				nodeStart := time.Now()
+				err := s.scaler.LoadSnapshots(gCtx, nodeID, int64(loadSnapshotsMaxConcurrency), hashRanges...)
+				if err != nil {
+					return fmt.Errorf("loading snapshots for node %d: %w", nodeID, err)
+				}
+				log.Infon("Node snapshots loaded",
+					logger.NewIntField("nodeId", nodeID),
+					logger.NewIntField("hashRangesCount", int64(len(hashRanges))),
+					logger.NewStringField("duration", time.Since(nodeStart).String()),
+				)
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"success":true}`))
-}
-
-// handleScaleUp implements the scale up logic based on TestScaleUpAndDown
-func (s *httpServer) handleScaleUp(
-	ctx context.Context, oldAddresses, newAddresses []string,
-	fullSync, skipCreateSnapshots bool,
-	createSnapshotsMaxConcurrency, loadSnapshotsMaxConcurrency int,
-	disableCreateSnapshotsSequentially bool,
-) error {
-	oldClusterSize := int64(len(oldAddresses))
-	newClusterSize := int64(len(newAddresses))
-	movements := hash.GetHashRangeMovementsByRange(
-		oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
-	)
-
-	log := s.logger.Withn(
-		logger.NewStringField("oldAddresses", strings.Join(oldAddresses, ",")),
-		logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
-		logger.NewIntField("totalMovements", int64(len(movements))),
-	)
-	log.Infon("Starting scale up")
-
-	start := time.Now()
-	defer func() {
-		log.Infon("Scale up completed",
-			logger.NewStringField("duration", time.Since(start).String()),
-		)
-	}()
-
-	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleUp, oldAddresses, newAddresses, func() error {
-		// Step 1: Update cluster data with new addresses
-		if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
-			log.Errorn("Cannot update cluster data", obskit.Error(err))
-			return fmt.Errorf("updating cluster data: %w", err)
-		}
-
-		log.Infon("Cluster data updated")
-
-		// Step 2: Create and load snapshots for hash ranges that will be moved
-		if skipCreateSnapshots {
-			log.Infon("Skipping snapshots creation, loading only")
-		} else {
-			log.Infon("Scale up to start creating and loading snapshots")
-		}
-
-		err := s.processHashRangeMovements(
-			ctx, movements, fullSync, skipCreateSnapshots, createSnapshotsMaxConcurrency,
-			loadSnapshotsMaxConcurrency, disableCreateSnapshotsSequentially,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Step 5: Scale all nodes
-		return s.completeScaleOperation(ctx, newClusterSize)
-	})
-}
-
-// handleScaleDown implements the scale down logic based on TestScaleUpAndDown
-func (s *httpServer) handleScaleDown(
-	ctx context.Context, oldAddresses, newAddresses []string,
-	fullSync, skipCreateSnapshots bool, createSnapshotsMaxConcurrency, loadSnapshotsMaxConcurrency int,
-	disableCreateSnapshotsSequentially bool,
-) error {
-	oldClusterSize := int64(len(oldAddresses))
-	newClusterSize := int64(len(newAddresses))
-	movements := hash.GetHashRangeMovementsByRange(
-		oldClusterSize, newClusterSize, s.scaler.TotalHashRanges(),
-	)
-
-	log := s.logger.Withn(
-		logger.NewStringField("oldAddresses", strings.Join(oldAddresses, ",")),
-		logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
-		logger.NewIntField("totalMovements", int64(len(movements))),
-	)
-	log.Infon("Starting scale down")
-
-	start := time.Now()
-	defer func() {
-		log.Infon("Scale down completed",
-			logger.NewStringField("duration", time.Since(start).String()),
-		)
-	}()
-
-	return s.scaler.ExecuteScalingWithRollback(scaler.ScaleDown, oldAddresses, newAddresses, func() error {
-		// Step 1: Create and load snapshots for hash ranges that will be moved
-		// Use pipelined approach: start loading snapshots as they are created
-		if skipCreateSnapshots {
-			log.Infon("Skipping snapshots creation, loading only")
-		} else {
-			log.Infon("Scale down to start creating and loading snapshots")
-		}
-
-		err := s.processHashRangeMovements(
-			ctx, movements, fullSync, skipCreateSnapshots, createSnapshotsMaxConcurrency,
-			loadSnapshotsMaxConcurrency, disableCreateSnapshotsSequentially,
-		)
-		if err != nil {
-			return err
-		}
-
-		// Step 2: Update cluster data with new addresses
-		if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
-			log.Errorn("Cannot update cluster data", obskit.Error(err))
-			return fmt.Errorf("updating cluster data: %w", err)
-		}
-
-		log.Infon("Cluster data updated")
-
-		// Step 4: Scale remaining nodes
-		return s.completeScaleOperation(ctx, newClusterSize)
-	})
-}
-
-// handleAutoHealing implements auto-healing by propagating cluster addresses to all nodes
-// This ensures all nodes have consistent cluster topology information
-func (s *httpServer) handleAutoHealing(ctx context.Context, oldAddresses, newAddresses []string) error {
-	log := s.logger.Withn(
-		logger.NewStringField("oldAddresses", strings.Join(oldAddresses, ",")),
-		logger.NewStringField("newAddresses", strings.Join(newAddresses, ",")),
-	)
-	log.Infon("Starting auto-healing")
-
-	start := time.Now()
-	defer func() {
-		s.logger.Infon("Auto-healing completed",
-			logger.NewStringField("duration", time.Since(start).String()),
-		)
-	}()
-
-	return s.scaler.ExecuteScalingWithRollback(scaler.AutoHealing, oldAddresses, newAddresses, func() error {
-		// Step 1: Update cluster data with current addresses to ensure consistency
-		if err := s.scaler.UpdateClusterData(newAddresses...); err != nil {
-			log.Errorn("Cannot update cluster data", obskit.Error(err))
-			return fmt.Errorf("updating cluster data for auto-healing: %w", err)
-		}
-
-		// Step 2: Scale all nodes to refresh their cluster information
-		return s.completeScaleOperation(ctx, int64(len(newAddresses)))
-	})
-}
-
-func (s *httpServer) completeScaleOperation(ctx context.Context, clusterSize int64) error {
-	nodeIDs := make([]int64, clusterSize)
-	for i := int64(0); i < clusterSize; i++ {
-		nodeIDs[i] = i
+	if err := jsonrs.NewEncoder(w).Encode(BackupResponse{
+		Success: true,
+		Total:   processedHashRanges,
+	}); err != nil {
+		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
+		return
 	}
-
-	s.logger.Infon("Starting scale operation")
-
-	if err := s.scaler.Scale(ctx, nodeIDs); err != nil {
-		return fmt.Errorf("scaling nodes: %w", err)
-	}
-
-	s.logger.Infon("Scale command sent to all nodes")
-
-	return nil
 }
 
 // handleHashRangeMovements handles POST /hashRangeMovements requests
@@ -561,6 +479,7 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		logger.NewBoolField("upload", req.Upload),
 		logger.NewBoolField("download", req.Download),
 		logger.NewBoolField("fullSync", req.FullSync),
+		logger.NewBoolField("streaming", req.Streaming),
 		logger.NewIntField("loadSnapshotsMaxConcurrency", int64(req.LoadSnapshotsMaxConcurrency)),
 	)
 	log.Infon("Received hash range movements request")
@@ -589,9 +508,33 @@ func (s *httpServer) handleHashRangeMovements(w http.ResponseWriter, r *http.Req
 		})
 	}
 
-	// If upload=true and download=true, use pipelined approach
-	// Otherwise use the old sequential approach for backward compatibility
-	if req.Upload && req.Download {
+	// Handle streaming mode: node-to-node direct transfer
+	if req.Streaming {
+		log.Infon("Streaming mode enabled (node-to-node transfer)",
+			logger.NewIntField("totalMovements", int64(len(movements))),
+		)
+
+		// Get current node addresses for streaming
+		// We need to know all node addresses to send data to correct destinations
+		addresses := make([]string, req.NewClusterSize)
+		for i := int64(0); i < req.NewClusterSize; i++ {
+			addr, err := s.scaler.GetNodeAddress(i)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("getting address for node %d: %v", i, err), http.StatusInternalServerError)
+				return
+			}
+			addresses[i] = addr
+		}
+
+		ctx := r.Context()
+		err := s.processHashRangeMovementsStreaming(ctx, movements, addresses)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if req.Upload && req.Download {
+		// If upload=true and download=true, use pipelined approach
+		// Otherwise use the old sequential approach for backward compatibility
 		log.Infon("Upload and download of hash ranges are enabled (using pipelined approach)",
 			logger.NewIntField("totalHashRanges", req.TotalHashRanges),
 		)
@@ -876,6 +819,82 @@ func (s *httpServer) processHashRangeMovements(
 	return nil
 }
 
+// processHashRangeMovementsStreaming processes hash range movements using node-to-node streaming.
+// Each source node sends its hash ranges directly to destination nodes, bypassing cloud storage.
+// Constraint: One source node can only send one hash range at a time, but different source nodes
+// can send in parallel.
+func (s *httpServer) processHashRangeMovementsStreaming(
+	ctx context.Context,
+	movements map[int64]hash.Movement,
+	nodeAddresses []string,
+) error {
+	if len(movements) == 0 {
+		return nil
+	}
+
+	log := s.logger.Withn(
+		logger.NewIntField("totalMovements", int64(len(movements))),
+	)
+	log.Infon("Starting streaming hash range movements")
+
+	start := time.Now()
+	defer func() {
+		log.Infon("Streaming hash range movements completed",
+			logger.NewStringField("duration", time.Since(start).String()),
+		)
+	}()
+
+	// Group movements by source node
+	// map[sourceNodeID][]movement
+	bySource := make(map[int64][]movementWithRange)
+	for hashRange, movement := range movements {
+		bySource[movement.SourceNodeID] = append(bySource[movement.SourceNodeID], movementWithRange{
+			hashRange:   hashRange,
+			destination: movement.DestinationNodeID,
+		})
+	}
+
+	// Process each source node in parallel, but process movements sequentially within each source
+	group, gCtx := kitsync.NewEagerGroup(ctx, len(bySource))
+	for sourceNodeID, nodeMovements := range bySource {
+		group.Go(func() error {
+			// Process this source node's movements sequentially
+			for _, mv := range nodeMovements {
+				// Get destination address
+				if mv.destination >= int64(len(nodeAddresses)) {
+					return fmt.Errorf("destination node %d address not found", mv.destination)
+				}
+
+				destAddr := nodeAddresses[mv.destination]
+
+				log.Infon("Streaming hash range",
+					logger.NewIntField("hashRange", mv.hashRange),
+					logger.NewIntField("sourceNodeId", sourceNodeID),
+					logger.NewIntField("destinationNodeId", mv.destination),
+					logger.NewStringField("destinationAddress", destAddr),
+				)
+
+				mvStart := time.Now()
+				err := s.scaler.SendSnapshot(gCtx, sourceNodeID, destAddr, mv.hashRange)
+				if err != nil {
+					return fmt.Errorf("streaming hash range %d from node %d to node %d: %w",
+						mv.hashRange, sourceNodeID, mv.destination, err)
+				}
+
+				log.Infon("Streamed hash range",
+					logger.NewIntField("hashRange", mv.hashRange),
+					logger.NewIntField("sourceNodeId", sourceNodeID),
+					logger.NewIntField("destinationNodeId", mv.destination),
+					logger.NewStringField("duration", time.Since(mvStart).String()),
+				)
+			}
+			return nil
+		})
+	}
+
+	return group.Wait()
+}
+
 // createSnapshotsWithProgress creates snapshots either sequentially (one at a time) or in batch
 // depending on the disableSequential flag
 func (s *httpServer) createSnapshotsWithProgress(
@@ -924,24 +943,10 @@ func (s *httpServer) createSnapshotsWithProgress(
 	return nil
 }
 
-// handleLastOperation handles GET /lastOperation requests
-func (s *httpServer) handleLastOperation(w http.ResponseWriter, _ *http.Request) {
-	operation := s.scaler.GetLastOperation()
-	if operation == nil {
-		http.Error(w, "No operation found", http.StatusNotFound)
-		return
-	}
-
-	response := LastOperationResponse{
-		Operation: operation,
-	}
-
-	// Write response
-	w.Header().Set("Content-Type", "application/json")
-	if err := jsonrs.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, fmt.Sprintf("Error encoding response: %v", err), http.StatusInternalServerError)
-		return
-	}
+// movementWithRange represents a hash range movement with its hash range ID
+type movementWithRange struct {
+	hashRange   int64
+	destination int64
 }
 
 type loggerAdapter struct {

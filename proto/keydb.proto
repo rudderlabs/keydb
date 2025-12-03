@@ -23,8 +23,14 @@ service NodeService {
   // CreateSnapshots forces the creation of snapshots for all hash ranges
   rpc CreateSnapshots(CreateSnapshotsRequest) returns (CreateSnapshotsResponse) {}
 
-  // Scale changes the number of nodes in the cluster
-  rpc Scale(ScaleRequest) returns (ScaleResponse) {}
+  // SendSnapshot is called by scaler on source node to initiate streaming to destination
+  rpc SendSnapshot(SendSnapshotRequest) returns (SendSnapshotResponse) {}
+
+  // GetSnapshotSince is called by source node to get "since" timestamp from destination
+  rpc GetSnapshotSince(GetSnapshotSinceRequest) returns (GetSnapshotSinceResponse) {}
+
+  // ReceiveSnapshot is called by source node to stream snapshot data to destination
+  rpc ReceiveSnapshot(stream SnapshotChunk) returns (ReceiveSnapshotResponse) {}
 }
 
 // NodeService message definitions
@@ -107,17 +113,39 @@ message CreateSnapshotsResponse {
   int64 node_id = 3; // ID of the node that processed the request
 }
 
-// ScaleRequest changes the number of nodes in the cluster
-message ScaleRequest {
-  // When the cluster_size changes the scaler can use this field to tell all nodes which addresses are to be broadcast
-  // to clients
-  repeated string nodesAddresses = 1;
+// SendSnapshotRequest initiates streaming a hash range to a destination node
+message SendSnapshotRequest {
+  int64 hash_range = 1;            // Hash range to send
+  string destination_address = 2;  // Target node address (host:port)
 }
 
-// ScaleResponse contains the result of the scaling operation
-message ScaleResponse {
+// SendSnapshotResponse contains the result of the send snapshot operation
+message SendSnapshotResponse {
   bool success = 1;
-  int64 previous_cluster_size = 2;
-  int64 new_cluster_size = 3;
-  string error_message = 4; // Error message if the operation failed
+  string error_message = 2;
+  int64 node_id = 3;               // ID of the node that processed the request
+}
+
+// GetSnapshotSinceRequest asks for the "since" timestamp for incremental snapshots
+message GetSnapshotSinceRequest {
+  int64 hash_range = 1;            // Which hash range to query
+}
+
+// GetSnapshotSinceResponse returns the timestamp for incremental snapshots
+message GetSnapshotSinceResponse {
+  uint64 since_timestamp = 1;      // 0 means full sync needed
+}
+
+// SnapshotChunk represents a chunk of snapshot data being streamed
+message SnapshotChunk {
+  int64 hash_range = 1;            // Which hash range this chunk belongs to
+  bytes data = 2;                  // Chunk of snapshot data
+  bool is_last = 3;                // Whether this is the final chunk
+  uint64 timestamp = 4;            // Snapshot timestamp (for tracking)
+}
+
+// ReceiveSnapshotResponse contains the result of receiving a streamed snapshot
+message ReceiveSnapshotResponse {
+  bool success = 1;
+  string error_message = 2;
 }
