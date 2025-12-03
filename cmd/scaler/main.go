@@ -39,10 +39,14 @@ func main() {
 		statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
 	}
 	stat := stats.NewStats(conf, logFactory, svcMetric.NewManager(), statsOptions...)
+	if err := stat.Start(ctx, stats.DefaultGoRoutineFactory); err != nil {
+		log.Errorn("Failed to start Stats", obskit.Error(err))
+		os.Exit(1)
+	}
 	defer stat.Stop()
 
 	if err := run(ctx, cancel, conf, stat, log); err != nil {
-		log.Fataln("failed to run", obskit.Error(err))
+		log.Errorn("Failed to run", obskit.Error(err))
 		os.Exit(1)
 	}
 }
@@ -76,15 +80,6 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			MinConnectTimeout:                   conf.GetDuration("grpc.minConnectTimeout", 0, time.Second),
 		},
 	}
-	c, err := client.NewClient(clientConfig, log.Child("client"))
-	if err != nil {
-		return fmt.Errorf("failed to create client: %w", err)
-	}
-	defer func() {
-		if err := c.Close(); err != nil {
-			log.Warnn("Failed to close client", obskit.Error(err))
-		}
-	}()
 	scClient, err := scaler.NewClient(scaler.Config{
 		Addresses:       strings.Split(nodeAddresses, ","),
 		TotalHashRanges: int64(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
@@ -130,7 +125,15 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 
 	// Create and start HTTP server
 	serverAddr := conf.GetString("serverAddr", ":8080")
-	server := newHTTPServer(c, scClient, serverAddr, stat, log)
+	server, err := newHTTPServer(clientConfig, scClient, serverAddr, stat, log)
+	if err != nil {
+		return fmt.Errorf("failed to create server: %w", err)
+	}
+	defer func() {
+		if err := server.Close(); err != nil {
+			log.Warnn("Failed to close server", obskit.Error(err))
+		}
+	}()
 
 	// Start server in a goroutine
 	serverErrCh := make(chan error, 1)

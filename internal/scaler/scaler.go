@@ -12,6 +12,7 @@ import (
 	"github.com/cenkalti/backoff/v5"
 	"google.golang.org/grpc"
 	grpcbackoff "google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
@@ -35,6 +36,9 @@ const (
 	DefaultGrpcBackoffJitter     = 0.2
 	DefaultGrpcMaxDelay          = 2 * time.Minute
 	DefaultGrpcMinConnectTimeout = 20 * time.Second
+
+	DefaultClusterUpdateTimeout           = 10 * time.Second
+	DefaultClusterUpdateConnCheckInterval = 50 * time.Millisecond
 )
 
 // RetryPolicy defines the retry policy configuration
@@ -80,33 +84,12 @@ type Config struct {
 
 	// GrpcConfig defines the gRPC connection configuration
 	GrpcConfig GrpcConfig
-}
 
-type ScalingOperationType string
+	// ClusterUpdateTimeout is the timeout for UpdateClusterData operations
+	ClusterUpdateTimeout time.Duration
 
-const (
-	ScaleUp     ScalingOperationType = "scale_up"
-	ScaleDown   ScalingOperationType = "scale_down"
-	AutoHealing ScalingOperationType = "auto_healing"
-)
-
-type ScalingOperationStatus string
-
-const (
-	InProgress ScalingOperationStatus = "in_progress"
-	Completed  ScalingOperationStatus = "completed"
-	Failed     ScalingOperationStatus = "failed"
-	RolledBack ScalingOperationStatus = "rolled_back"
-)
-
-// ScalingOperation represents the last scaling operation that can be rolled back
-type ScalingOperation struct {
-	Type           ScalingOperationType   `json:"type"`
-	OldClusterSize int64                  `json:"old_cluster_size"`
-	NewClusterSize int64                  `json:"new_cluster_size"`
-	OldAddresses   []string               `json:"old_addresses"`
-	NewAddresses   []string               `json:"new_addresses"`
-	Status         ScalingOperationStatus `json:"status"` // "in_progress", "completed", "failed", "rolled_back"
+	// ClusterUpdateConnCheckInterval is the interval for checking node connectivity during cluster updates
+	ClusterUpdateConnCheckInterval time.Duration
 }
 
 // Client is a client for the KeyDB service
@@ -122,10 +105,7 @@ type Client struct {
 	// clients is a map of node index to client
 	clients map[int]pb.NodeServiceClient
 
-	// lastOperation tracks the last scaling operation for potential rollback
-	lastOperation *ScalingOperation
-
-	// mu protects connections, clients, clusterSize and lastOperation
+	// mu protects connections, clients, and clusterSize
 	mu sync.RWMutex
 
 	logger logger.Logger
@@ -178,6 +158,12 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 	}
 	if config.GrpcConfig.MinConnectTimeout == 0 {
 		config.GrpcConfig.MinConnectTimeout = DefaultGrpcMinConnectTimeout
+	}
+	if config.ClusterUpdateTimeout == 0 {
+		config.ClusterUpdateTimeout = DefaultClusterUpdateTimeout
+	}
+	if config.ClusterUpdateConnCheckInterval == 0 {
+		config.ClusterUpdateConnCheckInterval = DefaultClusterUpdateConnCheckInterval
 	}
 
 	client := &Client{
@@ -449,89 +435,105 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64
 	return nil
 }
 
-// Scale changes the number of nodes in the cluster
-func (c *Client) Scale(ctx context.Context, nodeIDs []int64) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// SendSnapshot instructs a node to stream a hash range to a destination node.
+// This method is meant to be used by a Scaler process only!
+func (c *Client) SendSnapshot(
+	ctx context.Context, sourceNodeID int64, destinationAddress string, hashRange int64,
+) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
-	if len(nodeIDs) == 0 {
-		return fmt.Errorf("at least one node ID must be provided")
+	// Get the client for the source node
+	client, ok := c.clients[int(sourceNodeID)]
+	if !ok {
+		return fmt.Errorf("no client for node %d", sourceNodeID)
+	}
+	conn, ok := c.connections[int(sourceNodeID)]
+	if !ok {
+		return fmt.Errorf("no connection for node %d", sourceNodeID)
 	}
 
-	// Send ScaleRequest to all nodes
-	group, ctx := kitsync.NewEagerGroup(ctx, len(nodeIDs))
-	for _, nodeID := range nodeIDs {
-		group.Go(func() error {
-			// Get the client for this node
-			client, ok := c.clients[int(nodeID)]
-			if !ok {
-				return fmt.Errorf("no client for node %d", nodeID)
-			}
-			conn, ok := c.connections[int(nodeID)]
-			if !ok {
-				return fmt.Errorf("no connection for node %d", nodeID)
-			}
+	req := &pb.SendSnapshotRequest{
+		HashRange:          hashRange,
+		DestinationAddress: destinationAddress,
+	}
 
-			req := &pb.ScaleRequest{
-				NodesAddresses: c.config.Addresses,
-			}
+	var (
+		err         error
+		resp        *pb.SendSnapshotResponse
+		nextBackoff = c.getNextBackoffFunc()
+	)
+	for attempt := int64(1); ; attempt++ {
+		resp, err = client.SendSnapshot(ctx, req)
+		if err == nil && resp != nil && resp.Success {
+			break
+		}
 
-			var (
-				err         error
-				resp        *pb.ScaleResponse
-				nextBackoff = c.getNextBackoffFunc()
+		retryDelay := nextBackoff()
+		if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
+			if err != nil {
+				return fmt.Errorf("sending snapshot from node %d to %s: %w", sourceNodeID, destinationAddress, err)
+			}
+			if resp != nil {
+				return fmt.Errorf("sending snapshot from node %d to %s: %s",
+					sourceNodeID, destinationAddress, resp.ErrorMessage,
+				)
+			}
+			return fmt.Errorf("sending snapshot from node %d to %s: both error and response are nil",
+				sourceNodeID, destinationAddress,
 			)
-			for attempt := int64(1); ; attempt++ {
-				resp, err = client.Scale(ctx, req)
-				if err == nil && resp != nil && resp.Success {
-					break
-				}
+		}
 
-				if err == nil {
-					if resp != nil {
-						err = errors.New(resp.ErrorMessage)
-					} else {
-						err = errors.New("unknown error")
-					}
-				}
+		loggerFields := func(fields ...logger.Field) []logger.Field {
+			return append(fields,
+				logger.NewIntField("sourceNodeID", sourceNodeID),
+				logger.NewStringField("destinationAddress", destinationAddress),
+				logger.NewIntField("hashRange", hashRange),
+				logger.NewIntField("attempt", attempt),
+				logger.NewDurationField("retryDelay", retryDelay),
+				logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+				logger.NewStringField("connState", conn.GetState().String()),
+			)
+		}
+		if err != nil {
+			c.logger.Warnn("Cannot send snapshot", loggerFields(obskit.Error(err))...)
+		} else if resp != nil {
+			c.logger.Warnn("Send snapshot unsuccessful", loggerFields(
+				logger.NewBoolField("success", resp.Success),
+				obskit.Error(errors.New(resp.ErrorMessage)),
+			)...)
+		} else {
+			return fmt.Errorf("sending snapshot from node %d to %s: both error and response are nil",
+				sourceNodeID, destinationAddress,
+			)
+		}
 
-				retryDelay := nextBackoff()
-				if c.config.RetryPolicy.Disabled || retryDelay == backoff.Stop {
-					return fmt.Errorf("failed to scale node %d: %w", nodeID, err)
-				}
-
-				c.logger.Warnn("Cannot scale node",
-					logger.NewIntField("nodeID", nodeID),
-					logger.NewIntField("attempt", attempt),
-					logger.NewDurationField("retryDelay", retryDelay),
-					logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
-					logger.NewStringField("connState", conn.GetState().String()),
-					obskit.Error(err))
-
-				// Wait before retrying
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(retryDelay):
-				}
-			}
-
-			return nil
-		})
-	}
-
-	err := group.Wait()
-	if err != nil {
-		return err
+		// Wait before retrying
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryDelay):
+		}
 	}
 
 	return nil
 }
 
+// GetNodeAddress returns the address of a node by its ID.
+func (c *Client) GetNodeAddress(nodeID int64) (string, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if nodeID < 0 || int(nodeID) >= len(c.config.Addresses) {
+		return "", fmt.Errorf("node ID %d out of range (0-%d)", nodeID, len(c.config.Addresses)-1)
+	}
+	return c.config.Addresses[nodeID], nil
+}
+
 // UpdateClusterData updates the cluster size in a race-condition safe manner.
 // It takes a new cluster size and the current keys being processed.
 // It returns a slice of keys that need to be fetched again.
-func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
+func (c *Client) UpdateClusterData(ctx context.Context, nodesAddresses ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -561,126 +563,47 @@ func (c *Client) UpdateClusterData(nodesAddresses ...string) error {
 	c.config.Addresses = nodesAddresses
 	c.clusterSize = int64(len(nodesAddresses))
 
-	return nil
-}
+	ctx, cancel := context.WithTimeout(ctx, c.config.ClusterUpdateTimeout)
+	defer cancel()
 
-// RecordOperation records the last scaling operation for potential rollback
-func (c *Client) RecordOperation(
-	opType ScalingOperationType,
-	oldClusterSize, newClusterSize int64,
-	oldAddresses, newAddresses []string,
-) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.lastOperation = &ScalingOperation{
-		Type:           opType,
-		OldClusterSize: oldClusterSize,
-		NewClusterSize: newClusterSize,
-		OldAddresses:   append([]string{}, oldAddresses...),
-		NewAddresses:   append([]string{}, newAddresses...),
-		Status:         InProgress,
+	group, gCtx := kitsync.NewEagerGroup(ctx, len(nodesAddresses))
+	for i := range c.connections {
+		group.Go(func() error {
+			// use GetNodeInfo to force the clients to connect
+			_, err := c.clients[i].GetNodeInfo(gCtx, &pb.GetNodeInfoRequest{NodeId: int64(i)})
+			// we use the error only to return the routines early
+			// the cluster update will be successful as long as there is connectivity
+			return err
+		})
 	}
-}
 
-// UpdateOperationStatus updates the status of the last scaling operation
-func (c *Client) UpdateOperationStatus(status ScalingOperationStatus) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.lastOperation != nil {
-		c.lastOperation.Status = status
-	}
-}
-
-// GetLastOperation retrieves the last scaling operation
-func (c *Client) GetLastOperation() *ScalingOperation {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.lastOperation
-}
-
-// ExecuteScalingWithRollback executes a scaling function with automatic rollback on failure
-//
-// This function records the scaling operation details, executes the provided scaling function,
-// and automatically performs a rollback if the function returns an error. It ensures that
-// the cluster state remains consistent even when scaling operations fail.
-//
-// The background context is used for rollback operations to ensure that even if the original
-// request context is cancelled (e.g., client disconnects), the rollback can still complete
-// and leave the cluster in a consistent state.
-//
-// Parameters:
-//   - opType: The type of scaling operation (ScaleUp, ScaleDown, AutoHealing)
-//   - oldAddresses: The node addresses before the operation
-//   - newAddresses: The node addresses after the operation
-//   - fn: The function that performs the actual scaling operation
-//
-// Returns:
-//   - error: If the operation or rollback fails, or nil if successful
-func (c *Client) ExecuteScalingWithRollback(opType ScalingOperationType,
-	oldAddresses, newAddresses []string, fn func() error,
-) error {
-	// Record the operation
-	c.RecordOperation(opType, int64(len(oldAddresses)), int64(len(newAddresses)), oldAddresses, newAddresses)
-
-	// Execute the scaling function
-	err := fn()
-	if err != nil {
-		c.UpdateOperationStatus(Failed)
-		c.logger.Warnn("Scaling operation failed, initiating rollback",
-			logger.NewStringField("operationType", string(opType)),
-			obskit.Error(err))
-
-		// Attempt rollback
-		// background one is needed so that if a client disconnects or cancels the request
-		// then we won't leave the cluster in a bad state
-		rollbackErr := c.rollbackToOldConfiguration(context.Background(), c.GetLastOperation())
-		if rollbackErr != nil {
-			c.logger.Errorn("Rollback failed",
-				logger.NewStringField("operationType", string(opType)),
-				obskit.Error(rollbackErr))
-			return fmt.Errorf("scaling failed: %v, rollback failed: %w", err, rollbackErr)
+	// Checking connectivity since the gRPC client has its own backoff policy, the above group might not return on time
+	// to honour the context within the given timeout.
+	// Hence, we create a ticker here so that while in the group above we try to connect with backoff, here we just
+	// check for the connectivity state within a certain timeout.
+	ticker := time.NewTicker(c.config.ClusterUpdateConnCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			ok := true
+			for i, conn := range c.connections {
+				if conn.GetState() != connectivity.Ready {
+					ok = false
+					c.logger.Warnn("Detected connectivity issue",
+						logger.NewIntField("nodeId", int64(i)),
+						logger.NewStringField("addr", conn.CanonicalTarget()),
+						logger.NewStringField("connState", conn.GetState().String()),
+					)
+				}
+			}
+			if ok {
+				return nil
+			}
 		}
-
-		c.UpdateOperationStatus(RolledBack)
-		c.logger.Infon("Scaling operation rolled back successfully",
-			logger.NewStringField("operationType", string(opType)))
-		return fmt.Errorf("scaling failed and rolled back: %w", err)
 	}
-
-	c.UpdateOperationStatus(Completed)
-	c.logger.Infon("Scaling operation completed successfully",
-		logger.NewStringField("operationType", string(opType)))
-	return nil
-}
-
-// rollbackToOldConfiguration restores the cluster to its previous configuration
-func (c *Client) rollbackToOldConfiguration(ctx context.Context, operation *ScalingOperation) error {
-	if operation == nil {
-		return fmt.Errorf("no operation provided for rollback")
-	}
-
-	c.logger.Infon("Rolling back operation",
-		logger.NewStringField("operationType", string(operation.Type)))
-
-	// Restore cluster to old configuration
-	if err := c.UpdateClusterData(operation.OldAddresses...); err != nil {
-		return fmt.Errorf("failed to restore cluster data: %w", err)
-	}
-
-	// Scale back to old cluster size
-	oldNodeIDs := make([]int64, operation.OldClusterSize)
-	for i := int64(0); i < operation.OldClusterSize; i++ {
-		oldNodeIDs[i] = i
-	}
-
-	// restore correct behavior
-	if err := c.Scale(ctx, oldNodeIDs); err != nil {
-		return fmt.Errorf("failed to scale back nodes: %w", err)
-	}
-
-	return nil
 }
 
 func (c *Client) getNextBackoffFunc() func() time.Duration {

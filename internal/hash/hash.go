@@ -178,14 +178,12 @@ func (h *Hash) GetNodeHashRangesList(nodeID int64) []int64 {
 	return ranges
 }
 
-func GetHashRangeMovements(
-	oldClusterSize,
-	newClusterSize,
-	totalHashRanges int64,
-) (
-	map[int64][]int64,
-	map[int64][]int64,
-) {
+type Movement struct {
+	SourceNodeID      int64
+	DestinationNodeID int64
+}
+
+func GetHashRangeMovementsByRange(oldClusterSize, newClusterSize, totalHashRanges int64) map[int64]Movement {
 	if oldClusterSize == 0 {
 		panic("oldClusterSize must be greater than 0")
 	}
@@ -202,8 +200,7 @@ func GetHashRangeMovements(
 	oldClusterHasher := New(oldClusterSize, totalHashRanges)
 	newClusterHasher := New(newClusterSize, totalHashRanges)
 
-	sourceNodeMovements := make(map[int64][]int64)
-	destinationNodeMovements := make(map[int64][]int64)
+	movements := make(map[int64]Movement)
 
 	for hashRange := int64(0); hashRange < totalHashRanges; hashRange++ {
 		oldMember := oldClusterHasher.consistent.GetPartitionOwner(int(hashRange))
@@ -219,12 +216,14 @@ func GetHashRangeMovements(
 		}
 
 		if oldNodeID != newNodeID {
-			sourceNodeMovements[oldNodeID] = append(sourceNodeMovements[oldNodeID], hashRange)
-			destinationNodeMovements[newNodeID] = append(destinationNodeMovements[newNodeID], hashRange)
+			movements[hashRange] = Movement{
+				SourceNodeID:      oldNodeID,
+				DestinationNodeID: newNodeID,
+			}
 		}
 	}
 
-	return sourceNodeMovements, destinationNodeMovements
+	return movements
 }
 
 func (h *Hash) getHashRange(key string) int64 {
