@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.3.2](https://github.com/rudderlabs/keydb/compare/v1.3.1...v1.3.2) (2025-12-03)
+
+
+### Bug Fixes
+
+* initCaches in degraded mode ([#112](https://github.com/rudderlabs/keydb/issues/112)) ([a228f4f](https://github.com/rudderlabs/keydb/commit/a228f4fc8bacfd536487d2a639217b9d9738d4d7))
+
+
+### Miscellaneous
+
+* **deps:** bump actions/download-artifact from 5.0.0 to 6.0.0 ([#110](https://github.com/rudderlabs/keydb/issues/110)) ([d2df409](https://github.com/rudderlabs/keydb/commit/d2df409ec4edac3c08c7022170c74c9b2391b2b7))
+* **deps:** bump actions/upload-artifact from 4.6.2 to 5.0.0 ([#107](https://github.com/rudderlabs/keydb/issues/107)) ([f4562f0](https://github.com/rudderlabs/keydb/commit/f4562f023ca9edd57aad45b11b55186e4064299c))
+* **deps:** bump golangci/golangci-lint-action from 8.0.0 to 9.0.0 ([#108](https://github.com/rudderlabs/keydb/issues/108)) ([b571a2d](https://github.com/rudderlabs/keydb/commit/b571a2d5fc8def2359480d54ca29f16a587a33ac))
+* **deps:** bump the go-deps group with 2 updates ([#111](https://github.com/rudderlabs/keydb/issues/111)) ([1d82e3a](https://github.com/rudderlabs/keydb/commit/1d82e3afacbd8833a32ea72e0400bbc1ce2d8838))
+
 ## [1.3.1](https://github.com/rudderlabs/keydb/compare/v1.3.0...v1.3.1) (2025-11-20)
 
 
