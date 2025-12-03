@@ -579,7 +579,10 @@ func (c *Client) UpdateClusterData(ctx context.Context, nodesAddresses ...string
 
 	// Checking connectivity since the gRPC client has its own backoff policy, the above group might not return on time
 	// to honour the context within the given timeout.
+	// Hence, we create a ticker here so that while in the group above we try to connect with backoff, here we just
+	// check for the connectivity state within a certain timeout.
 	ticker := time.NewTicker(c.config.ClusterUpdateConnCheckInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
