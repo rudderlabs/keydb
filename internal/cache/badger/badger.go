@@ -379,22 +379,17 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 	return stream, func() (uint64, bool) { return maxVersion, hasData }
 }
 
-// LoadSnapshots reads the cache contents from the provided readers
-func (c *Cache) LoadSnapshots(ctx context.Context, readers ...io.Reader) error {
+// LoadSnapshot reads the cache contents from the provided reader
+func (c *Cache) LoadSnapshot(ctx context.Context, reader io.Reader) error {
 	// Use BadgerDB's built-in Load() function which properly handles transaction timestamps
 	maxPendingWrites := c.conf.GetInt("BadgerDB.Dedup.Snapshots.MaxPendingWrites", 256)
 
-	for _, r := range readers {
-		// The Load() method is not race safe so we have to load data sequentially
-		var reader io.Reader
-		if c.compress {
-			reader = zstd.NewReader(r)
-		} else {
-			reader = r
-		}
-		if err := c.cache.Load(reader, maxPendingWrites); err != nil {
-			return fmt.Errorf("failed to load snapshot: %w", err)
-		}
+	// The Load() method is not race safe so we have to load data sequentially
+	if c.compress {
+		reader = zstd.NewReader(reader)
+	}
+	if err := c.cache.Load(reader, maxPendingWrites); err != nil {
+		return fmt.Errorf("failed to load snapshot: %w", err)
 	}
 
 	// Force a sync to ensure data is committed

@@ -132,8 +132,8 @@ type Cache interface {
 		since map[int64]uint64,
 	) (uint64, map[int64]bool, error)
 
-	// LoadSnapshots reads the cache contents from the provided readers
-	LoadSnapshots(ctx context.Context, r ...io.Reader) error
+	// LoadSnapshot reads the cache contents from the provided reader
+	LoadSnapshot(ctx context.Context, r io.Reader) error
 
 	// RunGarbageCollection is designed to do GC while the cache is online
 	RunGarbageCollection()
@@ -322,7 +322,7 @@ func (s *Service) getCurrentRanges() map[int64]struct{} {
 
 // initCaches initializes the caches for all hash ranges this node handles
 func (s *Service) initCaches(
-	ctx context.Context, download bool, maxConcurrency int64, selectedHashRanges ...int64,
+	ctx context.Context, download bool, selectedHashRanges ...int64,
 ) error {
 	var currentRanges map[int64]struct{}
 	if isDegraded, degradedClusterSize := s.isDegraded(); isDegraded {
@@ -363,10 +363,6 @@ func (s *Service) initCaches(
 		return fmt.Errorf("list snapshots: %w", err)
 	}
 
-	if maxConcurrency == 0 {
-		maxConcurrency = int64(len(currentRanges))
-	}
-
 	// Check which snapshots are already loaded BEFORE starting concurrent downloads.
 	// This avoids a data race with badger.Load() which is not thread-safe with other operations.
 	loadedSnapshots := make(map[string]bool)
@@ -389,7 +385,9 @@ func (s *Service) initCaches(
 		loadDone            = make(chan error, 1)
 		filesLoaded         int64
 		group, gCtx         = kitsync.NewEagerGroup(ctx, 0)
-		readers             = make(chan snapshotReader, maxConcurrency)
+		// no need to download more than 2 at a time files given that we can only load them sequentially
+		// this way we can avoid consuming too much memory
+		readers = make(chan snapshotReader, 2)
 	)
 	defer loadCancel()
 	var loadedFilenames []string
@@ -417,7 +415,7 @@ func (s *Service) initCaches(
 				),
 			)
 			loadStart := time.Now()
-			if err := s.cache.LoadSnapshots(loadCtx, sn.reader); err != nil {
+			if err := s.cache.LoadSnapshot(loadCtx, sn.reader); err != nil {
 				loadDone <- fmt.Errorf("failed to load snapshots: %w", err)
 				return
 			}
@@ -728,7 +726,7 @@ func (s *Service) LoadSnapshots(ctx context.Context, req *pb.LoadSnapshotsReques
 	s.logger.Infon("Load snapshots request received")
 
 	// Load snapshots for all hash ranges this node handles
-	if err := s.initCaches(ctx, true, req.MaxConcurrency, req.HashRange...); err != nil {
+	if err := s.initCaches(ctx, true, req.HashRange...); err != nil {
 		s.logger.Errorn("Failed to load snapshots", obskit.Error(err))
 		return &pb.LoadSnapshotsResponse{
 			Success:      false,
@@ -1162,7 +1160,7 @@ func (s *Service) ReceiveSnapshot(
 		logger.NewIntField("bufferSize", int64(buf.Len())),
 	)
 
-	if err := s.cache.LoadSnapshots(stream.Context(), &buf); err != nil {
+	if err := s.cache.LoadSnapshot(stream.Context(), &buf); err != nil {
 		s.logger.Errorn("Loading snapshot", obskit.Error(err))
 		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
 			Success:      false,

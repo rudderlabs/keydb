@@ -360,7 +360,7 @@ func (c *Client) CreateSnapshots(ctx context.Context, nodeID int64, fullSync boo
 
 // LoadSnapshots forces all nodes to load snapshots from cloud storage
 // This method is meant to be used by a Scaler process only!
-func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64, hashRanges ...int64) error {
+func (c *Client) LoadSnapshots(ctx context.Context, nodeID int64, hashRanges ...int64) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -377,8 +377,7 @@ func (c *Client) LoadSnapshots(ctx context.Context, nodeID, maxConcurrency int64
 	}
 
 	req := &pb.LoadSnapshotsRequest{
-		HashRange:      hashRanges,
-		MaxConcurrency: maxConcurrency,
+		HashRange: hashRanges,
 	}
 
 	var (
@@ -533,14 +532,14 @@ func (c *Client) GetNodeAddress(nodeID int64) (string, error) {
 // UpdateClusterData updates the cluster size in a race-condition safe manner.
 // It takes a new cluster size and the current keys being processed.
 // It returns a slice of keys that need to be fetched again.
-func (c *Client) UpdateClusterData(ctx context.Context, nodesAddresses ...string) error {
+func (c *Client) UpdateClusterData(ctx context.Context, nodeAddresses ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.logger.Infon("Updating to new cluster size",
 		logger.NewIntField("oldClusterSize", c.clusterSize),
-		logger.NewIntField("newClusterSize", int64(len(nodesAddresses))),
-		logger.NewStringField("nodesAddresses", strings.Join(nodesAddresses, ",")),
+		logger.NewIntField("newClusterSize", int64(len(nodeAddresses))),
+		logger.NewStringField("nodeAddresses", strings.Join(nodeAddresses, ",")),
 	)
 
 	// Close all clients and connections
@@ -550,7 +549,7 @@ func (c *Client) UpdateClusterData(ctx context.Context, nodesAddresses ...string
 		delete(c.clients, i)
 	}
 
-	for i, addr := range nodesAddresses {
+	for i, addr := range nodeAddresses {
 		conn, err := c.createConnection(addr)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %d at %s: %w", i, addr, err)
@@ -560,13 +559,13 @@ func (c *Client) UpdateClusterData(ctx context.Context, nodesAddresses ...string
 		c.clients[i] = pb.NewNodeServiceClient(conn)
 	}
 
-	c.config.Addresses = nodesAddresses
-	c.clusterSize = int64(len(nodesAddresses))
+	c.config.Addresses = nodeAddresses
+	c.clusterSize = int64(len(nodeAddresses))
 
 	ctx, cancel := context.WithTimeout(ctx, c.config.ClusterUpdateTimeout)
 	defer cancel()
 
-	group, gCtx := kitsync.NewEagerGroup(ctx, len(nodesAddresses))
+	group, gCtx := kitsync.NewEagerGroup(ctx, len(nodeAddresses))
 	for i := range c.connections {
 		group.Go(func() error {
 			// use GetNodeInfo to force the clients to connect

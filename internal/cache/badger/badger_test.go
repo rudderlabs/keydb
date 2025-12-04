@@ -103,7 +103,7 @@ func TestSnapshots(t *testing.T) {
 		}(tmpFile.Name())
 		err = cloudStorage.Download(context.Background(), tmpFile, uploadedFile1.ObjectName)
 		require.NoError(t, err)
-		err = newBdb.LoadSnapshots(context.Background(), tmpFile)
+		err = newBdb.LoadSnapshot(context.Background(), tmpFile)
 		require.NoError(t, err)
 
 		exists, err = newBdb.Get(map[int64][]string{0: {"key1", "key2", "key3", "key4"}},
@@ -118,7 +118,7 @@ func TestSnapshots(t *testing.T) {
 		}(tmpFile2.Name())
 		err = cloudStorage.Download(context.Background(), tmpFile2, uploadedFile2.ObjectName)
 		require.NoError(t, err)
-		err = newBdb.LoadSnapshots(context.Background(), tmpFile2)
+		err = newBdb.LoadSnapshot(context.Background(), tmpFile2)
 		require.NoError(t, err)
 
 		exists, err = newBdb.Get(map[int64][]string{0: {"key1", "key2", "key3", "key4"}},
