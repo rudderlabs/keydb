@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -293,6 +294,10 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "No node IDs provided", http.StatusBadRequest)
 		return
 	}
+
+	s.logger.Infon("Got an update cluster data request",
+		logger.NewStringField("nodeAddresses", strings.Join(req.Addresses, ",")),
+	)
 
 	// Complete scale operation
 	if err := s.scaler.UpdateClusterData(r.Context(), req.Addresses...); err != nil {
