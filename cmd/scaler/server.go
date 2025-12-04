@@ -703,9 +703,7 @@ func (s *httpServer) processHashRangeMovements(
 	}
 	var (
 		createdCount, loadedCount  atomic.Int32
-		loadingDone                = make(chan error, 1)
-		snapshotsQueue             = make(chan snapshotCreated, len(movements))
-		snapshotsQueueMap          = make(map[int64]chan snapshotCreated)
+		snapshotsQueues            = make(map[int64]chan snapshotCreated)
 		sharedCtx, sharedCtxCancel = context.WithCancel(ctx)
 		creatingGroup, creatingCtx = kitsync.NewEagerGroup(sharedCtx, createSnapshotsMaxConcurrency)
 	)
@@ -713,11 +711,11 @@ func (s *httpServer) processHashRangeMovements(
 
 	loadingGroup, loadingCtx := kitsync.NewEagerGroup(sharedCtx, 0)
 	for _, m := range movements {
-		if snapshotsQueueMap[m.DestinationNodeID] != nil {
+		if snapshotsQueues[m.DestinationNodeID] != nil {
 			continue
 		}
 		destinationCh := make(chan snapshotCreated, s.scaler.TotalHashRanges())
-		snapshotsQueueMap[m.DestinationNodeID] = destinationCh
+		snapshotsQueues[m.DestinationNodeID] = destinationCh
 		loadingGroup.Go(func() error {
 			for {
 				select {
@@ -725,7 +723,7 @@ func (s *httpServer) processHashRangeMovements(
 					return loadingCtx.Err()
 				case snapshot, open := <-destinationCh:
 					if !open {
-						return nil
+						return loadingCtx.Err()
 					}
 					log.Infon("Received snapshot queued for loading",
 						logger.NewIntField("hashRange", snapshot.hashRange),
@@ -754,23 +752,12 @@ func (s *httpServer) processHashRangeMovements(
 			}
 		})
 	}
-	// Start goroutine to load snapshots in parallel
-	go func() {
-		defer close(loadingDone)
-		for snapshot := range snapshotsQueue {
-			snapshotsQueueMap[snapshot.destinationNodeID] <- snapshot
-		}
-		for _, ch := range snapshotsQueueMap {
-			close(ch)
-		}
-		loadingDone <- loadingGroup.Wait()
-	}()
 
 	// Start goroutine to create snapshots (or just queue them if skipCreateSnapshots is true)
 	if skipCreateSnapshots {
 		// If skipping creation, just queue all snapshots for loading
 		for hashRange, movement := range movements {
-			snapshotsQueue <- snapshotCreated{ // buffer is exactly the number of movements, no need to check the ctx
+			snapshotsQueues[movement.DestinationNodeID] <- snapshotCreated{
 				hashRange:         hashRange,
 				sourceNodeID:      movement.SourceNodeID,
 				destinationNodeID: movement.DestinationNodeID,
@@ -802,7 +789,7 @@ func (s *httpServer) processHashRangeMovements(
 				select {
 				case <-creatingCtx.Done():
 					return creatingCtx.Err()
-				case snapshotsQueue <- snapshotCreated{
+				case snapshotsQueues[movement.DestinationNodeID] <- snapshotCreated{
 					hashRange:         hashRange,
 					sourceNodeID:      movement.SourceNodeID,
 					destinationNodeID: movement.DestinationNodeID,
@@ -819,19 +806,15 @@ func (s *httpServer) processHashRangeMovements(
 	}
 
 	creatingErr := creatingGroup.Wait()
-	close(snapshotsQueue)
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-loadingDone:
-		if err != nil {
-			return fmt.Errorf("error waiting for snapshot loading goroutine: %w", err)
-		}
+	for _, ch := range snapshotsQueues {
+		close(ch)
 	}
-
+	loadingErr := loadingGroup.Wait()
 	if creatingErr != nil {
 		return fmt.Errorf("error waiting for snapshot creation goroutine: %w", creatingErr)
+	}
+	if loadingErr != nil {
+		return fmt.Errorf("error waiting for loading goroutine: %w", loadingErr)
 	}
 	return nil
 }
