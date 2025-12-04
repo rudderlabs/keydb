@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.3](https://github.com/rudderlabs/keydb/compare/v1.3.2...v1.3.3) (2025-12-04)
+
+
+### Bug Fixes
+
+* gauge type ([#122](https://github.com/rudderlabs/keydb/issues/122)) ([58bdcc3](https://github.com/rudderlabs/keydb/commit/58bdcc3f1d88c80bf8367d504db0f9d3bbeec387))
+
 ## [1.3.2](https://github.com/rudderlabs/keydb/compare/v1.3.1...v1.3.2) (2025-12-03)
 
 
