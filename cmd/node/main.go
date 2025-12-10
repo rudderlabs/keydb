@@ -147,6 +147,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			}
 			return b
 		},
+		CheckL0StallInterval:      conf.GetDuration("checkL0StallInterval", 5, time.Second),
 		LogTableStructureDuration: conf.GetDuration("logTableStructureDuration", 10, time.Minute),
 		BackupFolderName:          conf.GetString("KUBE_NAMESPACE", ""),
 	}

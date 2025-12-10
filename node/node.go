@@ -106,6 +106,8 @@ type Service struct {
 		createSnapshotsDuration     stats.Timer
 		sendSnapshotDuration        stats.Timer
 		receiveSnapshotDuration     stats.Timer
+		lsmLevelTables              map[int]stats.Gauge
+		lsmLevelSize                map[int]stats.Gauge
 	}
 }
 
@@ -144,6 +146,9 @@ type Cache interface {
 
 	// LevelsToString returns a string representation of the cache levels
 	LevelsToString() string
+
+	// Levels returns information about all LSM tree levels
+	Levels() ([]badger.LevelInfo, bool)
 }
 
 type cloudStorageReader interface {
@@ -235,6 +240,8 @@ func NewService(
 	service.metrics.createSnapshotsDuration = stat.NewStat("keydb_create_snapshots_duration_seconds", stats.TimerType)
 	service.metrics.sendSnapshotDuration = stat.NewStat("keydb_send_snapshot_duration_seconds", stats.TimerType)
 	service.metrics.receiveSnapshotDuration = stat.NewStat("keydb_receive_snapshot_duration_seconds", stats.TimerType)
+	service.metrics.lsmLevelTables = make(map[int]stats.Gauge)
+	service.metrics.lsmLevelSize = make(map[int]stats.Gauge)
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
@@ -312,6 +319,53 @@ func (s *Service) logCacheLevels(ctx context.Context) {
 			s.logger.Infon("Cache levels",
 				logger.NewStringField("levels", s.cache.LevelsToString()),
 			)
+		}
+	}
+}
+
+func (s *Service) recordLevelMetrics(ctx context.Context) {
+	defer s.waitGroup.Done()
+
+	if s.config.CheckL0StallInterval == 0 {
+		return
+	}
+
+	record := func() {
+		levels, stall := s.cache.Levels()
+		if stall {
+			s.logger.Warnn("L0 tables count is high enough to stall",
+				logger.NewIntField("count", int64(levels[0].NumTables)),
+			)
+		}
+		for _, level := range levels {
+			statsTags := stats.Tags{
+				"level":  strconv.Itoa(level.Level),
+				"nodeId": strconv.FormatInt(s.config.NodeID, 10),
+			}
+
+			if _, ok := s.metrics.lsmLevelTables[level.Level]; !ok {
+				s.metrics.lsmLevelTables[level.Level] = s.stats.NewTaggedStat(
+					"keydb_lsm_level_tables", stats.GaugeType, statsTags,
+				)
+				s.metrics.lsmLevelSize[level.Level] = s.stats.NewTaggedStat(
+					"keydb_lsm_level_size_bytes", stats.GaugeType, statsTags,
+				)
+			}
+
+			s.metrics.lsmLevelTables[level.Level].Gauge(level.NumTables)
+			s.metrics.lsmLevelSize[level.Level].Gauge(int(level.Size))
+		}
+	}
+	record()
+
+	ticker := time.NewTicker(s.config.CheckL0StallInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			record()
 		}
 	}
 }
