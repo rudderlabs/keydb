@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.4](https://github.com/rudderlabs/keydb/compare/v1.3.3...v1.3.4) (2025-12-10)
+
+
+### Miscellaneous
+
+* cache levels metrics ([#130](https://github.com/rudderlabs/keydb/issues/130)) ([3498b45](https://github.com/rudderlabs/keydb/commit/3498b456c04ee62f1ddc3816b7b5f72f49010b8d))
+* **deps:** bump alpine from 3.22.2 to 3.23.0 in the docker-deps group ([#124](https://github.com/rudderlabs/keydb/issues/124)) ([3e89b12](https://github.com/rudderlabs/keydb/commit/3e89b127d0a9b6a5c13880967b317cfa93543f4e))
+
 ## [1.3.3](https://github.com/rudderlabs/keydb/compare/v1.3.2...v1.3.3) (2025-12-04)
 
 
