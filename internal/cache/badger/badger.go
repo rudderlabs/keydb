@@ -31,22 +31,34 @@ const (
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
 
+// LevelInfo contains information about an LSM tree level
+type LevelInfo struct {
+	Level     int
+	NumTables int
+	Size      int64
+	Score     float64
+}
+
 type Cache struct {
-	cache            *badger.DB
-	conf             *config.Config
-	logger           logger.Logger
-	compress         bool
-	compressionLevel int
-	discardRatio     float64
-	snapshotting     bool
-	snapshottingLock sync.Mutex
-	debugMode        bool
-	jitterEnabled    bool
-	jitterDuration   time.Duration
+	cache                   *badger.DB
+	conf                    *config.Config
+	logger                  logger.Logger
+	compress                bool
+	compressionLevel        int
+	numLevelZeroTablesStall int
+	discardRatio            float64
+	snapshotting            bool
+	snapshottingLock        sync.Mutex
+	debugMode               bool
+	jitterEnabled           bool
+	jitterDuration          time.Duration
 }
 
 func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 	path := conf.GetString("BadgerDB.Dedup.Path", "/tmp/badger")
+	numLevelZeroTablesStall := conf.GetIntVar(
+		40, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall",
+	)
 	opts := badger.DefaultOptions(path).
 		WithCompression(options.None).
 		WithNumVersionsToKeep(1).
@@ -64,9 +76,7 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 		WithNumLevelZeroTables(conf.GetIntVar(
 			10, 1, "BadgerDB.Dedup.numLevelZeroTables", "BadgerDB.numLevelZeroTables",
 		)).
-		WithNumLevelZeroTablesStall(conf.GetIntVar(
-			40, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall",
-		)).
+		WithNumLevelZeroTablesStall(numLevelZeroTablesStall).
 		WithBaseTableSize(conf.GetInt64Var(
 			16*bytesize.MB, 1, "BadgerDB.Dedup.baseTableSize", "BadgerDB.baseTableSize",
 		)).
@@ -114,15 +124,16 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 		return nil, err
 	}
 	return &Cache{
-		cache:            db,
-		conf:             conf,
-		logger:           log,
-		compress:         compress,
-		compressionLevel: compressionLevel,
-		discardRatio:     conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
-		debugMode:        conf.GetBool("BadgerDB.DebugMode", false),
-		jitterEnabled:    conf.GetBool("cache.ttlJitter.enabled", false),
-		jitterDuration:   conf.GetDuration("cache.ttlJitter.duration", 1, time.Hour),
+		cache:                   db,
+		conf:                    conf,
+		logger:                  log,
+		compress:                compress,
+		compressionLevel:        compressionLevel,
+		numLevelZeroTablesStall: numLevelZeroTablesStall,
+		discardRatio:            conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
+		debugMode:               conf.GetBool("BadgerDB.DebugMode", false),
+		jitterEnabled:           conf.GetBool("cache.ttlJitter.enabled", false),
+		jitterDuration:          conf.GetDuration("cache.ttlJitter.duration", 1, time.Hour),
 	}, nil
 }
 
@@ -380,7 +391,7 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 }
 
 // LoadSnapshot reads the cache contents from the provided reader
-func (c *Cache) LoadSnapshot(ctx context.Context, reader io.Reader) error {
+func (c *Cache) LoadSnapshot(_ context.Context, reader io.Reader) error {
 	// Use BadgerDB's built-in Load() function which properly handles transaction timestamps
 	maxPendingWrites := c.conf.GetInt("BadgerDB.Dedup.Snapshots.MaxPendingWrites", 256)
 
@@ -398,6 +409,29 @@ func (c *Cache) LoadSnapshot(ctx context.Context, reader io.Reader) error {
 	}
 
 	return nil
+}
+
+// Levels returns information about all LSM tree levels and true if L0 tables count is high enough to stall
+func (c *Cache) Levels() ([]LevelInfo, bool) {
+	stall := false
+	levels := c.cache.Levels()
+	result := make([]LevelInfo, len(levels))
+	for i, l := range levels {
+		if l.Level == 0 && l.NumTables >= c.numLevelZeroTablesStall {
+			stall = true
+		}
+		result[i] = LevelInfo{
+			Level:     l.Level,
+			NumTables: l.NumTables,
+			Size:      l.Size,
+			Score:     l.Score,
+		}
+	}
+	return result, stall
+}
+
+func (c *Cache) LevelsToString() string {
+	return c.cache.LevelsToString()
 }
 
 func (c *Cache) RunGarbageCollection() {
@@ -514,8 +548,4 @@ type loggerForBadger struct {
 
 func (l loggerForBadger) Warningf(fmt string, args ...any) {
 	l.Warnf(fmt, args...)
-}
-
-func (c *Cache) LevelsToString() string {
-	return c.cache.LevelsToString()
 }

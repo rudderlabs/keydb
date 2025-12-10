@@ -31,10 +31,13 @@ type Config struct {
 	// and should not be used for reads and writes.
 	DegradedNodes func() []bool
 
-	// logTableStructureDuration defines the duration for which the table structure is logged
+	// CheckL0StallInterval defines the interval for checking L0 stall
+	CheckL0StallInterval time.Duration
+
+	// LogTableStructureDuration defines the duration for which the table structure is logged
 	LogTableStructureDuration time.Duration
 
-	// backupFolderName is the name of the folder in the S3 bucket where snapshots are stored
+	// BackupFolderName is the name of the folder in the S3 bucket where snapshots are stored
 	BackupFolderName string
 
 	// LoadedSnapshotTTL is how long to remember loaded snapshots to avoid re-loading them
