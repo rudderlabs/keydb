@@ -259,6 +259,9 @@ func NewService(
 	service.waitGroup.Add(1)
 	go service.logCacheLevels(ctx)
 
+	service.waitGroup.Add(1)
+	go service.recordLevelMetrics(ctx)
+
 	return service, nil
 }
 
