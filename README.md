@@ -168,47 +168,151 @@ Internally the `Scaler` API uses the `internal/scaler` gRPC client to manage the
 
 Here is a `SCALE UP` example of how to scale the cluster via the HTTP API.
 
-The below example will depict the scenario of scaling from 1 node to 3 nodes. 
+The below example depicts the scenario of scaling from 1 node to 3 nodes.
 
-1. Use the `/hashRangeMovements` to preview the number of hash ranges that will be moved when scaling
-   * see [Previewing a Scaling Operation](#previewing-a-scaling-operation) for more details
-2. Merge a `rudder-devops` PR what will:
-   * Increase the CPU and memory of the nodes to give more power for the creation of the snapshots
-     * Consider increasing IOPS and disk throughput as well if necessary
-   * Increase the number of replicas (e.g. from 1 to 3) i.e. `replicaCount: 3`
-   * Set the `degradedNodes` 
-     * i.e. `false,true,true` which means that the 1st node will continue to receive traffic as usual whilst the 2
-       new nodes will not receive traffic but will be available to receive new snapshots
-3. If necessary call `/hashRangeMovements` again with `upload=true,full_sync=true` to start uploading the snapshots to
-   the cloud storage
-   * Pre-uploads and pre-download can be useful for several reasons:
-     * To measure how long snapshots creation and loading might take without actually having to scale the cluster
-     * To do a full sync before scaling (full syncs delete old data that might be expired from S3 so that then nodes
-       won't have to download expired data, making the scaling process faster later)
-     * You can still create snapshots during `/autoScale` but then they won't have to be full sync snapshots, meaning
-       they can just be small files that contain only the most recent data (see `since` in 
-       [node/node.go](./node/node.go))
-4. Call `/autoScale`
-   * You can do this if you haven't already moved the data via `/hashRangeMovements`
-   * You can call it with `skip_create_snapshots=true` if you already created the snapshots in the previous operation
-5. Merge another `rudder-devops` PR to set `degradedNodes` to either empty or `false,false,false`
-   * If necessary you should reduce the CPU and memory if you ended up increasing them in point 2
+**Step 1: Enable Scaler and Add New Nodes in Degraded Mode**
+
+Merge a `rudder-devops` PR that will:
+* Enable the scaler component if not already enabled
+* Increase the CPU and memory of the nodes to give more power for the creation of the snapshots
+  * Consider increasing IOPS and disk throughput as well if necessary
+* Increase the number of replicas (e.g. from 1 to 3) i.e. `replicaCount: 3`
+* Set the `degradedNodes` configuration
+  * e.g. `false,true,true` which means that the 1st node will continue to receive traffic as usual whilst the 2
+    new nodes will not receive traffic but will be available to receive new snapshots
+
+**Step 2: Move Hash Ranges**
+
+Call `/hashRangeMovements` to move the hash ranges. You can use one of two methods:
+
+**Step 2.1: Using Node-to-Node Streaming (Recommended)**
+
+This method transfers data directly between nodes without using cloud storage as an intermediary, which is faster and more efficient.
+
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 1,
+    "new_cluster_size": 3,
+    "total_hash_ranges": 271,
+    "streaming": true
+}'
+```
+
+**Step 2.2: Using Cloud Storage (Upload and Download)**
+
+This method uses cloud storage as an intermediary. It's useful when nodes cannot communicate directly or when you want to create backups during the scaling process.
+
+First, preview the operation (optional but recommended):
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 1,
+    "new_cluster_size": 3,
+    "total_hash_ranges": 271
+}'
+```
+
+Then, upload the snapshots to cloud storage:
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 1,
+    "new_cluster_size": 3,
+    "total_hash_ranges": 271,
+    "upload": true,
+    "full_sync": true
+}'
+```
+
+Finally, download and load the snapshots:
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 1,
+    "new_cluster_size": 3,
+    "total_hash_ranges": 271,
+    "download": true
+}'
+```
+
+**Notes:**
+* Pre-uploads and pre-downloads can be useful for several reasons:
+  * To measure how long snapshots creation and loading might take without actually having to scale the cluster
+  * To do a full sync before scaling (full syncs delete old data that might be expired from S3 so that nodes
+    won't have to download expired data, making the scaling process faster later)
+  * Full sync snapshots contain all the data, while incremental snapshots only contain data since the last snapshot
+    (see `since` in [node/node.go](./node/node.go))
+
+**Step 3: Remove Degraded Mode**
+
+Merge another `rudder-devops` PR to set `degradedNodes` to either empty or `false,false,false`
+* If necessary you should reduce the CPU and memory if you ended up increasing them in Step 1
+
+---
 
 Here is a `SCALE DOWN` example of how to scale the cluster via the HTTP API.
 
-The below example will depict the scenario of scaling from 3 to 1 node.
+The below example depicts the scenario of scaling from 3 nodes to 1 node.
 
-1. Use the `/hashRangeMovements` to preview the number of hash ranges that will be moved when scaling
-   * see [Previewing a Scaling Operation](#previewing-a-scaling-operation) for more details
-2. Call `/hashRangeMovements` again with `upload=true,full_sync=true` to move the data
-3. Merge a `rudder-devops` PR to decrease the `replicaCount`
+**Step 1: Enable Scaler**
+
+Merge a `rudder-devops` PR to enable the scaler component if not already enabled.
+
+**Step 2: Move Hash Ranges**
+
+Call `/hashRangeMovements` to move the data from the nodes being removed to the remaining node(s).
+
+**Using Streaming Mode (Recommended):**
+
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 3,
+    "new_cluster_size": 1,
+    "total_hash_ranges": 271,
+    "streaming": true
+}'
+```
+
+**Alternatively, using Cloud Storage:**
+
+```bash
+curl --location 'localhost:8080/hashRangeMovements' \
+--header 'Content-Type: application/json' \
+--data '{
+    "old_cluster_size": 3,
+    "new_cluster_size": 1,
+    "total_hash_ranges": 271,
+    "upload": true,
+    "download": true,
+    "full_sync": true
+}'
+```
+
+**Step 3: Mark Nodes as Degraded**
+
+Merge a `rudder-devops` PR to mark the nodes that will be removed as degraded by setting the `degradedNodes` configuration:
+* e.g. `false,true,true` which means that the 1st node will continue to receive traffic whilst nodes 2 and 3
+  are marked as degraded and will not receive traffic
+
+**Why this is important:** Marking nodes as degraded ensures the client is properly informed about the cluster size change. When a client hits a degraded node (e.g., node 1 or node 2), those nodes will tell the client to use the new cluster size and talk to node 0 instead. If you skip this step and just remove the nodes, the client might try to hit node 1, but since node 1 won't be there anymore, it can't redirect the client to node 0, potentially causing the client to get stuck.
+
+**Step 4: Reduce Replica Count**
+
+Merge a separate `rudder-devops` PR to decrease the `replicaCount` and remove the `degradedNodes` configuration
+* This will remove the degraded nodes from the cluster
 
 ### Previewing a Scaling Operation
 
 Why previewing a scaling operation?
 * It helps you understand the impact of the scaling operation on the cluster
-* It will help decrease the length of the `/autoScale` operation in case you called `/hashRangeMovements` 
-  with `upload=true`
+* It will help you plan the scaling operation by showing you how many hash ranges need to be moved
 * It will help you consider the impact of snapshots creation before actually scaling the cluster
 
 To preview a scaling operation you can call `/hashRangeMovements` like in the example below:
@@ -386,48 +490,6 @@ curl --location 'localhost:8080/backup' \
 
 Where `total` is the number of hash ranges that were processed (either uploaded or downloaded).
 
-### AutoScale
-
-The `AutoScale` scaler procedure can be used by sending an HTTP POST request to `/autoScale` with a JSON payload that
-follows this schema:
-
-```json
-{
-    "old_nodes_addresses": [
-        "keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051",
-        "keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051"
-    ],
-    "new_nodes_addresses": [
-        "keydb-0.keydb-headless.loveholidays.svc.cluster.local:50051",
-        "keydb-1.keydb-headless.loveholidays.svc.cluster.local:50051",
-        "keydb-2.keydb-headless.loveholidays.svc.cluster.local:50051",
-        "keydb-3.keydb-headless.loveholidays.svc.cluster.local:50051"
-    ],
-    "full_sync": false,
-    "skip_create_snapshots": false,
-    "create_snapshots_max_concurrency": 10,
-    "load_snapshots_max_concurrency": 3,
-    "disable_create_snapshots_sequentially": false,
-    "streaming": false
-}
-```
-
-Usage:
-* if `old_nodes_addresses` length < `new_nodes_addresses` length → triggers **SCALE UP**
-* if `old_nodes_addresses` length > `new_nodes_addresses` length → triggers **SCALE DOWN**
-* if `old_nodes_addresses` length == `new_nodes_addresses` length → triggers **AUTO-HEALING**
-  * it updates the scaler internal addresses of all the nodes and tells the nodes what is the desired cluster size
-    without creating nor loading any snapshot
-* if `full_sync` == `true` → triggers a full sync, deleting all the old files on S3 for the selected hash ranges
-  * useful to avoid having nodes download data from S3 that might be too old (thus containing expired data)
-* if `skip_create_snapshots` == `true` → it does not ask nodes to create snapshots
-  * useful if you did a pre-upload via `/hashRangeMovements`
-* if `create_snapshots_max_concurrency` > 0 → it limits how many snapshots can be created concurrently (default: 10)
-* if `load_snapshots_max_concurrency` > 0 → it limits how many snapshots can be loaded concurrently from S3 (default: 10)
-* if `disable_create_snapshots_sequentially` == `true` → snapshots are created in parallel instead of sequentially
-  * By default, snapshots are created sequentially to reduce resource pressure on nodes
-* if the operation does not succeed after all the retries, then a rollback to the "last operation" is triggered
-  * to see what was the "last recorded operation" you can call `/lastOperation`
 
 ### Degraded Mode
 
@@ -449,8 +511,7 @@ scaling operations. This helps prevent data inconsistencies when nodes restart d
    # New nodes (node 2, 3) - start in degraded mode
    export KEYDB_DEGRADED_NODES="false,false,true,true"
    ```
-2. **Run `/autoScale`**: The scaler moves the data between the old and new nodes and makes sure all nodes have all the
-   nodes' addresses updated.
+2. **Move data**: Use `/hashRangeMovements` to move the data between the old and new nodes.
 3. **Second devops PR**: Update persistent config to remove degraded mode permanently
 
 This approach ensures that if any old node restarts during scaling, it won't use incorrect cluster size configurations.
@@ -464,11 +525,9 @@ This approach ensures that if any old node restarts during scaling, it won't use
 ### Alternative Scaling Methods
 * You can simply merge a devops PR with the desired cluster size and restart the nodes
   * In this case data won't be moved between nodes so it will lead to data loss
-  * If you don't want to restart the nodes you can use `/autoScale` in auto-healing mode (i.e. with `old_cluster_size`
-    equal to `new_cluster_size`)
 * You can do everything manually by calling the single endpoints yourself, although it might be burdensome with a lot
   of hash ranges to move, so this would mean calling `/createSnapshots`, `/loadSnapshots`, and `/updateClusterData`
-  manually (which is what the `/autoScale` endpoint does under the hood)
+  manually
  
 ### Postman collection
 
@@ -483,10 +542,8 @@ This approach ensures that if any old node restarts during scaling, it won't use
 - `POST /loadSnapshots` - Downloads snapshots from cloud storage and loads them into BadgerDB
 - `POST /updateClusterData` - Update the scaler internal information with the addresses of all the nodes that comprise
   the cluster
-- `POST /autoScale` - Automatic scaling with retry and rollback logic
 - `POST /hashRangeMovements` - Get hash range movement information (supports snapshot creation and loading)
 - `POST /backup` - Create and/or load snapshots for all (or specific) nodes without scaling
-- `GET /lastOperation` - Get last scaling operation status
 
 ## Performance
 
