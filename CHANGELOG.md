@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.5](https://github.com/rudderlabs/keydb/compare/v1.3.4...v1.3.5) (2025-12-11)
+
+
+### Miscellaneous
+
+* update README.md ([#131](https://github.com/rudderlabs/keydb/issues/131)) ([e7ecb9e](https://github.com/rudderlabs/keydb/commit/e7ecb9e67a3c89a6cbbb94d18a88dda3167692e1))
+
 ## [1.3.4](https://github.com/rudderlabs/keydb/compare/v1.3.3...v1.3.4) (2025-12-10)
 
 
