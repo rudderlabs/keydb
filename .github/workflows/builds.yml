@@ -446,7 +446,6 @@ jobs:
           tags: ${{env.docker_tags_keydb_scaler}}
           flavor: |
             suffix=-${{env.arch_amd64}},onlatest=true
-
   docker-keydb-scaler-ecr:
     needs:
       - docker-meta-keydb-scaler-ecr
