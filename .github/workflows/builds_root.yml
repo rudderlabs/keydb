@@ -37,7 +37,7 @@ jobs:
 
   # ECR builds
   keydb-ecr:
-    uses: ./.github/workflows/docker-build-ecr.yml
+    uses: ./.github/workflows/builds.yml
     with:
       image_name: rudderstack/rudder-keydb
       dockerfile: Dockerfile
@@ -45,7 +45,7 @@ jobs:
       aws_ecr_region: ${{ vars.AWS_ECR_REGION }}
 
   keydb-scaler-ecr:
-    uses: ./.github/workflows/docker-build-ecr.yml
+    uses: ./.github/workflows/builds.yml
     with:
       image_name: rudderstack/rudder-keydb-scaler
       dockerfile: Dockerfile-scaler
