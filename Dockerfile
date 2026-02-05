@@ -36,7 +36,7 @@ RUN go build \
     -o ./keydb ./cmd/node
 
 # Final stage
-FROM alpine:3.23.0@sha256:51183f2cfa6320055da30872f211093f9ff1d3cf06f39a0bdb212314c5dc7375
+FROM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
 
 # Update and install additional packages (zstd-libs used with cgo)
 RUN apk --no-cache upgrade && \
