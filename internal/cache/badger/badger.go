@@ -496,7 +496,7 @@ func (c *Cache) String() string {
 
 			item := it.Item()
 			key := string(item.Key())
-			sb.WriteString(fmt.Sprintf("%s:true", key))
+			_, _ = fmt.Fprintf(&sb, "%s:true", key)
 		}
 		return nil
 	})
