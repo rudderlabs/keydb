@@ -293,7 +293,7 @@ func TestGetPutValue(t *testing.T) {
 		value, found, err = bdb.GetValue(nilKey, hashRange)
 		require.NoError(t, err)
 		require.True(t, found)
-		require.Nil(t, value)
+		require.Empty(t, value)
 	}
 
 	t.Run("no compression", func(t *testing.T) {
