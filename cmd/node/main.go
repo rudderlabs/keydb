@@ -62,17 +62,23 @@ func main() {
 	statsOptions := []stats.Option{
 		stats.WithServiceName(serviceName),
 		stats.WithServiceVersion(releaseInfo.Version),
-		stats.WithDefaultHistogramBuckets(defaultHistogramBuckets),
 	}
-	if conf.GetBool("enableBadgerMetrics", true) {
+	if conf.GetBoolVar(true, "enableBadgerMetrics") {
 		registerer := prometheus.DefaultRegisterer
 		gatherer := prometheus.DefaultGatherer
 		badgerMetrics := NewBadgerMetricsCollector(log.Child("badger-metrics-exporter"))
 		registerer.MustRegister(badgerMetrics)
 		statsOptions = append(statsOptions, stats.WithPrometheusRegistry(registerer, gatherer))
 	}
-	for histogramName, buckets := range customBuckets {
-		statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
+	if conf.GetBoolVar(false, "Stats.exponentialHistogram") {
+		maxSize := conf.GetIntVar(1800 /* 30 mins */, 1, "Stats.exponentialHistogramMaxSize")
+		log.Infon("Using exponential histogram for stats", logger.NewIntField("maxSize", int64(maxSize)))
+		statsOptions = append(statsOptions, stats.WithDefaultExponentialHistogram(int32(maxSize)))
+	} else {
+		statsOptions = append(statsOptions, stats.WithDefaultHistogramBuckets(defaultHistogramBuckets))
+		for histogramName, buckets := range customBuckets {
+			statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
+		}
 	}
 
 	stat := stats.NewStats(conf, logFactory, svcMetric.NewManager(), statsOptions...)
