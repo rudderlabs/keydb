@@ -51,7 +51,7 @@ func BenchmarkSingleNode(b *testing.B) {
 	defer cancel()
 
 	conf := config.New()
-	conf.GetString("BadgerDB.Dedup.Path", b.TempDir())
+	conf.Set("BadgerDB.Dedup.Path", b.TempDir())
 	cs := &mockedCloudStorage{}
 	service, err := node.NewService(ctx, nodeConfig, cs, conf, stats.NOP, logger.NOP)
 	require.NoError(b, err)

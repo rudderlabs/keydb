@@ -54,51 +54,53 @@ func main() {
 func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Stats, log logger.Logger) error {
 	defer cancel()
 
-	nodeAddresses := conf.GetString("nodeAddresses", "")
+	nodeAddresses := conf.GetStringVar("", "nodeAddresses")
 	if len(nodeAddresses) == 0 {
 		return fmt.Errorf("no node addresses provided")
 	}
 
 	clientConfig := client.Config{
 		Addresses:          strings.Split(nodeAddresses, ","),
-		TotalHashRanges:    int64(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
-		ConnectionPoolSize: conf.GetInt("connectionPoolSize", 0),
+		TotalHashRanges:    int64(conf.GetIntVar(int(client.DefaultTotalHashRanges), 1, "totalHashRanges")),
+		ConnectionPoolSize: conf.GetIntVar(0, 1, "connectionPoolSize"),
 		RetryPolicy: client.RetryPolicy{
-			Disabled:        conf.GetBool("retryPolicy.disabled", false),
-			InitialInterval: conf.GetDuration("retryPolicy.initialInterval", 0, time.Second),
-			Multiplier:      conf.GetFloat64("retryPolicy.multiplier", 0),
-			MaxInterval:     conf.GetDuration("retryPolicy.maxInterval", 0, time.Second),
+			Disabled:        conf.GetBoolVar(false, "retryPolicy.disabled"),
+			InitialInterval: conf.GetDurationVar(0, time.Second, "retryPolicy.initialInterval"),
+			Multiplier:      conf.GetFloat64Var(0, "retryPolicy.multiplier"),
+			MaxInterval:     conf.GetDurationVar(0, time.Second, "retryPolicy.maxInterval"),
 		},
 		GrpcConfig: client.GrpcConfig{
-			KeepAliveTime:                       conf.GetDuration("grpc.keepAliveTime", 0, time.Second),
-			KeepAliveTimeout:                    conf.GetDuration("grpc.keepAliveTimeout", 0, time.Second),
-			DisableKeepAlivePermitWithoutStream: conf.GetBool("grpc.disableKeepAlivePermitWithoutStream", false),
-			BackoffBaseDelay:                    conf.GetDuration("grpc.backoffBaseDelay", 0, time.Second),
-			BackoffMultiplier:                   conf.GetFloat64("grpc.backoffMultiplier", 0),
-			BackoffJitter:                       conf.GetFloat64("grpc.backoffJitter", 0),
-			BackoffMaxDelay:                     conf.GetDuration("grpc.backoffMaxDelay", 0, time.Second),
-			MinConnectTimeout:                   conf.GetDuration("grpc.minConnectTimeout", 0, time.Second),
+			KeepAliveTime:                       conf.GetDurationVar(0, time.Second, "grpc.keepAliveTime"),
+			KeepAliveTimeout:                    conf.GetDurationVar(0, time.Second, "grpc.keepAliveTimeout"),
+			DisableKeepAlivePermitWithoutStream: conf.GetBoolVar(false, "grpc.disableKeepAlivePermitWithoutStream"),
+			BackoffBaseDelay:                    conf.GetDurationVar(0, time.Second, "grpc.backoffBaseDelay"),
+			BackoffMultiplier:                   conf.GetFloat64Var(0, "grpc.backoffMultiplier"),
+			BackoffJitter:                       conf.GetFloat64Var(0, "grpc.backoffJitter"),
+			BackoffMaxDelay:                     conf.GetDurationVar(0, time.Second, "grpc.backoffMaxDelay"),
+			MinConnectTimeout:                   conf.GetDurationVar(0, time.Second, "grpc.minConnectTimeout"),
 		},
 	}
 	scClient, err := scaler.NewClient(scaler.Config{
 		Addresses:       strings.Split(nodeAddresses, ","),
-		TotalHashRanges: int64(conf.GetInt("totalHashRanges", int(client.DefaultTotalHashRanges))),
+		TotalHashRanges: int64(conf.GetIntVar(int(client.DefaultTotalHashRanges), 1, "totalHashRanges")),
 		RetryPolicy: scaler.RetryPolicy{
-			Disabled:        conf.GetBool("scalerRetryPolicy.disabled", false),
-			InitialInterval: conf.GetDuration("scalerRetryPolicy.initialInterval", 0, time.Second),
-			Multiplier:      conf.GetFloat64("scalerRetryPolicy.multiplier", 0),
-			MaxInterval:     conf.GetDuration("scalerRetryPolicy.maxInterval", 0, time.Second),
-			MaxElapsedTime:  conf.GetDuration("scalerRetryPolicy.maxElapsedTime", 0, time.Second),
+			Disabled:        conf.GetBoolVar(false, "scalerRetryPolicy.disabled"),
+			InitialInterval: conf.GetDurationVar(0, time.Second, "scalerRetryPolicy.initialInterval"),
+			Multiplier:      conf.GetFloat64Var(0, "scalerRetryPolicy.multiplier"),
+			MaxInterval:     conf.GetDurationVar(0, time.Second, "scalerRetryPolicy.maxInterval"),
+			MaxElapsedTime:  conf.GetDurationVar(0, time.Second, "scalerRetryPolicy.maxElapsedTime"),
 		},
 		GrpcConfig: scaler.GrpcConfig{
-			KeepAliveTime:                       conf.GetDuration("scalerGrpc.keepAliveTime", 0, time.Second),
-			KeepAliveTimeout:                    conf.GetDuration("scalerGrpc.keepAliveTimeout", 0, time.Second),
-			DisableKeepAlivePermitWithoutStream: conf.GetBool("scalerGrpc.disableKeepAlivePermitWithoutStream", false),
-			BackoffBaseDelay:                    conf.GetDuration("scalerGrpc.backoffBaseDelay", 0, time.Second),
-			BackoffMultiplier:                   conf.GetFloat64("scalerGrpc.backoffMultiplier", 0),
-			BackoffJitter:                       conf.GetFloat64("scalerGrpc.backoffJitter", 0),
-			BackoffMaxDelay:                     conf.GetDuration("scalerGrpc.backoffMaxDelay", 0, time.Second),
-			MinConnectTimeout:                   conf.GetDuration("scalerGrpc.minConnectTimeout", 0, time.Second),
+			KeepAliveTime:    conf.GetDurationVar(0, time.Second, "scalerGrpc.keepAliveTime"),
+			KeepAliveTimeout: conf.GetDurationVar(0, time.Second, "scalerGrpc.keepAliveTimeout"),
+			DisableKeepAlivePermitWithoutStream: conf.GetBoolVar(
+				false, "scalerGrpc.disableKeepAlivePermitWithoutStream",
+			),
+			BackoffBaseDelay:  conf.GetDurationVar(0, time.Second, "scalerGrpc.backoffBaseDelay"),
+			BackoffMultiplier: conf.GetFloat64Var(0, "scalerGrpc.backoffMultiplier"),
+			BackoffJitter:     conf.GetFloat64Var(0, "scalerGrpc.backoffJitter"),
+			BackoffMaxDelay:   conf.GetDurationVar(0, time.Second, "scalerGrpc.backoffMaxDelay"),
+			MinConnectTimeout: conf.GetDurationVar(0, time.Second, "scalerGrpc.minConnectTimeout"),
 		},
 	}, log.Child("scaler"))
 	if err != nil {
@@ -124,7 +126,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	// Create and start HTTP server
-	serverAddr := conf.GetString("serverAddr", ":8080")
+	serverAddr := conf.GetStringVar(":8080", "serverAddr")
 	server, err := newHTTPServer(clientConfig, scClient, serverAddr, stat, log)
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)

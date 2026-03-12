@@ -55,15 +55,15 @@ type Cache struct {
 }
 
 func New(conf *config.Config, log logger.Logger) (*Cache, error) {
-	path := conf.GetString("BadgerDB.Dedup.Path", "/tmp/badger")
+	path := conf.GetStringVar("/tmp/badger", "BadgerDB.Dedup.Path")
 	numLevelZeroTablesStall := conf.GetIntVar(
 		40, 1, "BadgerDB.Dedup.numLevelZeroTablesStall", "BadgerDB.numLevelZeroTablesStall",
 	)
 	opts := badger.DefaultOptions(path).
 		WithCompression(options.None).
 		WithNumVersionsToKeep(1).
-		WithNumGoroutines(conf.GetInt("BadgerDB.Dedup.NumGoroutines", 100)).
-		WithBloomFalsePositive(conf.GetFloat64("BadgerDB.Dedup.BloomFalsePositive", 0.000001)).
+		WithNumGoroutines(conf.GetIntVar(100, 1, "BadgerDB.Dedup.NumGoroutines")).
+		WithBloomFalsePositive(conf.GetFloat64Var(0.000001, "BadgerDB.Dedup.BloomFalsePositive")).
 		WithIndexCacheSize(conf.GetInt64Var(
 			16*bytesize.MB, 1, "BadgerDB.Dedup.indexCacheSize", "BadgerDB.indexCacheSize",
 		)).
@@ -94,7 +94,7 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 		WithBlockCacheSize(conf.GetInt64Var(0, 1, "BadgerDB.Dedup.blockCacheSize", "BadgerDB.blockCacheSize")).
 		WithDetectConflicts(conf.GetBoolVar(false, "BadgerDB.Dedup.detectConflicts", "BadgerDB.detectConflicts"))
 
-	if conf.GetBool("BadgerDB.Dedup.NopLogger", false) {
+	if conf.GetBoolVar(false, "BadgerDB.Dedup.NopLogger") {
 		opts = opts.WithLogger(loggerForBadger{logger.NOP})
 	} else {
 		opts = opts.WithLogger(loggerForBadger{log})
@@ -102,10 +102,10 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 
 	var (
 		compressionLevel int
-		compress         = conf.GetBool("BadgerDB.Dedup.Compress", true)
+		compress         = conf.GetBoolVar(true, "BadgerDB.Dedup.Compress")
 	)
 	if compress {
-		compressionLevel = conf.GetInt("BadgerDB.Dedup.CompressionLevel", defaultCompressionLevel)
+		compressionLevel = conf.GetIntVar(defaultCompressionLevel, 1, "BadgerDB.Dedup.CompressionLevel")
 		if compressionLevel < 1 || compressionLevel > 20 {
 			log.Warnn("BadgerDB.Dedup.CompressionLevel must be >= 1 and <= 20",
 				logger.NewIntField("level", int64(compressionLevel)),
@@ -130,10 +130,10 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 		compress:                compress,
 		compressionLevel:        compressionLevel,
 		numLevelZeroTablesStall: numLevelZeroTablesStall,
-		discardRatio:            conf.GetFloat64("BadgerDB.Dedup.DiscardRatio", 0.7),
-		debugMode:               conf.GetBool("BadgerDB.DebugMode", false),
-		jitterEnabled:           conf.GetBool("cache.ttlJitter.enabled", false),
-		jitterDuration:          conf.GetDuration("cache.ttlJitter.duration", 1, time.Hour),
+		discardRatio:            conf.GetFloat64Var(0.7, "BadgerDB.Dedup.DiscardRatio"),
+		debugMode:               conf.GetBoolVar(false, "BadgerDB.DebugMode"),
+		jitterEnabled:           conf.GetBoolVar(false, "cache.ttlJitter.enabled"),
+		jitterDuration:          conf.GetDurationVar(1, time.Hour, "cache.ttlJitter.duration"),
 	}, nil
 }
 
@@ -301,7 +301,7 @@ func (c *Cache) CreateSnapshots(
 	}()
 
 	var maxSince uint64
-	numGo := c.conf.GetInt("BadgerDB.Dedup.Snapshots.NumGoroutines", 10)
+	numGo := c.conf.GetIntVar(10, 1, "BadgerDB.Dedup.Snapshots.NumGoroutines")
 	for hashRange, writer := range lockedWriters {
 		stream, getState := c.createStream(numGo, hashRange, since[hashRange], writer)
 		err := stream.Orchestrate(ctx)
@@ -393,7 +393,7 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 // LoadSnapshot reads the cache contents from the provided reader
 func (c *Cache) LoadSnapshot(_ context.Context, reader io.Reader) error {
 	// Use BadgerDB's built-in Load() function which properly handles transaction timestamps
-	maxPendingWrites := c.conf.GetInt("BadgerDB.Dedup.Snapshots.MaxPendingWrites", 256)
+	maxPendingWrites := c.conf.GetIntVar(256, 1, "BadgerDB.Dedup.Snapshots.MaxPendingWrites")
 
 	// The Load() method is not race safe so we have to load data sequentially
 	if c.compress {

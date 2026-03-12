@@ -107,7 +107,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return fmt.Errorf("failed to create cloud storage: %w", err)
 	}
 
-	podName := conf.GetString("nodeId", "")
+	podName := conf.GetStringVar("", "nodeId")
 	nodeID, err := getNodeID(podName)
 	if err != nil {
 		return err
@@ -122,13 +122,13 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 
 	nodeConfig := node.Config{
 		NodeID:          nodeID,
-		TotalHashRanges: conf.GetInt64("totalHashRanges", node.DefaultTotalHashRanges),
-		MaxFilesToList:  conf.GetInt64("maxFilesToList", node.DefaultMaxFilesToList),
-		SnapshotInterval: conf.GetDuration("snapshotInterval",
-			0, time.Nanosecond, // node.DefaultSnapshotInterval will be used
+		TotalHashRanges: conf.GetInt64Var(node.DefaultTotalHashRanges, 1, "totalHashRanges"),
+		MaxFilesToList:  conf.GetInt64Var(node.DefaultMaxFilesToList, 1, "maxFilesToList"),
+		SnapshotInterval: conf.GetDurationVar(
+			0, time.Nanosecond, "snapshotInterval", // node.DefaultSnapshotInterval will be used
 		),
-		GarbageCollectionInterval: conf.GetDuration("gcInterval", // node.DefaultGarbageCollectionInterval will be used
-			0, time.Nanosecond,
+		GarbageCollectionInterval: conf.GetDurationVar( // node.DefaultGarbageCollectionInterval will be used
+			0, time.Nanosecond, "gcInterval",
 		),
 		Addresses: func() []string {
 			raw := strings.TrimSpace(nodeAddresses.Load())
@@ -153,12 +153,12 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			}
 			return b
 		},
-		CheckL0StallInterval:      conf.GetDuration("checkL0StallInterval", 5, time.Second),
-		LogTableStructureDuration: conf.GetDuration("logTableStructureDuration", 10, time.Minute),
-		BackupFolderName:          conf.GetString("KUBE_NAMESPACE", ""),
+		CheckL0StallInterval:      conf.GetDurationVar(5, time.Second, "checkL0StallInterval"),
+		LogTableStructureDuration: conf.GetDurationVar(10, time.Minute, "logTableStructureDuration"),
+		BackupFolderName:          conf.GetStringVar("", "KUBE_NAMESPACE"),
 	}
 
-	port := conf.GetInt("port", 50051)
+	port := conf.GetIntVar(50051, 1, "port")
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
 		logger.NewIntField("nodeId", nodeConfig.NodeID),
@@ -195,7 +195,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		select {
 		case <-doneCh:
 			return
-		case <-time.After(conf.GetDuration("shutdownTimeout", 15, time.Second)):
+		case <-time.After(conf.GetDurationVar(15, time.Second, "shutdownTimeout")):
 			log.Errorn("graceful termination failed",
 				logger.NewDurationField("timeoutAfter", time.Since(shutdownStarted)))
 			fmt.Print("\n\n")
@@ -206,10 +206,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}()
 
 	// Configure gRPC server keepalive parameters
-	grpcKeepaliveMinTime := conf.GetDuration("grpc.keepalive.minTime", 10, time.Second)
-	grpcKeepalivePermitWithoutStream := conf.GetBool("grpc.keepalive.permitWithoutStream", true)
-	grpcKeepaliveTime := conf.GetDuration("grpc.keepalive.time", 60, time.Second)
-	grpcKeepaliveTimeout := conf.GetDuration("grpc.keepalive.timeout", 20, time.Second)
+	grpcKeepaliveMinTime := conf.GetDurationVar(10, time.Second, "grpc.keepalive.minTime")
+	grpcKeepalivePermitWithoutStream := conf.GetBoolVar(true, "grpc.keepalive.permitWithoutStream")
+	grpcKeepaliveTime := conf.GetDurationVar(60, time.Second, "grpc.keepalive.time")
+	grpcKeepaliveTimeout := conf.GetDurationVar(20, time.Second, "grpc.keepalive.timeout")
 
 	log.Infon("gRPC server keepalive configuration",
 		logger.NewDurationField("enforcementMinTime", grpcKeepaliveMinTime),
@@ -268,7 +268,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	go func() {
 		defer wg.Done()
 		defer log.Infon("Profiler server terminated")
-		if err := profiler.StartServer(ctx, conf.GetInt("Profiler.Port", 7777)); err != nil {
+		if err := profiler.StartServer(ctx, conf.GetIntVar(7777, 1, "Profiler.Port")); err != nil {
 			log.Warnn("Profiler server failed", obskit.Error(err))
 			return
 		}
