@@ -510,7 +510,7 @@ func (s *Service) initCaches(
 						s.logger.Warnn("No cached snapshot for range", logger.NewIntField("range", r))
 						return nil
 					}
-					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile, err)
+					return fmt.Errorf("failed to download snapshot file %q: %w", snapshotFile.filename, err)
 				}
 				s.metrics.downloadSnapshotDuration.Since(startDownload)
 
@@ -866,7 +866,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 				sinceLog.WriteString(",")
 			}
 			since[r] = 0
-			sinceLog.WriteString(fmt.Sprintf("%d:%d", r, 0))
+			_, _ = fmt.Fprintf(&sinceLog, "%d:%d", r, 0)
 			i++
 		}
 	} else {
@@ -893,7 +893,7 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 			if i != 0 {
 				sinceLog.WriteString(",")
 			}
-			sinceLog.WriteString(fmt.Sprintf("%d:%d", hr, ss))
+			_, _ = fmt.Fprintf(&sinceLog, "%d:%d", hr, ss)
 			i++
 		}
 	}
