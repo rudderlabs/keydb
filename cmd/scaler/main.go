@@ -33,10 +33,16 @@ func main() {
 	statsOptions := []stats.Option{
 		stats.WithServiceName("keydb-scaler"),
 		stats.WithServiceVersion(releaseInfo.Version),
-		stats.WithDefaultHistogramBuckets(defaultHistogramBuckets),
 	}
-	for histogramName, buckets := range customBuckets {
-		statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
+	if conf.GetBoolVar(false, "Stats.exponentialHistogram") {
+		maxSize := conf.GetIntVar(1800 /* 30 mins */, 1, "Stats.exponentialHistogramMaxSize")
+		log.Infon("Using exponential histogram for stats", logger.NewIntField("maxSize", int64(maxSize)))
+		statsOptions = append(statsOptions, stats.WithDefaultExponentialHistogram(int32(maxSize)))
+	} else {
+		statsOptions = append(statsOptions, stats.WithDefaultHistogramBuckets(defaultHistogramBuckets))
+		for histogramName, buckets := range customBuckets {
+			statsOptions = append(statsOptions, stats.WithHistogramBuckets(histogramName, buckets))
+		}
 	}
 	stat := stats.NewStats(conf, logFactory, svcMetric.NewManager(), statsOptions...)
 	if err := stat.Start(ctx, stats.DefaultGoRoutineFactory); err != nil {
