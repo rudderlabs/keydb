@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.6](https://github.com/rudderlabs/keydb/compare/v1.3.5...v1.3.6) (2026-03-16)
+
+
+### Bug Fixes
+
+* **release:** move release-please config out of workflows dir (SEC-76) ([#150](https://github.com/rudderlabs/keydb/issues/150)) ([95c0604](https://github.com/rudderlabs/keydb/commit/95c060465433669a63611ddae9f70e65fd714270))
+
+
+### Miscellaneous
+
+* apply security best practices from step security ([#152](https://github.com/rudderlabs/keydb/issues/152)) ([ee53265](https://github.com/rudderlabs/keydb/commit/ee53265b2ef89c105727b29371258576c308808f))
+* **deps:** bump github.com/docker/cli from 28.3.1+incompatible to 29.2.0+incompatible ([#154](https://github.com/rudderlabs/keydb/issues/154)) ([d8abdb0](https://github.com/rudderlabs/keydb/commit/d8abdb0ce46246f08d0ba51244fb5ece9156c8e8))
+* **deps:** bump the actions-deps group across 1 directory with 6 updates ([#158](https://github.com/rudderlabs/keydb/issues/158)) ([c9ab4e3](https://github.com/rudderlabs/keydb/commit/c9ab4e3fe31196f3da6e0fb39c14303beb741946))
+* **deps:** bump the go-deps group across 1 directory with 5 updates ([#159](https://github.com/rudderlabs/keydb/issues/159)) ([49d42a4](https://github.com/rudderlabs/keydb/commit/49d42a4049ea2fcd8de0c1fc00e98ad36b4ab045))
+* migrate from PAT to GitHub App token (SEC-58) ([#145](https://github.com/rudderlabs/keydb/issues/145)) ([04033cc](https://github.com/rudderlabs/keydb/commit/04033cc1a6ae5a95374e914cdf6a6ee0ba7cdcca))
+* support for native histograms ([#157](https://github.com/rudderlabs/keydb/issues/157)) ([dcf68b0](https://github.com/rudderlabs/keydb/commit/dcf68b009d3ae3c14ada10092fd5979e75d30e21))
+
 ## [1.3.5](https://github.com/rudderlabs/keydb/compare/v1.3.4...v1.3.5) (2025-12-17)
 
 
