@@ -8,11 +8,12 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/rudderlabs/keydb/internal/cloudstorage"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	miniokit "github.com/rudderlabs/rudder-go-kit/testhelper/docker/resource/minio"
+
+	"github.com/rudderlabs/keydb/internal/cloudstorage"
 )
 
 func RequireExpectedFiles(

@@ -4,9 +4,9 @@ import (
 	"expvar"
 	"strconv"
 
-	"github.com/rudderlabs/rudder-go-kit/logger"
-
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/rudderlabs/rudder-go-kit/logger"
 )
 
 type BadgerMetricsCollector struct {

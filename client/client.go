@@ -16,12 +16,13 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/rudderlabs/keydb/internal/hash"
-	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+
+	"github.com/rudderlabs/keydb/internal/hash"
+	pb "github.com/rudderlabs/keydb/proto"
 )
 
 const (
@@ -723,11 +724,11 @@ func newConnectionPool(addr string, size int, dialOpts ...grpc.DialOption) (*con
 		clients:     make([]pb.NodeServiceClient, size),
 	}
 
-	for i := 0; i < size; i++ {
+	for i := range size {
 		conn, err := grpc.NewClient(addr, dialOpts...)
 		if err != nil {
 			// Close any connections we've already created
-			for j := 0; j < i; j++ {
+			for j := range i {
 				_ = pool.connections[j].Close()
 			}
 			return nil, fmt.Errorf("creating connection %d/%d: %w", i+1, size, err)

@@ -13,14 +13,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/node"
-	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
+
+	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/node"
+	pb "github.com/rudderlabs/keydb/proto"
 )
 
 func BenchmarkSingleNode(b *testing.B) {
@@ -47,8 +48,7 @@ func BenchmarkSingleNode(b *testing.B) {
 		Addresses:        func() []string { return addresses },
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := b.Context()
 
 	conf := config.New()
 	conf.Set("BadgerDB.Dedup.Path", b.TempDir())
@@ -83,15 +83,13 @@ func BenchmarkSingleNode(b *testing.B) {
 
 	var wg sync.WaitGroup
 	for i := 0; i < warmUpWithKeys/warmUpBatchSize; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			keys := make([]string, 0, warmUpBatchSize)
-			for j := 0; j < warmUpBatchSize; j++ {
+			for j := range warmUpBatchSize {
 				keys = append(keys, strconv.Itoa(i*warmUpBatchSize+j))
 			}
 			require.NoError(b, c.Put(ctx, keys, defaultTTL))
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -110,19 +108,15 @@ func BenchmarkSingleNode(b *testing.B) {
 
 	start := time.Now()
 	for i := 0; i < b.N; i++ {
-		for g := 0; g < concurrentGetCalls; g++ {
-			wg.Add(1)
-			go func() {
+		for range concurrentGetCalls {
+			wg.Go(func() {
 				_, _ = c.Get(ctx, getKeys)
-				wg.Done()
-			}()
+			})
 		}
-		for p := 0; p < concurrentPutCalls; p++ {
-			wg.Add(1)
-			go func() {
+		for range concurrentPutCalls {
+			wg.Go(func() {
 				_ = c.Put(ctx, putKeys, defaultTTL)
-				wg.Done()
-			}()
+			})
 		}
 		wg.Wait()
 	}

@@ -11,14 +11,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/internal/scaler"
-	"github.com/rudderlabs/keydb/release"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+
+	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/scaler"
+	"github.com/rudderlabs/keydb/release"
 )
 
 func main() {

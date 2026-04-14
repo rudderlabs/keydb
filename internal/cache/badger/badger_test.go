@@ -14,10 +14,11 @@ import (
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 
-	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	miniokit "github.com/rudderlabs/rudder-go-kit/testhelper/docker/resource/minio"
+
+	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
 )
 
 func TestSnapshots(t *testing.T) {
@@ -318,7 +319,7 @@ func TestSnapshotContextCancellationResourceCleanup(t *testing.T) {
 
 	// Add some data to make the snapshot process take some time
 	keys := make([]string, 1000)
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		keys[i] = fmt.Sprintf("key%d", i)
 	}
 

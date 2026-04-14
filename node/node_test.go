@@ -15,16 +15,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/internal/hash"
-	"github.com/rudderlabs/keydb/internal/scaler"
-	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
-	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
 	miniokit "github.com/rudderlabs/rudder-go-kit/testhelper/docker/resource/minio"
+
+	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/hash"
+	"github.com/rudderlabs/keydb/internal/scaler"
+	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
+	pb "github.com/rudderlabs/keydb/proto"
 )
 
 const (
@@ -149,7 +150,7 @@ func TestLoadSnapshotsMaxConcurrency(t *testing.T) {
 
 		// Test Put
 		keys := make([]string, 1000)
-		for i := 0; i < len(keys); i++ {
+		for i := range keys {
 			keys[i] = fmt.Sprintf("key%d", i)
 		}
 		require.NoError(t, c.Put(ctx, keys, testTTL))
@@ -1358,7 +1359,7 @@ func TestStreamingSinceTimestamp(t *testing.T) {
 	// Generate keys that hash to the target hash range using the node's hasher
 	hasher := hash.New(1, totalHashRanges) // 1 node cluster - all keys go to node 0
 	var initialKeys []string
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		key := fmt.Sprintf("since-test-key-%d", i)
 		keysByHashRange, err := hasher.GetKeysByHashRange([]string{key}, 0)
 		require.NoError(t, err)

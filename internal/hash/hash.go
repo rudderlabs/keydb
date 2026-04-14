@@ -56,7 +56,7 @@ func New(clusterSize, totalHashRanges int64, opts ...Option) *Hash {
 	}
 
 	c := consistent.New(nil, cfg)
-	for i := int64(0); i < clusterSize; i++ {
+	for i := range clusterSize {
 		c.Add(member(strconv.FormatInt(i, 10)))
 	}
 
@@ -202,7 +202,7 @@ func GetHashRangeMovementsByRange(oldClusterSize, newClusterSize, totalHashRange
 
 	movements := make(map[int64]Movement)
 
-	for hashRange := int64(0); hashRange < totalHashRanges; hashRange++ {
+	for hashRange := range totalHashRanges {
 		oldMember := oldClusterHasher.consistent.GetPartitionOwner(int(hashRange))
 		oldNodeID, err := strconv.ParseInt(oldMember.String(), 10, 32)
 		if err != nil {

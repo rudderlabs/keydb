@@ -23,10 +23,6 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 
-	"github.com/rudderlabs/keydb/internal/cloudstorage"
-	"github.com/rudderlabs/keydb/node"
-	pb "github.com/rudderlabs/keydb/proto"
-	"github.com/rudderlabs/keydb/release"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
@@ -35,6 +31,11 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+
+	"github.com/rudderlabs/keydb/internal/cloudstorage"
+	"github.com/rudderlabs/keydb/node"
+	pb "github.com/rudderlabs/keydb/proto"
+	"github.com/rudderlabs/keydb/release"
 )
 
 var (
@@ -280,8 +281,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		}),
 		// Unary interceptor to record latency for unary RPCs
 		grpc.UnaryInterceptor(
-			func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (
-				interface{}, error,
+			func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (
+				any, error,
 			) {
 				start := time.Now()
 				resp, err := handler(ctx, req)
