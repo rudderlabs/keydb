@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/rudderlabs/keydb/compare/v1.3.6...v1.4.0) (2026-04-14)
+
+
+### Features
+
+* add gRPC health check service for readiness/liveness probes ([#175](https://github.com/rudderlabs/keydb/issues/175)) ([bc8b384](https://github.com/rudderlabs/keydb/commit/bc8b384ce014d02361a8878ccd9a5e85c78cf4f9))
+
 ## [1.3.6](https://github.com/rudderlabs/keydb/compare/v1.3.5...v1.3.6) (2026-03-16)
 
 
