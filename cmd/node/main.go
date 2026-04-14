@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/rudderlabs/keydb/internal/cloudstorage"
@@ -25,6 +28,7 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/keydb/release"
 	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	_ "github.com/rudderlabs/rudder-go-kit/maxprocs"
 	"github.com/rudderlabs/rudder-go-kit/profiler"
@@ -48,6 +52,16 @@ const (
 
 type keyDBResponse interface {
 	GetSuccess() bool
+}
+
+// cloudStorage is the subset of *filemanager.S3Manager that node.NewService
+// needs. Declared here (instead of importing node's unexported interface) so
+// runWith is testable with fakes — this is the only reason it's an interface.
+type cloudStorage interface {
+	Download(ctx context.Context, output io.WriterAt, key string, opts ...filemanager.DownloadOption) error
+	ListFilesWithPrefix(ctx context.Context, startAfter, prefix string, maxItems int64) filemanager.ListSession
+	UploadReader(ctx context.Context, objName string, rdr io.Reader) (filemanager.UploadedFile, error)
+	Delete(ctx context.Context, keys []string) error
 }
 
 func main() {
@@ -89,7 +103,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := run(ctx, cancel, conf, stat, log); err != nil {
+	storage, err := cloudstorage.GetCloudStorage(conf, log)
+	if err != nil {
+		log.Errorn("Failed to initialize cloud storage", obskit.Error(err))
+		os.Exit(1)
+	}
+
+	if err := run(ctx, cancel, conf, stat, log, storage); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			log.Errorn("Failed to run", obskit.Error(err))
 			os.Exit(1)
@@ -98,15 +118,9 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Stats, log logger.Logger) error {
-	defer log.Infon("Service terminated")
-	defer cancel()
-
-	cloudStorage, err := cloudstorage.GetCloudStorage(conf, log)
-	if err != nil {
-		return fmt.Errorf("failed to create cloud storage: %w", err)
-	}
-
+func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Stats,
+	log logger.Logger, storage cloudStorage,
+) error {
 	podName := conf.GetStringVar("", "nodeId")
 	nodeID, err := getNodeID(podName)
 	if err != nil {
@@ -159,8 +173,10 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	port := conf.GetIntVar(50051, 1, "port")
+	healthPort := conf.GetIntVar(50052, 1, "healthPort")
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
+		logger.NewIntField("healthPort", int64(healthPort)),
 		logger.NewIntField("nodeId", nodeConfig.NodeID),
 		logger.NewIntField("totalHashRanges", nodeConfig.TotalHashRanges),
 	)
@@ -171,17 +187,6 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewIntField("noOfAddresses", int64(len(addresses))),
 		logger.NewStringField("nodeAddresses", strings.Join(addresses, ",")),
 	)
-
-	service, err := node.NewService(ctx, nodeConfig, cloudStorage, conf, stat, log.Child("service"))
-	if err != nil {
-		return fmt.Errorf("failed to create node service: %w", err)
-	}
-
-	degradedNodesObserver := &configObserver{
-		key: degradedNodesConfKey,
-		f:   service.DegradedNodesChanged,
-	}
-	conf.RegisterObserver(degradedNodesObserver)
 
 	var wg sync.WaitGroup
 	defer func() {
@@ -204,6 +209,46 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			return
 		}
 	}()
+
+	// Start a lightweight health-only gRPC server BEFORE the slow node.NewService init.
+	// This way Kubernetes liveness/readiness probes have something to talk to from the
+	// first moment the process starts listening, and the pod isn't killed during a slow
+	// startup (e.g. snapshot download, cache warmup, etc.).
+	//
+	//   - Overall health ("") = SERVING immediately       -> liveness passes
+	//   - "keydb.NodeService"  = NOT_SERVING until ready   -> readiness gates traffic
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	healthServer.SetServingStatus(pb.NodeService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_NOT_SERVING)
+
+	healthGrpcServer := grpc.NewServer()
+	healthpb.RegisterHealthServer(healthGrpcServer, healthServer)
+
+	healthLis, err := net.Listen("tcp", fmt.Sprintf(":%d", healthPort))
+	if err != nil {
+		return fmt.Errorf("listening on health port %d: %w", healthPort, err)
+	}
+
+	healthErrCh := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		log.Infon("Starting health gRPC server")
+		if err := healthGrpcServer.Serve(healthLis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			healthErrCh <- fmt.Errorf("health server error: %w", err)
+		}
+	}()
+
+	service, err := node.NewService(ctx, nodeConfig, storage, conf, stat, log.Child("service"))
+	if err != nil {
+		return fmt.Errorf("creating node service: %w", err)
+	}
+
+	degradedNodesObserver := &configObserver{
+		key: degradedNodesConfKey,
+		f:   service.DegradedNodesChanged,
+	}
+	conf.RegisterObserver(degradedNodesObserver)
 
 	// Configure gRPC server keepalive parameters
 	grpcKeepaliveMinTime := conf.GetDurationVar(10, time.Second, "grpc.keepalive.minTime")
@@ -252,11 +297,14 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	)
 
 	pb.RegisterNodeServiceServer(server, service)
+	// Also expose the health service on the main port so in-cluster clients that dial
+	// 50051 can use gRPC health checks without a round-trip to the health port.
+	healthpb.RegisterHealthServer(server, healthServer)
 
 	// Start listening
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		return fmt.Errorf("failed to listen: %w", err)
+		return fmt.Errorf("listening on port %d: %w", port, err)
 	}
 
 	log.Infon("Starting node service server",
@@ -288,16 +336,29 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		defer wg.Done()
 		<-ctx.Done()
 		log.Infon("Terminating service")
+		// Flip health status to NOT_SERVING first so readiness probes fail and
+		// Kubernetes removes this pod from Service endpoints before we stop serving.
+		healthServer.Shutdown()
 		service.Close()
 		server.GracefulStop()
 		_ = lis.Close()
+		// Stop the dedicated health server last so probes can still be answered
+		// (with NOT_SERVING) while the main server is draining.
+		healthGrpcServer.GracefulStop()
+		_ = healthLis.Close()
 	}()
+
+	// Main server is now serving -> mark NodeService ready so readiness probes
+	// pass and Kubernetes starts routing traffic to this pod.
+	healthServer.SetServingStatus(pb.NodeService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
 
 	select {
 	case <-ctx.Done():
 		log.Infon("Shutting down HTTP server")
 		return ctx.Err()
 	case err := <-serverErrCh:
+		return err
+	case err := <-healthErrCh:
 		return err
 	}
 }
