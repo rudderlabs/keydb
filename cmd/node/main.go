@@ -65,7 +65,12 @@ type cloudStorage interface {
 }
 
 func main() {
+	os.Exit(runNode())
+}
+
+func runNode() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM)
+	defer cancel()
 
 	conf := config.New(config.WithEnvPrefix("KEYDB"))
 	logFactory := logger.NewFactory(conf)
@@ -100,22 +105,22 @@ func main() {
 
 	if err := stat.Start(ctx, stats.DefaultGoRoutineFactory); err != nil {
 		log.Errorn("Failed to start Stats", obskit.Error(err))
-		os.Exit(1)
+		return 1
 	}
 
 	storage, err := cloudstorage.GetCloudStorage(conf, log)
 	if err != nil {
 		log.Errorn("Failed to initialize cloud storage", obskit.Error(err))
-		os.Exit(1)
+		return 1
 	}
 
 	if err := run(ctx, cancel, conf, stat, log, storage); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			log.Errorn("Failed to run", obskit.Error(err))
-			os.Exit(1)
+			return 1
 		}
-		os.Exit(0)
 	}
+	return 0
 }
 
 func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Stats,
@@ -230,14 +235,12 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 
 	healthErrCh := make(chan error, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		log.Infon("Starting health gRPC server")
 		if err := healthGrpcServer.Serve(healthLis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			healthErrCh <- fmt.Errorf("health server error: %w", err)
 		}
-	}()
+	})
 
 	service, err := node.NewService(ctx, nodeConfig, storage, conf, stat, log.Child("service"))
 	if err != nil {
@@ -312,28 +315,22 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewStringField("degradedNodes", degradedNodes.Load()),
 	)
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		defer log.Infon("Profiler server terminated")
 		if err := profiler.StartServer(ctx, conf.GetIntVar(7777, 1, "Profiler.Port")); err != nil {
 			log.Warnn("Profiler server failed", obskit.Error(err))
 			return
 		}
-	}()
+	})
 
 	serverErrCh := make(chan error, 1)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if err := server.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErrCh <- fmt.Errorf("server error: %w", err)
 		}
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-ctx.Done()
 		log.Infon("Terminating service")
 		// Flip health status to NOT_SERVING first so readiness probes fail and
@@ -346,7 +343,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		// (with NOT_SERVING) while the main server is draining.
 		healthGrpcServer.GracefulStop()
 		_ = healthLis.Close()
-	}()
+	})
 
 	// Main server is now serving -> mark NodeService ready so readiness probes
 	// pass and Kubernetes starts routing traffic to this pod.
@@ -354,7 +351,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 
 	select {
 	case <-ctx.Done():
-		log.Infon("Shutting down HTTP server")
+		log.Infon("Shutting down GRPC server")
 		return ctx.Err()
 	case err := <-serverErrCh:
 		return err
