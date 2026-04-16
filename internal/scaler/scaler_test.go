@@ -10,8 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
+
+	pb "github.com/rudderlabs/keydb/proto"
 )
 
 func TestSendSnapshot_Success(t *testing.T) {

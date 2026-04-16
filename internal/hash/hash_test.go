@@ -37,7 +37,7 @@ func TestGetNodeNumberConsistency(t *testing.T) {
 			initialNodeID := h.GetNodeNumber(tc.key)
 
 			// Run multiple iterations to verify consistency
-			for i := 0; i < testIterations; i++ {
+			for i := range testIterations {
 				nodeID := h.GetNodeNumber(tc.key)
 				if nodeID != initialNodeID {
 					t.Errorf(
@@ -74,7 +74,7 @@ func TestGetNodeHashRangesConsistency(t *testing.T) {
 			initialRanges := h.GetNodeHashRanges(tc.nodeID)
 
 			// Run multiple iterations to verify consistency
-			for i := 0; i < testIterations; i++ {
+			for i := range testIterations {
 				ranges := h.GetNodeHashRanges(tc.nodeID)
 
 				// Check that the maps have the same size
@@ -110,7 +110,7 @@ func TestHashRangeInNodeHashRanges(t *testing.T) {
 	// Initialize random number generator
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 	randomNodeIDs := make([]int64, 0, numOfRandomNodeIDs)
-	for i := 0; i < numOfRandomNodeIDs; i++ {
+	for i := range numOfRandomNodeIDs {
 		randomNodeIDs = append(randomNodeIDs, int64(i))
 	}
 
@@ -126,7 +126,7 @@ func TestHashRangeInNodeHashRanges(t *testing.T) {
 			"_ranges=" + strconv.Itoa(int(totalHashRanges))
 		t.Run(testName, func(t *testing.T) {
 			h := New(clusterSize, totalHashRanges)
-			for i := 0; i < testIterations; i++ {
+			for range testIterations {
 				// Get hash ranges for this node
 				nodeHashRanges := h.GetNodeHashRanges(nodeID)
 				hashResultsForNodeID := getKeysForNodeID(h, numRandomKeys, nodeID)
@@ -150,7 +150,7 @@ func TestCollision(t *testing.T) {
 	var clusterSize, totalHashRanges int64 = 3, 128
 	h := New(clusterSize, totalHashRanges)
 	seen := make(map[int64]struct{})
-	for nodeID := int64(0); nodeID < clusterSize; nodeID++ {
+	for nodeID := range clusterSize {
 		hashRanges := h.GetNodeHashRanges(nodeID)
 		for hashRange := range hashRanges {
 			if _, exists := seen[hashRange]; exists {
@@ -185,7 +185,7 @@ func TestGetNodeHashRangesListConsistency(t *testing.T) {
 			initialRanges := h.GetNodeHashRangesList(tc.nodeID)
 
 			// Run multiple iterations to verify consistency
-			for i := 0; i < testIterations; i++ {
+			for i := range testIterations {
 				ranges := h.GetNodeHashRangesList(tc.nodeID)
 
 				// Check that the slices have the same length
@@ -296,7 +296,7 @@ func TestHashRangeInNodeHashRangesList(t *testing.T) {
 	// Initialize random number generator
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
 	randomNodeIDs := make([]int64, 0, numOfRandomNodeIDs)
-	for i := 0; i < numOfRandomNodeIDs; i++ {
+	for i := range numOfRandomNodeIDs {
 		randomNodeIDs = append(randomNodeIDs, int64(i))
 	}
 
@@ -312,7 +312,7 @@ func TestHashRangeInNodeHashRangesList(t *testing.T) {
 			"_ranges=" + strconv.Itoa(int(totalHashRanges))
 		t.Run(testName, func(t *testing.T) {
 			h := New(clusterSize, totalHashRanges)
-			for i := 0; i < testIterations; i++ {
+			for range testIterations {
 				// Get hash ranges for this node
 				nodeHashRangesList := h.GetNodeHashRangesList(nodeID)
 				hashResultsForNodeID := getKeysForNodeID(h, numRandomKeys, nodeID)

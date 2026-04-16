@@ -24,16 +24,17 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
-	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/internal/cache/badger"
-	"github.com/rudderlabs/keydb/internal/hash"
-	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+
+	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/cache/badger"
+	"github.com/rudderlabs/keydb/internal/hash"
+	pb "github.com/rudderlabs/keydb/proto"
 )
 
 const (
@@ -1377,10 +1378,7 @@ func (s *Service) SendSnapshot(
 	totalChunks := (len(data) + chunkSize - 1) / chunkSize
 
 	for i := 0; i < len(data); i += chunkSize {
-		end := i + chunkSize
-		if end > len(data) {
-			end = len(data)
-		}
+		end := min(i+chunkSize, len(data))
 		isLast := end >= len(data)
 		chunkNum := (i / chunkSize) + 1
 

@@ -20,12 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 
-	"github.com/rudderlabs/keydb/client"
-	"github.com/rudderlabs/keydb/internal/hash"
-	"github.com/rudderlabs/keydb/internal/scaler"
-	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
-	"github.com/rudderlabs/keydb/node"
-	pb "github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
 	"github.com/rudderlabs/rudder-go-kit/httputil"
@@ -35,6 +29,13 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/tcpproxy"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
 	miniokit "github.com/rudderlabs/rudder-go-kit/testhelper/docker/resource/minio"
+
+	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/hash"
+	"github.com/rudderlabs/keydb/internal/scaler"
+	keydbth "github.com/rudderlabs/keydb/internal/testhelper"
+	"github.com/rudderlabs/keydb/node"
+	pb "github.com/rudderlabs/keydb/proto"
 )
 
 const (
@@ -1013,8 +1014,7 @@ func TestHashRangeMovements(t *testing.T) {
 			regexp.MustCompile("^.+/hr_7_s_1_2.snapshot$"),
 		)
 
-		newNodeCtx, newNodeCancel := context.WithCancel(context.Background())
-		defer newNodeCancel()
+		newNodeCtx := t.Context()
 
 		newNodeConf := newConf()
 		_, newNodeAddress := getService(newNodeCtx, t, cloudStorage, node.Config{
@@ -1096,8 +1096,7 @@ func TestDegradedModeDuringScaling(t *testing.T) {
 
 	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	totalHashRanges := int64(3)
 
@@ -1184,8 +1183,7 @@ func TestScaleUpInDegradedMode(t *testing.T) {
 
 	cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	totalHashRanges := int64(3)
 
@@ -1439,8 +1437,7 @@ func TestScaleStreaming(t *testing.T) {
 
 			cloudStorage := keydbth.GetCloudStorage(t, newConf(), minioContainer)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			// Create degraded config to manage degraded state across nodes
 			degradedConfig := &degradedNodesConfig{}
@@ -1732,7 +1729,7 @@ func TestBackup(t *testing.T) {
 	)
 
 	// Verify node info for all 3 nodes
-	for nodeID := int64(0); nodeID < 3; nodeID++ {
+	for nodeID := range int64(3) {
 		body = s.Do("/info", InfoRequest{NodeID: nodeID})
 		infoResponse := pb.GetNodeInfoResponse{}
 		require.NoError(t, jsonrs.Unmarshal([]byte(body), &infoResponse))

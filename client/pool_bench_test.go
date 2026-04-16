@@ -14,9 +14,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/rudderlabs/keydb/proto"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
+
+	"github.com/rudderlabs/keydb/proto"
 )
 
 // BenchmarkConnectionPoolSize benchmarks different pool sizes without any concurrency
@@ -84,7 +85,7 @@ func BenchmarkPoolSizeVsThroughput(b *testing.B) {
 			startTime := time.Now()
 
 			var wg sync.WaitGroup
-			for i := 0; i < numOfRoutines; i++ {
+			for range numOfRoutines {
 				wg.Go(func() {
 					for i := 0; i < b.N; i++ {
 						_, _ = client.Get(ctx, keys)
@@ -132,7 +133,7 @@ func BenchmarkPoolSizeVsLatency(b *testing.B) {
 			b.ResetTimer()
 
 			var wg sync.WaitGroup
-			for i := 0; i < concurrentRequests; i++ {
+			for range concurrentRequests {
 				wg.Go(func() {
 					start := time.Now()
 					_, err := client.Get(ctx, keys)
@@ -201,7 +202,7 @@ func BenchmarkPoolExhaustion(b *testing.B) {
 				successCount, timeoutCount atomic.Uint64
 				numRequests                = poolSize * 3
 			)
-			for i := 0; i < numRequests; i++ {
+			for range numRequests {
 				wg.Go(func() {
 					_, err := client.Get(ctx, keys)
 					if err != nil {
