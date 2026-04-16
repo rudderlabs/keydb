@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.1](https://github.com/rudderlabs/keydb/compare/v1.4.0...v1.4.1) (2026-04-16)
+
+
+### Miscellaneous
+
+* **deps:** bump actions/create-github-app-token from 2.1.4 to 3.1.1 ([#177](https://github.com/rudderlabs/keydb/issues/177)) ([270c971](https://github.com/rudderlabs/keydb/commit/270c971104397a6849c1b72d862f11108706f9de))
+* **deps:** bump actions/upload-artifact from 5.0.0 to 7.0.1 ([#178](https://github.com/rudderlabs/keydb/issues/178)) ([4906aef](https://github.com/rudderlabs/keydb/commit/4906aef314475439e07199d7dd3ecfea7c38be60))
+* **deps:** bump codecov/codecov-action from 5.5.2 to 6.0.0 ([#180](https://github.com/rudderlabs/keydb/issues/180)) ([facb919](https://github.com/rudderlabs/keydb/commit/facb91990a95f12feae2d9ffba9ae5f38852816b))
+* **deps:** bump docker/login-action from 3.6.0 to 4.1.0 ([#179](https://github.com/rudderlabs/keydb/issues/179)) ([643a85f](https://github.com/rudderlabs/keydb/commit/643a85f8f6f72c42bf0bd9624c382317a9584159))
+* **deps:** bump the actions-deps group with 4 updates ([#176](https://github.com/rudderlabs/keydb/issues/176)) ([cf89dcb](https://github.com/rudderlabs/keydb/commit/cf89dcb314dcc72754461a31709ff8abc14e02c7))
+* **deps:** bump the docker-deps group across 1 directory with 2 updates ([#185](https://github.com/rudderlabs/keydb/issues/185)) ([21b8960](https://github.com/rudderlabs/keydb/commit/21b8960be284c53afecfb5e9ec78e233b1186408))
+* **deps:** bump the go-deps group across 1 directory with 4 updates ([#184](https://github.com/rudderlabs/keydb/issues/184)) ([7b951e0](https://github.com/rudderlabs/keydb/commit/7b951e09fe76d61a1ab73327ad4565afbfa622a0))
+* replace goimports with gci and add go fix ([#182](https://github.com/rudderlabs/keydb/issues/182)) ([3372852](https://github.com/rudderlabs/keydb/commit/3372852f0e1e96803fe5b1e47e6e320ca9e00068))
+
 ## [1.4.0](https://github.com/rudderlabs/keydb/compare/v1.3.6...v1.4.0) (2026-04-14)
 
 
