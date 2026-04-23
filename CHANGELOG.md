@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/rudderlabs/keydb/compare/v1.4.1...v1.4.2) (2026-04-23)
+
+
+### Miscellaneous
+
+* bump build-scan-push-action from v2.1.0 to v2.2.0 ([#193](https://github.com/rudderlabs/keydb/issues/193)) ([933f49c](https://github.com/rudderlabs/keydb/commit/933f49c2d4216ff56bf18beba56feb444544ab4b))
+
 ## [1.4.1](https://github.com/rudderlabs/keydb/compare/v1.4.0...v1.4.1) (2026-04-16)
 
 
