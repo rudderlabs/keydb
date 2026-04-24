@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: '42 1 * * *'
 
+permissions:
+  contents: read
+
 jobs:
   prs:
     name: Clean up stale prs
@@ -39,6 +42,8 @@ jobs:
   branches:
       name: Cleanup old branches
       runs-on: ubuntu-latest
+      permissions:
+        contents: write
       steps:
         - name: Harden the runner (Audit all outbound calls)
           uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
