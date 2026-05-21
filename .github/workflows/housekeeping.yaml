@@ -17,20 +17,20 @@ jobs:
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
         with:
           egress-policy: audit
 
       - name: Generate GitHub App Token
         id: generate-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_PRIVATE_KEY }}
           permission-contents: write # to create release commits and tags
           permission-pull-requests: write # to create release PRs
 
-      - uses: actions/stale@b5d41d4e1d5dceea10e7104786b73624c18a190f # v10.2.0
+      - uses: actions/stale@eb5cf3af3ac0a1aa4c9c45633dd1ae542a27a899 # v10.3.0
         with:
           repo-token: ${{ steps.generate-token.outputs.token }}
           operations-per-run: 200
@@ -46,7 +46,7 @@ jobs:
         contents: write
       steps:
         - name: Harden the runner (Audit all outbound calls)
-          uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+          uses: step-security/harden-runner@ab7a9404c0f3da075243ca237b5fac12c98deaa5 # v2.19.3
           with:
             egress-policy: audit
 
