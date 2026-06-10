@@ -3,7 +3,7 @@
 ARG PKG_NAME=github.com/rudderlabs/keydb
 
 # Build stage
-FROM golang:1.26.2-alpine3.23@sha256:27f829349da645e287cb195a9921c106fc224eeebbdc33aeb0f4fca2382befa6 AS builder
+FROM golang:1.26.4-alpine3.23@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS builder
 
 # Install necessary dependencies (zstd-dev used with cgo)
 RUN apk --no-cache add --update make tzdata ca-certificates gcc musl-dev zstd-dev
@@ -36,7 +36,7 @@ RUN go build \
     -o ./keydb ./cmd/node
 
 # Final stage
-FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+FROM alpine:3.24.0@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb241c829f4
 
 # Update and install additional packages (zstd-libs used with cgo)
 RUN apk --no-cache upgrade && \
