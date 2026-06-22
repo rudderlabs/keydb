@@ -3,7 +3,7 @@
 ARG PKG_NAME=github.com/rudderlabs/keydb
 
 # Build stage
-FROM golang:1.26.2-alpine3.23@sha256:27f829349da645e287cb195a9921c106fc224eeebbdc33aeb0f4fca2382befa6 AS builder
+FROM golang:1.26.4-alpine3.23@sha256:f23e8b227fb4493eabe03bede4d5a32d04092da71962f1fb79b5f7d1e6c2a17f AS builder
 
 # Install necessary dependencies
 RUN apk --no-cache add --update make tzdata ca-certificates gcc musl-dev
