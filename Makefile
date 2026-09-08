@@ -2,7 +2,7 @@ GO := go
 TESTFILE    := _testok
 DOCKER_USER :=
 
-GOLANG_CI				:= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.3
+GOLANG_CI				:= github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 GOFUMPT					:= mvdan.cc/gofumpt@latest
 GOVULNCHECK				:= golang.org/x/vuln/cmd/govulncheck@latest
 GCI						:= github.com/daixiang0/gci@v0.13.7
@@ -92,8 +92,6 @@ fmt: install-tools ## Formats all go
 	$(GO) fix ./...
 	$(GO) run $(GOFUMPT) -l -w -extra  .
 	$(GO) run $(GCI) write -s standard -s default -s "prefix(github.com/rudderlabs)" -s "prefix($(shell $(GO) list -m))" --skip-generated .
-	./build/docker-go-version.sh Dockerfile
-	./build/docker-go-version.sh Dockerfile-scaler
 
 .PHONY: mocks
 mocks: install-tools ## Generate all mocks

@@ -903,7 +903,8 @@ func (s *Service) createSnapshots(ctx context.Context, fullSync bool, selectedHa
 		logger.NewBoolField("fullSync", fullSync),
 		logger.NewIntField("numHashRanges", int64(len(currentRanges))),
 		logger.NewIntField("numWriters", int64(len(writers))),
-		logger.NewStringField("since", sinceLog.String()))
+		logger.NewStringField("since", sinceLog.String()),
+	)
 	log.Infon("Creating snapshots")
 
 	start := time.Now()

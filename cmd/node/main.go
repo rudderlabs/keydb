@@ -297,7 +297,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 					"success": strconv.FormatBool(success),
 				}).Since(start)
 				return resp, err
-			}),
+			},
+		),
 	)
 
 	pb.RegisterNodeServiceServer(server, service)
