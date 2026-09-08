@@ -73,7 +73,9 @@ func newHTTPServer(
 
 	mux := chi.NewRouter()
 	mux.Use(middleware.RequestID)
-	mux.Use(middleware.RealIP)
+	// chi deprecated RealIP in v5.3 because it trusts client-supplied forwarding headers. keydb's scaler is an
+	// internal component and RemoteAddr is only used for request logging, so the spoofing risk does not apply here.
+	mux.Use(middleware.RealIP) // nolint:staticcheck
 	mux.Use(middleware.RequestLogger(&middleware.DefaultLogFormatter{
 		Logger:  &loggerAdapter{logger: log},
 		NoColor: true,

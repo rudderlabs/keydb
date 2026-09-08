@@ -694,6 +694,10 @@ func (c *Client) getGrpcDialOptions() []grpc.DialOption {
 	// Additionally make sure that you can resolve the address (e.g. via ping) from one pod to another.
 	return []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// keydb does not publish service config over DNS. Left enabled, the dns resolver additionally looks up
+		// TXT _grpc_config.<host> on every channel and withholds the resolved addresses until that lookup
+		// returns, so a slow or throttled DNS server stalls connection setup even once the host has resolved.
+		grpc.WithDisableServiceConfig(),
 		grpc.WithKeepaliveParams(kacp),
 		grpc.WithConnectParams(grpc.ConnectParams{
 			Backoff:           backoffConfig,
