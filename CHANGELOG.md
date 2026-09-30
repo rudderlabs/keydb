@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.5.0](https://github.com/rudderlabs/keydb/compare/v1.4.1...v1.5.0) (2026-09-30)
+
+
+### Features
+
+* bump rudder-go-kit and go modules to Go 1.27.1 ([#227](https://github.com/rudderlabs/keydb/issues/227)) ([556d506](https://github.com/rudderlabs/keydb/commit/556d50692049a751347f65ee816769661cf690e4))
+
+
+### Miscellaneous
+
+* bump build-scan-push-action from v2.1.0 to v2.2.0 ([#193](https://github.com/rudderlabs/keydb/issues/193)) ([933f49c](https://github.com/rudderlabs/keydb/commit/933f49c2d4216ff56bf18beba56feb444544ab4b))
+* move ARM64 docker build to managed runner scale set ([#238](https://github.com/rudderlabs/keydb/issues/238)) ([7aaa790](https://github.com/rudderlabs/keydb/commit/7aaa7906025447386da4a52d94c6ec2cbdd8557c))
+* **vuln:** scope workflow permissions to least privilege (SEC-167) ([#195](https://github.com/rudderlabs/keydb/issues/195)) ([3639710](https://github.com/rudderlabs/keydb/commit/3639710ecfff3f349cec9d02bd47ccf1224f4e00))
+
 ## [1.4.1](https://github.com/rudderlabs/keydb/compare/v1.4.0...v1.4.1) (2026-04-16)
 
 
