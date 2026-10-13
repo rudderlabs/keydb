@@ -2,7 +2,7 @@
 ARG PKG_NAME=github.com/rudderlabs/keydb
 
 # Build stage
-FROM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS builder
+FROM golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS builder
 
 # Install necessary dependencies
 RUN apk --no-cache add --update make tzdata ca-certificates gcc musl-dev
@@ -32,7 +32,7 @@ RUN go build \
     -o ./keydb-scaler ./cmd/scaler
 
 # Final stage
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # Update and install additional packages
 RUN apk --no-cache upgrade && \
