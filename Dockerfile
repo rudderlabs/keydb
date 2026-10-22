@@ -2,7 +2,7 @@
 # check=error=true
 
 # Build stage
-FROM golang:1.27.3-alpine3.24@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e5b16ed69dbc00fba4 AS builder
+FROM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS builder
 
 # Install necessary dependencies (zstd-dev used with cgo)
 RUN apk --no-cache add --update make tzdata ca-certificates gcc musl-dev zstd-dev
