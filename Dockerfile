@@ -43,11 +43,6 @@ FROM alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8
 # apk fails here when the repository serves an older bundle.
 RUN apk --no-cache upgrade && \
     apk --no-cache add tzdata curl bash zstd-libs 'ca-certificates-bundle>=20261020'
-# Reads the installed bundle version. The build fails when the bundle is missing or older than the floor.
-RUN set -eu; \
-    bundle="$(apk info -v 2>/dev/null | sed -n 's/^ca-certificates-bundle-\([0-9][^ ]*\)$/\1/p')"; \
-    [ -n "$bundle" ] || { echo "ca-certificates-bundle is not installed" >&2; exit 1; }; \
-    case "$(apk version -t "$bundle" 20261020-r0)" in "="|">") ;; *) echo "ca-certificates-bundle $bundle is older than 20261020-r0" >&2; exit 1 ;; esac
 
 COPY --link --from=builder /app/keydb ./
 
