@@ -2,14 +2,32 @@
 
 All the rules below are not optional and must be followed to the letter.
 
+# Project
+
+KeyDB is a distributed key store (not a key-value store) designed to be fast, scalable, and eventually consistent. It provides a simple API for checking the existence of keys with TTL (Time To Live) support.
+
+To understand what the project is about, you must read the [README.md](README.md) file before changing or reviewing any code. Such context should then be used not just to review the code, but design decisions when reviewing a branch against `main`, while keeping different aspects in mind (such as the architecture, security, observability, performance, testability, testing coverage, and code maintainability).
+
+## Build & Test
+
+- `make fmt` — Format the code
+- `make lint` — Format, then run govulncheck and golangci-lint; must pass before committing
+- `make lint-novuln` — `make lint` without govulncheck
+- `make vulncheck` — Run govulncheck
+- `make test` — Run the tests; `package=<dir>` limits them to one package tree and `exclude=<regex>` skips matching packages
+- `make mocks` — Regenerate the mocks with `go generate ./...`
+- `make proto` — Regenerate the protobuf code from `proto/*.proto`; needs `protoc`
+- `make up` / `make down` — Start and stop the local cluster defined in `docker-compose.yaml`
+
+Always run `make lint` after making changes and before committing.
+
 # Go Rules
 
 NEVER use `go build`, use `go run` instead.
 
 ## rudder-go-kit
 
-https://github.com/rudderlabs/rudder-go-kit opinionated library for rudderstack. Should be used for all Golang projects,
-for common things like logging, config, http, etc.
+https://github.com/rudderlabs/rudder-go-kit opinionated library for rudderstack. Should be used for all Golang projects, for common things like logging, config, http, etc.
 
 ### HTTP
 
@@ -22,13 +40,13 @@ When doing an HTTP request you must always close the response body. To do this:
 DO NOT use:
 
 ```go
-    defer resp.Body.Close()
+defer resp.Body.Close()
 ```
 
 DO use:
 
 ```go
-    defer func() { httputil.CloseResponse(resp) }()
+defer func() { httputil.CloseResponse(resp) }()
 ```
 
 #### Handlers
@@ -49,36 +67,35 @@ Always use rudder-go-kit for logging.
 
 ```go
 import (
-	"github.com/rudderlabs/rudder-go-kit/logger"
+    "github.com/rudderlabs/rudder-go-kit/logger"
     obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 ```
 
 Non-sugared methods MUST BE used along with common fields from rudder-observability-kit when available.
 
-For example if a `sourceId` is available you must use `obskit.SourceID("some-source-id")`.
-These fields are available in the rudder-observability-kit:
+For example if a `sourceId` is available you must use `obskit.SourceID("some-source-id")`. These fields are available in the rudder-observability-kit:
 
 ```go
 var (
-	DestinationID    = func(v string) log.Field { return log.NewStringField("destinationId", v) }
-	DestinationType  = func(v string) log.Field { return log.NewStringField("destinationType", v) }
-	SourceID         = func(v string) log.Field { return log.NewStringField("sourceId", v) }
-	SourceType       = func(v string) log.Field { return log.NewStringField("sourceType", v) }
-	WorkspaceID      = func(v string) log.Field { return log.NewStringField("workspaceId", v) }
-	TransformationID = func(v string) log.Field { return log.NewStringField("transformationId", v) }
-	Namespace        = func(v string) log.Field { return log.NewStringField("namespace", v) }
-	Error            = func(v error) log.Field { return log.NewErrorField(v) }
+    DestinationID    = func(v string) log.Field { return log.NewStringField("destinationId", v) }
+    DestinationType  = func(v string) log.Field { return log.NewStringField("destinationType", v) }
+    SourceID         = func(v string) log.Field { return log.NewStringField("sourceId", v) }
+    SourceType       = func(v string) log.Field { return log.NewStringField("sourceType", v) }
+    WorkspaceID      = func(v string) log.Field { return log.NewStringField("workspaceId", v) }
+    TransformationID = func(v string) log.Field { return log.NewStringField("transformationId", v) }
+    Namespace        = func(v string) log.Field { return log.NewStringField("namespace", v) }
+    Error            = func(v error) log.Field { return log.NewErrorField(v) }
 )
 ```
 
-Non-sugared log methods has `n` suffix.
+Non-sugared log methods have the `n` suffix.
 
 DO NOT:
 
 ```go
-   fmt.Println("foo")
-   fmt.Printf("foo %d\n", i)
+fmt.Println("foo")
+fmt.Printf("foo %d\n", i)
 ```
 
 DO NOT:
@@ -101,18 +118,18 @@ DO (descriptive message with structured fields):
 log.Infon("starting", logger.NewIntField("port", int64(port)))
 ```
 
-DO NOT USE `logger.NewField` and use the strong-typed counterparts instead like `logger.NewStringField`,
-`logger.NewBooldField` etc...
+DO NOT USE `logger.NewField` and use the strong-typed counterparts instead like `logger.NewStringField`, `logger.NewBoolField` etc...
 
 DO NOT USE reflection like `fmt.Sprintf` to convert values into string, for example DO NOT:
 
 ```go
 m := make(map[string]string)
 m["a"] = "b"
-log.Infon("starting", logger.NewIntField("map", fmt.Sprintf("%v", m)))
+log.Infon("starting", logger.NewStringField("map", fmt.Sprintf("%v", m)))
 ```
 
 **ABSOLUTELY NO REFLECTION**: Never use `fmt.Sprintf`, `fmt.Printf`, or any other reflection-based formatting in logging calls. Instead:
+
 - For string slices: use `strings.Join(slice, ", ")`
 - For custom types: implement a `String() string` method that manually builds the output
 - For primitive types: use appropriate `logger.NewXXXField` constructors directly
@@ -128,9 +145,8 @@ log.Errorn("operation failed", obskit.Error(err))
 ```
 
 **For code in the /warehouse folder:**
-- Use fields from the `github.com/rudderlabs/rudder-server/warehouse/logfield` package when available
-  (e.g. `logfield.SourceID`, `logfield.TableName`) instead of the rudder-observability-kit fields unless it is an error
-  then you must use `obskit.Error(err)`
+
+- Use fields from the `github.com/rudderlabs/rudder-server/warehouse/logfield` package when available (e.g. `logfield.SourceID`, `logfield.TableName`) instead of the rudder-observability-kit fields unless it is an error then you must use `obskit.Error(err)`
 - Use `logfield.Query` if in the code we're logging queries e.g. `sqlStatement`
 - For errors, always use `obskit.Error(err)`
 
@@ -160,6 +176,7 @@ When converting existing sugared logging calls to non-sugared methods:
 - **DO NOT** modify message content unless explicitly requested
 
 Example migration:
+
 ```go
 // Before
 log.Infof("AZ: Creating table for destination %s: %v", destID, query)
@@ -185,7 +202,7 @@ You should use a service name prefix:
 
 ```go
 import (
-	kitconfig "github.com/rudderlabs/rudder-go-kit/config"
+    kitconfig "github.com/rudderlabs/rudder-go-kit/config"
 )
 
 conf := kitconfig.New(kitconfig.WithEnvPrefix("SERVICE_NAME"))
@@ -221,7 +238,7 @@ Always use rudder-go-kit for metrics and statistics.
 ```go
 import (
     "github.com/rudderlabs/rudder-go-kit/stats"
-    "github.com/rudderlabs/rudder-go-kit/stats/metric"
+    svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 )
 ```
 
@@ -245,11 +262,50 @@ if err := stat.Start(ctx, stats.DefaultGoRoutineFactory); err != nil {
 defer stat.Stop()
 ```
 
-Only init in program's main. Use DI in all other places
+Only init in program's main. Use DI in all other places.
 
 #### Usage
 
-TODO
+Create measurements with `NewTaggedStat` on the injected `stats.Stats`:
+
+```go
+stat.NewTaggedStat("metric_name", stats.TimerType, stats.Tags{"key": "value"}).SendTiming(duration)
+stat.NewTaggedStat("metric_name", stats.CountType, stats.Tags{"key": "value"}).Increment()
+stat.NewTaggedStat("metric_name", stats.GaugeType, stats.Tags{"key": "value"}).Gauge(value)
+stat.NewTaggedStat("metric_name", stats.HistogramType, stats.Tags{"key": "value"}).Observe(value)
+```
+
+Available stat types: `stats.TimerType`, `stats.CountType`, `stats.GaugeType`, `stats.HistogramType`.
+
+Always pass `stats.Stats` via dependency injection, never use a global instance such as `stats.Default`.
+
+## Concurrency
+
+### WaitGroup
+
+Always use `wg.Go(func)` (Go 1.25+), which starts the goroutine and manages `Add`/`Done` for you.
+
+DO NOT:
+
+```go
+var wg sync.WaitGroup
+wg.Add(1)
+go func() {
+    defer wg.Done()
+    doWork()
+}()
+wg.Wait()
+```
+
+DO:
+
+```go
+var wg sync.WaitGroup
+wg.Go(func() {
+    doWork()
+})
+wg.Wait()
+```
 
 ## Context
 
@@ -298,8 +354,7 @@ require.Eventually(t, func() bool {
 }, 10*time.Second, 100*time.Millisecond, "descriptive timeout message")
 ```
 
-Avoid using other `require` functions inside `Eventually` and `Never`. The lambda function invoked by `Eventually` and
-`Never` should just return a `bool` and must not make other assertions via `require` or via `t`.
+Avoid using other `require` functions inside `Eventually` and `Never`. The lambda function invoked by `Eventually` and `Never` should just return a `bool` and must not make other assertions via `require` or via `t`.
 
 ## Error Handling
 
@@ -347,10 +402,9 @@ This works for interface targets too, e.g. `errors.AsType[net.Error](err)`.
 
 ### Error Wrapping
 
-In case you can not handle the error and you need to propagate it. You SHOULD consider wrapping it using
-`fmt.Errorf("...: %w)`, if additional context would make it easier for understanding the error.
+In case you can not handle the error and you need to propagate it, you SHOULD consider wrapping it using `fmt.Errorf("...: %w", err)`, if additional context would make it easier for understanding the error.
 
-Avoid using "failure", or "error", or similar word when wrapping. Instead focus on describing the behaviour tha cause the issue.
+Avoid using "failure", or "error", or similar word when wrapping. Instead focus on describing the behaviour that caused the issue.
 
 DO NOT:
 
