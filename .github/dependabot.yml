@@ -4,6 +4,10 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    cooldown:
+      default-days: 7
+      exclude:
+        - "github.com/rudderlabs/*"
     groups:
       go-deps:
         patterns:
@@ -15,6 +19,14 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    cooldown:
+      default-days: 7
+      exclude:
+        - "rudderlabs/*"
+    ignore:
+      # build-scan-push-action v2.x drops the cosign signing that the Docker Hub workflow relies on.
+      - dependency-name: "rudderlabs/build-scan-push-action"
+        update-types: ["version-update:semver-major"]
     groups:
       actions-deps:
         patterns:
@@ -26,7 +38,19 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    cooldown:
+      default-days: 7
+      # The docker ecosystem gets no security updates.
+      # The runtime bases skip the cooldown, so a patched Go or trust store lands in the next run.
+      exclude:
+        - "golang"
+        - "alpine"
     groups:
+      # golang has its own group: its PR also needs the go line in go.mod, so it must not hold back
+      # an alpine trust-store bump. The first matching group wins.
+      golang:
+        patterns:
+          - "golang"
       docker-deps:
         patterns:
           - "*"

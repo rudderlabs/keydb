@@ -20,17 +20,18 @@ on:
         required: true
         type: string
 
-permissions:
-  id-token: write # allows the JWT to be requested from GitHub's OIDC provider
-  contents: read  # This is required for actions/checkout
+permissions: {}
 
 env:
-  arch_amd64: amd64
-  arch_arm64: arm64
+  ARCH_AMD64: amd64
+  ARCH_ARM64: arm64
 
 jobs:
   docker-meta:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write # configure-aws-credentials assumes the ECR role through OIDC
     outputs:
       labels: ${{ steps.meta.outputs.labels }}
       build-date: ${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
@@ -84,7 +85,7 @@ jobs:
             type=semver,pattern={{major}},enable=${{ github.ref == format('refs/heads/{0}', 'main') || github.event_name == 'release' }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ github.ref == format('refs/heads/{0}', 'main') || github.event_name == 'release' }}
           flavor: |
-            suffix=-${{ env.arch_arm64 }},onlatest=true
+            suffix=-${{ env.ARCH_ARM64 }},onlatest=true
 
       - name: Docker amd64 meta
         id: amd64_meta
@@ -99,7 +100,7 @@ jobs:
             type=semver,pattern={{major}},enable=${{ github.ref == format('refs/heads/{0}', 'main') || github.event_name == 'release' }}
             type=semver,pattern={{major}}.{{minor}},enable=${{ github.ref == format('refs/heads/{0}', 'main') || github.event_name == 'release' }}
           flavor: |
-            suffix=-${{ env.arch_amd64 }},onlatest=true
+            suffix=-${{ env.ARCH_AMD64 }},onlatest=true
 
   docker-build:
     needs: docker-meta
@@ -115,14 +116,20 @@ jobs:
             labels: ${{ needs.docker-meta.outputs.amd64_labels }}
             platform: linux/amd64
     runs-on: ${{ matrix.build-config.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read # actions/checkout
+      id-token: write # configure-aws-credentials assumes the ECR role through OIDC
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
         with:
           egress-policy: audit
 
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@a03048d87541d1d9fcf2ecf528a4a65ba9bd7838 # v5.0.0
@@ -139,7 +146,7 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: Build, scan and push
-        uses: rudderlabs/build-scan-push-action@865b4253caa57f8f20cd109e0efc1affe3a64939 # v2.2.0
+        uses: rudderlabs/build-scan-push-action@8b0c8fa6e6d526c296bc1de587abb8ed2ee6e903 # v2.3.0
         with:
           context: .
           file: ./${{ inputs.dockerfile }}
@@ -155,6 +162,9 @@ jobs:
 
   create-manifest:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write # configure-aws-credentials assumes the ECR role through OIDC
     needs: [docker-build, docker-meta]
     steps:
       - name: Harden the runner (Audit all outbound calls)
@@ -177,13 +187,16 @@ jobs:
         uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Create multi-arch manifest for Docker
+        env:
+          TAGS: ${{ needs.docker-meta.outputs.tags }}
         run: |
+          set -euo pipefail
+          # Each staging tag is the consumer tag plus an arch suffix, so the join uses exact names.
+          joined=0
           while read -r tag; do
-            echo "$tag"
-            arm_tag=$(echo "${{ needs.docker-meta.outputs.arm64_tags }}" | grep "$tag")
-            echo "$arm_tag"
-            amd_tag=$(echo "${{ needs.docker-meta.outputs.amd64_tags }}" | grep "$tag")
-            echo "$amd_tag"
-            docker buildx imagetools create -t $tag $arm_tag $amd_tag
-          done <<< "${{ needs.docker-meta.outputs.tags }}"
+            [ -n "$tag" ] || continue
+            docker buildx imagetools create -t "$tag" "$tag-${ARCH_ARM64}" "$tag-${ARCH_AMD64}"
+            joined=$((joined + 1))
+          done <<< "$TAGS"
+          [ "$joined" -gt 0 ] || { echo "docker-meta produced no tags" >&2; exit 1; }
 

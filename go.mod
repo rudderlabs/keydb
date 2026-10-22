@@ -1,6 +1,6 @@
 module github.com/rudderlabs/keydb
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/DataDog/zstd v1.5.7
@@ -14,7 +14,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/prometheus/client_golang v1.24.1
-	github.com/rudderlabs/rudder-go-kit v0.84.0
+	github.com/rudderlabs/rudder-go-kit v0.84.1
 	github.com/rudderlabs/rudder-observability-kit v0.0.7
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/sync v0.24.0

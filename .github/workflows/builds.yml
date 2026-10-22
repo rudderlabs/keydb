@@ -8,16 +8,18 @@ on:
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.sha }}
-  cancel-in-progress: true
+  # Push and release runs get a group per run, so none waits on or replaces another. Only PR runs cancel.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-permissions:
-  id-token: write # allows the JWT to be requested from GitHub's OIDC provider
-  contents: read  # This is required for actions/checkout
+permissions: {}
 
 jobs:
   # DockerHub builds
   keydb-dockerhub:
+    permissions:
+      contents: read # actions/checkout in the called workflow
+      id-token: write # cosign keyless signing in the called workflow
     uses: ./.github/workflows/docker-build-dockerhub.yml
     with:
       image_name: rudderstack/rudder-keydb
@@ -27,6 +29,9 @@ jobs:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   keydb-scaler-dockerhub:
+    permissions:
+      contents: read # actions/checkout in the called workflow
+      id-token: write # cosign keyless signing in the called workflow
     uses: ./.github/workflows/docker-build-dockerhub.yml
     with:
       image_name: rudderstack/rudder-keydb-scaler
@@ -37,6 +42,9 @@ jobs:
 
   # ECR builds
   keydb-ecr:
+    permissions:
+      contents: read # actions/checkout in the called workflow
+      id-token: write # ECR role through OIDC in the called workflow
     uses: ./.github/workflows/docker-build-ecr.yml
     with:
       image_name: rudderstack/rudder-keydb
@@ -45,6 +53,9 @@ jobs:
       aws_ecr_region: ${{ vars.AWS_ECR_REGION }}
 
   keydb-scaler-ecr:
+    permissions:
+      contents: read # actions/checkout in the called workflow
+      id-token: write # ECR role through OIDC in the called workflow
     uses: ./.github/workflows/docker-build-ecr.yml
     with:
       image_name: rudderstack/rudder-keydb-scaler
