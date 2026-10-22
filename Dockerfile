@@ -1,8 +1,8 @@
-# Define build arguments
-ARG PKG_NAME=github.com/rudderlabs/keydb
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# check=error=true
 
 # Build stage
-FROM golang:1.27.2-alpine3.24@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS builder
+FROM golang:1.27.3-alpine3.24@sha256:d530cf60723abf1ffae0cd16bb546b379ec0550d2f3815e5b16ed69dbc00fba4 AS builder
 
 # Install necessary dependencies (zstd-dev used with cgo)
 RUN apk --no-cache add --update make tzdata ca-certificates gcc musl-dev zstd-dev
@@ -15,8 +15,10 @@ RUN mkdir /app
 WORKDIR /app
 
 # Copy Go modules files and download dependencies
-COPY go.mod .
-COPY go.sum .
+COPY go.mod go.sum ./
+# go.mod is the single source of the Go version. The build fails when the builder runs another one.
+RUN want="go$(awk '$1 == "go" { print $2; exit }' go.mod)"; have="$(GOTOOLCHAIN=local go env GOVERSION)"; \
+    [ "$have" = "$want" ] || { echo "builder runs $have, go.mod wants $want" >&2; exit 1; }
 RUN go mod download
 
 ARG VERSION
@@ -35,14 +37,20 @@ RUN go build \
     -o ./keydb ./cmd/node
 
 # Final stage
-FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6
 
-# Update and install additional packages (zstd-libs used with cgo)
+# The version floor changes this instruction, so an old cached layer is not reused.
+# apk fails here when the repository serves an older bundle.
 RUN apk --no-cache upgrade && \
-    apk --no-cache add tzdata curl bash zstd-libs
+    apk --no-cache add tzdata curl bash zstd-libs 'ca-certificates-bundle>=20261020'
+# Reads the installed bundle version. The build fails when the bundle is missing or older than the floor.
+RUN set -eu; \
+    bundle="$(apk info -v 2>/dev/null | sed -n 's/^ca-certificates-bundle-\([0-9][^ ]*\)$/\1/p')"; \
+    [ -n "$bundle" ] || { echo "ca-certificates-bundle is not installed" >&2; exit 1; }; \
+    case "$(apk version -t "$bundle" 20261020-r0)" in "="|">") ;; *) echo "ca-certificates-bundle $bundle is older than 20261020-r0" >&2; exit 1 ;; esac
 
-# Copy built binary from previous stage
-COPY --from=builder /app/keydb ./
+COPY --link --from=builder /app/keydb ./
 
-# Specify default command to run when container starts
-CMD ["/keydb"]
+# The node stays root: existing /data volumes are root-owned and the chart sets no fsGroup.
+# A move to a non-root user needs an fsGroup in the operator chart first.
+ENTRYPOINT ["/keydb"]
