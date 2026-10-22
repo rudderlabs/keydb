@@ -322,6 +322,29 @@ if err != nil {
 }
 ```
 
+### Typed Error Checks
+
+To inspect a typed error, use the generic `errors.AsType[T](err)` (Go 1.26+), which returns the typed value and an `ok` bool directly. Do not pre-declare a target variable for `errors.As`. The `forbidigo` linter rejects `errors.As`.
+
+DO NOT:
+
+```go
+var opErr *net.OpError
+if errors.As(err, &opErr) && opErr.Op == "dial" {
+    // ...
+}
+```
+
+DO:
+
+```go
+if opErr, ok := errors.AsType[*net.OpError](err); ok && opErr.Op == "dial" {
+    // ...
+}
+```
+
+This works for interface targets too, e.g. `errors.AsType[net.Error](err)`.
+
 ### Error Wrapping
 
 In case you can not handle the error and you need to propagate it. You SHOULD consider wrapping it using
