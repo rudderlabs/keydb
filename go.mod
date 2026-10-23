@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/DataDog/zstd v1.5.7
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.23.15
-	github.com/buraksezer/consistent v0.10.0
+	github.com/buraksezer/consistent v1.1.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/dgraph-io/badger/v4 v4.9.6
