@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/rudderlabs/keydb/compare/v1.5.0...v1.5.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* badger leaks vlog files and loses WAL writes past 1e9 commits ([#252](https://github.com/rudderlabs/keydb/issues/252)) ([d41cef2](https://github.com/rudderlabs/keydb/commit/d41cef2b722d8f1b7a374e235ce916d6ff21c7aa))
+
 ## [1.5.0](https://github.com/rudderlabs/keydb/compare/v1.4.1...v1.5.0) (2026-10-23)
 
 
