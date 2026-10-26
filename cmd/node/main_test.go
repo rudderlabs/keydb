@@ -52,6 +52,24 @@ func TestGetNodeID(t *testing.T) {
 			expectedID:  1234,
 			expectError: false,
 		},
+		// Slot b format tests (shadow and moved nodes)
+		{
+			name:        "valid slot b pod name - node 0",
+			podName:     "keydb-0-b-0",
+			expectedID:  0,
+			expectError: false,
+		},
+		{
+			name:        "valid slot b pod name - node 3",
+			podName:     "keydb-3-b-0",
+			expectedID:  3,
+			expectError: false,
+		},
+		{
+			name:        "invalid slot pod name",
+			podName:     "keydb-3-c-0",
+			expectError: true,
+		},
 		// Legacy format tests (backward compatibility)
 		{
 			name:        "valid legacy pod name - node 0",

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
@@ -88,7 +89,12 @@ type Service struct {
 	stats          stats.Stats
 	logger         logger.Logger
 
+	// lastLegacyClientRequest is the unix time of the last Get or Put without the client features header
+	lastLegacyClientRequest atomic.Int64
+
 	metrics struct {
+		legacyClientRequests        stats.Counter
+		errNotReadyCounter          stats.Counter
 		getKeysCounters             map[int64]stats.Counter
 		putKeysCounter              map[int64]stats.Counter
 		errScalingCounter           stats.Counter
@@ -215,6 +221,10 @@ func NewService(
 	service.metrics.errScalingCounter = stat.NewTaggedStat("keydb_err_scaling_count", stats.CountType, statsTags)
 	service.metrics.errWrongNodeCounter = stat.NewTaggedStat("keydb_err_wrong_node_count", stats.CountType, statsTags)
 	service.metrics.errInternalCounter = stat.NewTaggedStat("keydb_err_internal_count", stats.CountType, statsTags)
+	service.metrics.errNotReadyCounter = stat.NewTaggedStat("keydb_err_not_ready_count", stats.CountType, statsTags)
+	service.metrics.legacyClientRequests = stat.NewTaggedStat(
+		"keydb_legacy_client_requests_total", stats.CountType, statsTags,
+	)
 	service.metrics.getKeysCounters = make(map[int64]stats.Counter)
 	service.metrics.putKeysCounter = make(map[int64]stats.Counter)
 	service.metrics.gcDuration = stat.NewTaggedStat("keydb_gc_duration_seconds", stats.HistogramType, statsTags)
@@ -643,13 +653,21 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...int64
 }
 
 // Get implements the Get RPC method
-func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
+func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	s.trackLegacyClient(ctx)
 
 	response := &pb.GetResponse{
 		ClusterSize:    s.config.getClusterSize(),
 		NodesAddresses: s.getNonDegradedAddresses(),
+	}
+
+	if s.role() == pb.NodeRole_SHADOW {
+		s.metrics.errNotReadyCounter.Increment()
+		response.ErrorCode = pb.ErrorCode_NOT_READY
+		return response, nil
 	}
 
 	if isDegraded, _ := s.isDegraded(); isDegraded {
@@ -694,14 +712,22 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 }
 
 // Put implements the Put RPC method
-func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
+func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	s.trackLegacyClient(ctx)
 
 	resp := &pb.PutResponse{
 		Success:        false,
 		ClusterSize:    s.config.getClusterSize(),
 		NodesAddresses: s.getNonDegradedAddresses(),
+	}
+
+	if s.role() == pb.NodeRole_SHADOW {
+		s.metrics.errNotReadyCounter.Increment()
+		resp.ErrorCode = pb.ErrorCode_NOT_READY
+		return resp, nil
 	}
 
 	if isDegraded, _ := s.isDegraded(); isDegraded {
@@ -768,11 +794,13 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 	}
 
 	return &pb.GetNodeInfoResponse{
-		NodeId:                s.config.NodeID,
-		ClusterSize:           s.config.getClusterSize(),
-		NodesAddresses:        s.getNonDegradedAddresses(),
-		HashRanges:            hashRanges,
-		LastSnapshotTimestamp: s.lastSnapshotTime.Unix(),
+		NodeId:                      s.config.NodeID,
+		ClusterSize:                 s.config.getClusterSize(),
+		NodesAddresses:              s.getNonDegradedAddresses(),
+		HashRanges:                  hashRanges,
+		LastSnapshotTimestamp:       s.lastSnapshotTime.Unix(),
+		Role:                        s.role(),
+		LastLegacyClientRequestUnix: s.lastLegacyClientRequest.Load(),
 	}, nil
 }
 

@@ -44,11 +44,15 @@ var (
 
 	// podNameRegex matches multi-statefulset pod names with fixed -0 suffix like keydb-0-0, keydb-1-0, etc.
 	podNameRegex = regexp.MustCompile(`^keydb-(\d+)-0$`)
+
+	// slotBPodNameRegex matches the pod names of a node's second slot like keydb-0-b-0, used by node moves.
+	slotBPodNameRegex = regexp.MustCompile(`^keydb-(\d+)-b-0$`)
 )
 
 const (
-	nodeAddressesConfKey = "nodeAddresses"
-	degradedNodesConfKey = "degradedNodes"
+	nodeAddressesConfKey       = "nodeAddresses"
+	degradedNodesConfKey       = "degradedNodes"
+	shadowNodeAddressesConfKey = "shadowNodeAddresses"
 )
 
 type keyDBResponse interface {
@@ -139,6 +143,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return fmt.Errorf("no node addresses provided")
 	}
 	degradedNodes := conf.GetReloadableStringVar("", degradedNodesConfKey)
+	// shadowNodeAddresses is reloadable so that a shadow becomes active without a restart when a move is completed
+	shadowNodeAddresses := conf.GetReloadableStringVar("", shadowNodeAddressesConfKey)
 
 	nodeConfig := node.Config{
 		NodeID:          nodeID,
@@ -176,6 +182,18 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		CheckL0StallInterval:      conf.GetDurationVar(5, time.Second, "checkL0StallInterval"),
 		LogTableStructureDuration: conf.GetDurationVar(10, time.Minute, "logTableStructureDuration"),
 		BackupFolderName:          conf.GetStringVar("", "KUBE_NAMESPACE"),
+		AdvertisedAddress:         strings.TrimSpace(conf.GetStringVar("", "advertisedAddress")),
+		ShadowAddresses: func() []string {
+			raw := strings.TrimSpace(shadowNodeAddresses.Load())
+			if raw == "" {
+				return nil
+			}
+			shadows := strings.Split(raw, ",")
+			for i := range shadows {
+				shadows[i] = strings.TrimSpace(shadows[i])
+			}
+			return shadows
+		},
 	}
 
 	port := conf.GetIntVar(50051, 1, "port")
@@ -363,11 +381,21 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 }
 
 // getNodeID extracts the node ID from a pod name.
-// Supports both multi-statefulset format (keydb-{nodeId}-0) and legacy format (keydb-{nodeId}).
+// Supports the multi-statefulset format (keydb-{nodeId}-0), the second slot used by node moves
+// (keydb-{nodeId}-b-0) and the legacy format (keydb-{nodeId}).
 func getNodeID(podName string) (int64, error) {
 	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
 	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
 		// Extract the first number as the node ID (e.g., 0 from keydb-0-0)
+		nodeID, err := strconv.ParseInt(matches[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
+		}
+		return nodeID, nil
+	}
+
+	// Second slot of a node, used by node moves (keydb-0-b-0, keydb-1-b-0, etc.)
+	if matches := slotBPodNameRegex.FindStringSubmatch(podName); matches != nil {
 		nodeID, err := strconv.ParseInt(matches[1], 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
@@ -384,7 +412,9 @@ func getNodeID(podName string) (int64, error) {
 		return nodeID, nil
 	}
 
-	return 0, fmt.Errorf("invalid pod name %q, expected format: keydb-<nodeId>-0 or keydb-<nodeId>", podName)
+	return 0, fmt.Errorf(
+		"invalid pod name %q, expected format: keydb-<nodeId>-0, keydb-<nodeId>-b-0 or keydb-<nodeId>", podName,
+	)
 }
 
 type configObserver struct {
