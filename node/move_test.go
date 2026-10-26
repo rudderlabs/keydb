@@ -77,7 +77,14 @@ func newMoveCluster(t *testing.T, replication ReplicationConfig) *moveCluster {
 // addNode creates a node for the given index on a fresh disk without starting it
 func (c *moveCluster) addNode(id int64) *moveNode {
 	c.t.Helper()
-	n := &moveNode{id: id, address: freeAddress(c.t), dir: c.t.TempDir()}
+	return c.addNodeAt(id, freeAddress(c.t), c.t.TempDir())
+}
+
+// addNodeAt creates a node for the given index with the given address and disk, like a pod of a slot that already
+// existed, without starting it
+func (c *moveCluster) addNodeAt(id int64, address, dir string) *moveNode {
+	c.t.Helper()
+	n := &moveNode{id: id, address: address, dir: dir}
 	n.view.Store(&topology{})
 	c.mu.Lock()
 	c.nodes = append(c.nodes, n)
@@ -699,4 +706,29 @@ func TestMoveLeftoverDisk(t *testing.T) {
 		return strings.Contains(slotB.service.ReplicationStatus().LastError, "leftover")
 	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse to merge into a leftover disk")
 	require.False(t, slotB.service.ReplicationStatus().Ready)
+}
+
+func TestMoveLeftoverDiskReusedSlot(t *testing.T) {
+	c := newMoveCluster(t, fastMoveReplication())
+	slotA, node1 := c.addNode(0), c.addNode(1)
+	c.setTopology([]string{slotA.address, node1.address}, nil)
+	c.start(slotA)
+	c.start(node1)
+	cl := c.newClient(node1.address)
+	require.NoError(t, cl.Put(context.Background(), testKeys(200), time.Hour))
+
+	// a → b, then b → a: slot b's pod goes away, but suppose Kubernetes didn't delete its disk
+	slotB := c.addNode(0)
+	c.move(t, slotA, slotB, node1, cl, oldNodeStopsFirst)
+	slotAAgain := c.addNodeAt(0, slotA.address, t.TempDir())
+	c.move(t, slotB, slotAAgain, node1, cl, oldNodeStopsFirst)
+
+	// a → b again: slot b's pod comes back with the same address and its leftover disk
+	leftover := c.addNodeAt(0, slotB.address, slotB.dir)
+	c.setTopology([]string{slotAAgain.address, node1.address}, []string{leftover.address, ""})
+	c.start(leftover)
+	require.Eventually(t, func() bool {
+		return strings.Contains(slotAAgain.service.ReplicationStatus().LastError, "leftover")
+	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse to merge into a leftover disk, even on a reused slot")
+	require.False(t, slotAAgain.service.ReplicationStatus().Ready)
 }

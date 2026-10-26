@@ -188,6 +188,8 @@ func (r *replicator) run(ctx context.Context) {
 }
 
 func (r *replicator) reconcile(ctx context.Context) {
+	r.s.forgetShadowSource()
+
 	target := ""
 	if r.s.role() == pb.NodeRole_ACTIVE {
 		target = r.s.shadowAddress()

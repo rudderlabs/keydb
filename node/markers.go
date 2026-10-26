@@ -69,3 +69,30 @@ func (s *Service) checkShadowSource(source string) error {
 	}
 	return nil
 }
+
+// forgetShadowSource drops the shadow source marker once this node is the active one for its index. Slot addresses
+// come back every two moves, so a disk that keeps the marker would pass the leftover check if it were ever reused
+// as a shadow again: without the marker, any data on it marks it as a leftover.
+func (s *Service) forgetShadowSource() {
+	if s.config.AdvertisedAddress == "" || s.config.Addresses == nil {
+		return
+	}
+	addresses := s.config.Addresses()
+	if s.config.NodeID < 0 || int(s.config.NodeID) >= len(addresses) ||
+		addresses[s.config.NodeID] != s.config.AdvertisedAddress {
+		return
+	}
+	_, found, err := s.cache.GetValue(shadowSourceKey, internalKeysHashRange)
+	if err != nil {
+		s.logger.Warnn("Reading the shadow source", obskit.Error(err))
+		return
+	}
+	if !found {
+		return
+	}
+	if err := s.cache.DeleteValue(shadowSourceKey, internalKeysHashRange); err != nil {
+		s.logger.Warnn("Forgetting the shadow source", obskit.Error(err))
+		return
+	}
+	s.logger.Infon("Forgot the shadow source now that the node is active")
+}

@@ -146,6 +146,9 @@ type Cache interface {
 	// PutValue stores a key-value pair with the specified TTL.
 	PutValue(key string, hashRange int64, value []byte, ttl time.Duration) error
 
+	// DeleteValue removes a key, it is not an error if the key doesn't exist.
+	DeleteValue(key string, hashRange int64) error
+
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
 	CreateSnapshots(

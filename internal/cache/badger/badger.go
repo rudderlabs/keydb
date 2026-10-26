@@ -335,6 +335,16 @@ func (c *Cache) PutValue(key string, hashRange int64, value []byte, ttl time.Dur
 	})
 }
 
+// DeleteValue removes a key, it is not an error if the key doesn't exist.
+func (c *Cache) DeleteValue(key string, hashRange int64) error {
+	return c.cache.Update(func(txn *badger.Txn) error {
+		if err := txn.Delete(getKey(key, hashRange)); err != nil {
+			return fmt.Errorf("deleting key %s: %w", key, err)
+		}
+		return nil
+	})
+}
+
 func (c *Cache) getTTL(ttl time.Duration) time.Duration {
 	if ttl > 0 && c.jitterEnabled && c.jitterDuration > 0 {
 		jitter := time.Duration(rand.Int63n(int64(c.jitterDuration)))

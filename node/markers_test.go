@@ -169,3 +169,36 @@ func TestShadowReceiveMultiChunk(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 }
+
+func TestShadowSourceClearedOnActivation(t *testing.T) {
+	ctx := context.Background()
+	address := freeAddress(t)
+	shadows := &shadowList{}
+	shadows.set(address)
+	active := &shadowList{}
+	active.set("old-active:1")
+	s := newTestService(ctx, t, Config{
+		NodeID:            0,
+		Addresses:         active.load,
+		AdvertisedAddress: address,
+		ShadowAddresses:   shadows.load,
+		Replication:       ReplicationConfig{ReconcileInterval: 10 * time.Millisecond},
+	}, newTestConf(t))
+	serveTestService(t, s, address)
+
+	resp := sendChunks(t, nodeClient(t, address), &pb.SnapshotChunk{
+		HashRange: 0, IsLast: true, Timestamp: 1, SourceAddress: "old-active:1",
+	})
+	require.True(t, resp.Success, resp.ErrorMessage)
+	_, found, err := s.cache.GetValue(shadowSourceKey, internalKeysHashRange)
+	require.NoError(t, err)
+	require.True(t, found)
+
+	// the move completes: this node is now the active one for its index
+	active.set(address)
+	shadows.set("")
+	require.Eventually(t, func() bool {
+		_, found, err := s.cache.GetValue(shadowSourceKey, internalKeysHashRange)
+		return err == nil && !found
+	}, 5*time.Second, 10*time.Millisecond, "an active node must forget the source it was filled from")
+}
