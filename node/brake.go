@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"os"
 	"runtime/metrics"
@@ -25,7 +26,13 @@ const (
 	defaultCgroupCPUStatFile = "/sys/fs/cgroup/cpu.stat"
 	// pausedPollInterval is how often a paused Wait checks whether it may continue
 	pausedPollInterval = 200 * time.Millisecond
+	// defaultMaxPausedWait is how long a Wait stays paused before giving up its batch, so that a long pause doesn't
+	// keep a read transaction open on the source and the shadow's receive waiting
+	defaultMaxPausedWait = 30 * time.Second
 )
+
+// errBudgetPaused is returned by Wait when the budget stayed at zero for longer than maxPausedWait
+var errBudgetPaused = errors.New("replication budget paused for too long")
 
 // BrakeSample holds the load signals measured since the previous sample.
 type BrakeSample struct {
@@ -52,6 +59,7 @@ type budgetConfig struct {
 	requestLatencyFactor    float64       // 2 when zero
 	throttledRatioThreshold float64       // 0.1 when zero
 	healthySamplesToGrow    int           // 3 when zero
+	maxPausedWait           time.Duration // defaultMaxPausedWait when zero
 }
 
 // budget is the byte budget of the replication job. It halves on every sample that shows the node under load,
@@ -80,6 +88,9 @@ func newBudget(cfg budgetConfig) *budget {
 	}
 	if cfg.healthySamplesToGrow == 0 {
 		cfg.healthySamplesToGrow = 3
+	}
+	if cfg.maxPausedWait == 0 {
+		cfg.maxPausedWait = defaultMaxPausedWait
 	}
 	maxBytes := max(cfg.max(), 1)
 	return &budget{
@@ -165,11 +176,18 @@ func (b *budget) tick(sample BrakeSample) string {
 	return ""
 }
 
-// Wait blocks until n bytes fit in the budget. While the budget is 0 it waits for it to grow or be unpaused.
+// Wait blocks until n bytes fit in the budget. While the budget is 0 it waits for it to grow or be unpaused, and
+// gives up with errBudgetPaused after maxPausedWait.
 func (b *budget) Wait(ctx context.Context, n int) error {
+	var pausedSince time.Time
 	for n > 0 {
 		bytesPerSecond := b.effective()
 		if bytesPerSecond <= 0 {
+			if pausedSince.IsZero() {
+				pausedSince = time.Now()
+			} else if time.Since(pausedSince) > b.cfg.maxPausedWait {
+				return errBudgetPaused
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -177,6 +195,7 @@ func (b *budget) Wait(ctx context.Context, n int) error {
 				continue
 			}
 		}
+		pausedSince = time.Time{}
 
 		b.mu.Lock()
 		if b.limiter.Limit() != rate.Limit(bytesPerSecond) {
@@ -193,6 +212,18 @@ func (b *budget) Wait(ctx context.Context, n int) error {
 			continue // the budget changed under us, retry with the new one
 		}
 		n -= step
+	}
+	return nil
+}
+
+// waitNonZero blocks while the budget is 0, so that a paused or fully braked copy doesn't keep scanning.
+func (b *budget) waitNonZero(ctx context.Context) error {
+	for b.effective() <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pausedPollInterval):
+		}
 	}
 	return nil
 }

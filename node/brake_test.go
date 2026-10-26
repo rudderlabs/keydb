@@ -189,3 +189,26 @@ func TestLatencyTracker(t *testing.T) {
 	require.Equal(t, 3*time.Millisecond, l.meanSinceLast())
 	require.Zero(t, l.meanSinceLast(), "the window resets")
 }
+
+func TestBudgetAbandonsLongPause(t *testing.T) {
+	var paused atomic.Bool
+	paused.Store(true)
+	b := newBudget(budgetConfig{
+		max:           func() int64 { return bytesize.MB },
+		paused:        paused.Load,
+		maxPausedWait: 200 * time.Millisecond,
+	})
+	start := time.Now()
+	err := b.Wait(context.Background(), 1024)
+	require.ErrorIs(t, err, errBudgetPaused, "a long pause must give up the range instead of holding it open")
+	require.Less(t, time.Since(start), 2*time.Second)
+
+	t.Run("waitNonZero blocks until resumed", func(t *testing.T) {
+		done := make(chan error, 1)
+		go func() { done <- b.waitNonZero(context.Background()) }()
+		require.Never(t, func() bool { return len(done) > 0 }, 300*time.Millisecond, 50*time.Millisecond)
+		paused.Store(false)
+		require.Eventually(t, func() bool { return len(done) > 0 }, 3*time.Second, 50*time.Millisecond)
+		require.NoError(t, <-done)
+	})
+}

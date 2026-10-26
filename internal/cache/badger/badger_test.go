@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -496,7 +497,7 @@ func TestStreamSnapshotRoundTrip(t *testing.T) {
 
 			var buf bytes.Buffer
 			maxVersion, hasData, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
-				NumGoroutines: 1, CompressionLevel: 1, MaxBatchSize: 1 << 20,
+				CompressionLevel: 1, BatchSize: 1 << 20,
 			})
 			require.NoError(t, err)
 			require.True(t, hasData)
@@ -565,7 +566,7 @@ func TestStreamSnapshotSince(t *testing.T) {
 }
 
 func TestStreamSnapshotBatchesBounded(t *testing.T) {
-	// a range bigger than badger's 16 MB produce buffer
+	// a range much bigger than a batch
 	source := newStreamTestCache(t, false)
 	keys := make([]string, 50_000)
 	for b := range 12 {
@@ -577,7 +578,7 @@ func TestStreamSnapshotBatchesBounded(t *testing.T) {
 
 	var largest, total int
 	_, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
-		MaxBatchSize: 4 << 20,
+		BatchSize: 64 << 10,
 		Wait: func(_ context.Context, n int) error {
 			largest = max(largest, n)
 			total += n
@@ -588,5 +589,28 @@ func TestStreamSnapshotBatchesBounded(t *testing.T) {
 	t.Logf("streamed %d bytes, largest batch %d bytes", total, largest)
 	require.Greater(t, total, 20<<20)
 	require.Less(t, largest, total/2, "the range must be streamed in batches, never held whole in memory")
-	require.LessOrEqual(t, largest, 20<<20, "a batch is bounded by badger's produce buffer, not by the range size")
+	require.LessOrEqual(t, largest, 128<<10, "a batch is bounded by the batch size, not by the range size")
+}
+
+func TestStreamSnapshotIncrementalAllocations(t *testing.T) {
+	source := newStreamTestCache(t, true)
+	keys := make([]string, 50_000)
+	for b := range 4 {
+		for i := range keys {
+			keys[i] = "a-reasonably-long-key-" + strconv.Itoa(b) + "-" + strconv.Itoa(i)
+		}
+		require.NoError(t, source.Put(map[int64][]string{0: keys}, time.Hour))
+	}
+	since, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{})
+	require.NoError(t, err)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, hasData, err := source.StreamSnapshot(context.Background(), 0, since, io.Discard, StreamOptions{})
+	require.NoError(t, err)
+	runtime.ReadMemStats(&after)
+	require.False(t, hasData)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("an incremental pass with nothing new allocated %d bytes", allocated)
+	require.Less(t, allocated, uint64(8<<20), "an incremental pass over unchanged data must stay cheap")
 }

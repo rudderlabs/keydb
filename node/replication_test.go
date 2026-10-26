@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/rudderlabs/rudder-go-kit/bytesize"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/stats/memstats"
 
@@ -251,4 +252,41 @@ func TestGCSkippedDuringPass(t *testing.T) {
 	shadows.set("")
 	require.Eventually(t, func() bool { return gcRuns() > runs+2 }, 5*time.Second, 10*time.Millisecond,
 		"garbage collection must resume after the pass")
+}
+
+func TestReplicationPausedStopsScanning(t *testing.T) {
+	var paused atomic.Bool
+	paused.Store(true)
+	p := newReplicationPair(t, fastReplication(&paused), stats.NOP)
+	p.shadows.set(p.shadowAddress)
+	require.Eventually(t, func() bool { return p.source.ReplicationStatus().State == "running" },
+		10*time.Second, 10*time.Millisecond)
+
+	// nothing to send, so no batch ever waits for the budget: the pass itself must not run while paused
+	time.Sleep(500 * time.Millisecond)
+	status := p.source.ReplicationStatus()
+	require.Zero(t, status.PassesCompleted, "a paused copy must not keep scanning")
+	require.Zero(t, status.CurrentPassRangesDone)
+
+	paused.Store(false)
+	require.Eventually(t, func() bool { return p.source.ReplicationStatus().PassesCompleted >= 1 },
+		10*time.Second, 10*time.Millisecond, "the copy must resume once unpaused")
+}
+
+func TestPassDelayStretchesWithBrake(t *testing.T) {
+	var paused atomic.Bool
+	r := &replicator{
+		cfg:    ReplicationConfig{PauseBetweenPasses: time.Second},
+		budget: newTestBudget(32*bytesize.MB, &paused),
+	}
+	require.Equal(t, time.Second, r.passDelay(), "at full budget the pause is the configured one")
+
+	r.budget.tick(BrakeSample{})
+	r.budget.tick(BrakeSample{SchedLatencyP99: time.Second}) // halves the budget
+	require.Equal(t, 2*time.Second, r.passDelay(), "at half the budget the pause doubles")
+
+	for range 20 {
+		r.budget.tick(BrakeSample{ThrottledRatio: 1})
+	}
+	require.Equal(t, maxPassDelay, r.passDelay(), "the stretched pause is capped")
 }

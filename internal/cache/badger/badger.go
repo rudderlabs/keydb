@@ -406,7 +406,7 @@ func (c *Cache) CreateSnapshots(
 	var maxSince uint64
 	numGo := c.conf.GetIntVar(10, 1, "BadgerDB.Dedup.Snapshots.NumGoroutines")
 	for hashRange, writer := range lockedWriters {
-		stream, getState := c.createStream(ctx, numGo, hashRange, since[hashRange], writer, nil)
+		stream, getState := c.createStream(numGo, hashRange, since[hashRange], writer)
 		err := stream.Orchestrate(ctx)
 		if err != nil {
 			return 0, nil, fmt.Errorf("failed to create snapshot: %w", err)
@@ -423,12 +423,7 @@ func (c *Cache) CreateSnapshots(
 	return maxSince, hasData, nil
 }
 
-// createStream returns a stream of the entries of one hash range with a version above since.
-// When wait is not nil, it is called with the size of each batch before the batch is written.
-func (c *Cache) createStream(
-	ctx context.Context, numGo int, hashRange int64, since uint64, writer *lockedWriter,
-	wait func(ctx context.Context, n int) error,
-) (
+func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *lockedWriter) (
 	*badger.Stream,
 	func() (uint64, bool),
 ) {
@@ -488,14 +483,7 @@ func (c *Cache) createStream(
 			}
 		}
 
-		out := &pb.KVList{Kv: kvs}
-		if wait != nil {
-			// the batch is written as its size (8 bytes) followed by the marshalled list
-			if err := wait(ctx, 8+proto.Size(out)); err != nil {
-				return err
-			}
-		}
-		if err := c.writeTo(out, writer); err != nil {
+		if err := c.writeTo(&pb.KVList{Kv: kvs}, writer); err != nil {
 			return fmt.Errorf("failed to write to hash range %d: %w", hashRange, err)
 		}
 
@@ -505,21 +493,23 @@ func (c *Cache) createStream(
 	return stream, func() (uint64, bool) { return maxVersion, hasData }
 }
 
+// defaultStreamBatchSize is the size at which StreamSnapshot writes a batch of entries
+const defaultStreamBatchSize = 256 << 10
+
 // StreamOptions configures StreamSnapshot
 type StreamOptions struct {
-	// NumGoroutines is the number of goroutines iterating the range, 1 when zero
-	NumGoroutines int
 	// CompressionLevel is the zstd level used when compression is enabled, the configured level when zero
 	CompressionLevel int
-	// MaxBatchSize caps the size of a batch read from badger, badger's default (100MB) when zero
-	MaxBatchSize uint64
+	// BatchSize is the size in bytes at which a batch of entries is written, 256 KiB when zero
+	BatchSize int
 	// Wait is called with the size of each batch before it is written, so callers can apply a byte budget.
 	// An error stops the stream. Nil means no budget.
 	Wait func(ctx context.Context, n int) error
 }
 
 // StreamSnapshot writes the entries of one hash range with a version above since to w, as LoadSnapshot reads them.
-// Unlike CreateSnapshots it never builds the range in memory: batches are written as they are read.
+// Unlike CreateSnapshots it reads the range with a single iterator and writes small batches as it goes, so it never
+// holds more than a batch in memory, and a pass over unchanged data allocates next to nothing.
 // Expired keys are skipped. It returns the highest version written and whether anything was written.
 func (c *Cache) StreamSnapshot(
 	ctx context.Context, hashRange int64, since uint64, w io.Writer, opts StreamOptions,
@@ -537,9 +527,9 @@ func (c *Cache) StreamSnapshot(
 		c.snapshottingLock.Unlock()
 	}()
 
-	numGo := opts.NumGoroutines
-	if numGo <= 0 {
-		numGo = 1
+	batchSize := opts.BatchSize
+	if batchSize <= 0 {
+		batchSize = defaultStreamBatchSize
 	}
 	lw := &lockedWriter{writer: w}
 	if c.compress {
@@ -552,40 +542,88 @@ func (c *Cache) StreamSnapshot(
 		lw.closer = zw
 	}
 
-	// badger reports a Send error as a cancelled context, so keep the budget's own error
-	var waitErr error
-	var wait func(ctx context.Context, n int) error
-	if opts.Wait != nil {
-		wait = func(ctx context.Context, n int) error {
-			if err := opts.Wait(ctx, n); err != nil {
-				waitErr = err // Send runs on a single goroutine, read only after Orchestrate returns
-				return err
-			}
-			return nil
-		}
-	}
-
-	stream, getState := c.createStream(ctx, numGo, hashRange, since, lw, wait)
-	if opts.MaxBatchSize > 0 {
-		stream.MaxSize = opts.MaxBatchSize
-	}
-	err := stream.Orchestrate(ctx)
-	if waitErr != nil {
-		err = waitErr
-	}
+	maxVersion, hasData, err := c.streamRange(ctx, hashRange, since, lw, batchSize, opts.Wait)
 	if lw.closer != nil {
 		// flushes the zstd frame, the caller's writer is left open
-		lw.mu.Lock()
-		closeErr := lw.closer.Close()
-		lw.mu.Unlock()
-		if err == nil && closeErr != nil {
+		if closeErr := lw.closer.Close(); err == nil && closeErr != nil {
 			err = fmt.Errorf("closing compressed stream: %w", closeErr)
 		}
 	}
 	if err != nil {
 		return 0, false, fmt.Errorf("streaming hash range %d: %w", hashRange, err)
 	}
-	maxVersion, hasData := getState()
+	return maxVersion, hasData, nil
+}
+
+func (c *Cache) streamRange(
+	ctx context.Context, hashRange int64, since uint64, w *lockedWriter, batchSize int,
+	wait func(ctx context.Context, n int) error,
+) (uint64, bool, error) {
+	txn := c.cache.NewTransaction(false)
+	defer txn.Discard()
+	iterOpts := badger.DefaultIteratorOptions
+	iterOpts.Prefix = []byte(getKeyPrefix(hashRange))
+	iterOpts.SinceTs = since
+	iterOpts.PrefetchValues = false
+	it := txn.NewIterator(iterOpts)
+	defer it.Close()
+
+	var (
+		maxVersion uint64
+		hasData    bool
+		batch      = &pb.KVList{}
+		batchBytes int
+		now        = uint64(time.Now().Unix())
+	)
+	flush := func() error {
+		if len(batch.Kv) == 0 {
+			return nil
+		}
+		if wait != nil {
+			// the batch is written as its size (8 bytes) followed by the marshalled list
+			if err := wait(ctx, 8+proto.Size(batch)); err != nil {
+				return err
+			}
+		}
+		if err := c.writeTo(batch, w); err != nil {
+			return fmt.Errorf("writing a batch: %w", err)
+		}
+		batch, batchBytes = &pb.KVList{}, 0
+		return nil
+	}
+
+	for it.Rewind(); it.Valid(); it.Next() {
+		if err := ctx.Err(); err != nil {
+			return 0, false, err
+		}
+		item := it.Item()
+		if item.IsDeletedOrExpired() || (item.ExpiresAt() > 0 && item.ExpiresAt() <= now) {
+			continue
+		}
+		value, err := item.ValueCopy(nil)
+		if err != nil {
+			return 0, false, fmt.Errorf("reading value: %w", err)
+		}
+		kv := &pb.KV{
+			Key:       item.KeyCopy(nil),
+			Value:     value,
+			Version:   item.Version(),
+			ExpiresAt: item.ExpiresAt(),
+			UserMeta:  []byte{item.UserMeta()},
+		}
+		batch.Kv = append(batch.Kv, kv)
+		batchBytes += len(kv.Key) + len(kv.Value) + 24
+		maxVersion = max(maxVersion, kv.Version)
+		hasData = true
+		if batchBytes >= batchSize {
+			if err := flush(); err != nil {
+				return 0, false, err
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return 0, false, err
+	}
 	return maxVersion, hasData, nil
 }
 

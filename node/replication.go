@@ -24,12 +24,14 @@ const (
 	DefaultReplicationMaxBytesPerSecond = 32 * bytesize.MB
 	// replicationCompressionLevel is the zstd level used to stream ranges to a shadow, the cheapest one
 	replicationCompressionLevel = 1
-	// replicationMaxBatchSize caps the batches read from badger while streaming a range to a shadow
-	replicationMaxBatchSize = 4 * bytesize.MB
+	// replicationBatchSize is the size of the batches streamed to a shadow
+	replicationBatchSize = int(256 * bytesize.KB)
 	// replicationMaxRetryDelay caps the delay between attempts to send a range that failed
 	replicationMaxRetryDelay = 30 * time.Second
 	// replicationRPCTimeout bounds the small calls the job makes to the shadow
 	replicationRPCTimeout = 5 * time.Second
+	// maxPassDelay caps the pause between passes while the brake holds the budget down
+	maxPassDelay = time.Minute
 )
 
 // ReplicationConfig configures how an active node fills its shadow.
@@ -255,7 +257,7 @@ func (r *replicator) job(ctx context.Context, target string) {
 	for ctx.Err() == nil {
 		r.pass(ctx, shadow, log)
 		r.evaluate(ctx, shadow, log)
-		if !sleepCtx(ctx, r.cfg.PauseBetweenPasses) {
+		if !sleepCtx(ctx, r.passDelay()) {
 			return
 		}
 	}
@@ -308,6 +310,10 @@ func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log 
 	var passBytes int64
 	for i, hashRange := range ranges {
 		for attempt := 0; ; attempt++ {
+			// a paused or fully braked copy must not even scan: wait before opening the range
+			if err := r.budget.waitNonZero(ctx); err != nil {
+				return
+			}
 			n, err := r.sendRange(ctx, shadow, hashRange)
 			if err == nil {
 				passBytes += n
@@ -315,6 +321,11 @@ func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log 
 			}
 			if ctx.Err() != nil {
 				return
+			}
+			if errors.Is(err, errBudgetPaused) {
+				// the range was given up so as not to hold it open while paused, it starts over once resumed
+				attempt = -1
+				continue
 			}
 			r.recordError(err)
 			delay := min(time.Second<<min(attempt, 5), replicationMaxRetryDelay)
@@ -368,9 +379,8 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 		return stream.Send(&pb.SnapshotChunk{HashRange: hashRange, Data: data, SourceAddress: source})
 	}}
 	maxVersion, _, err := r.s.cache.StreamSnapshot(ctx, hashRange, since.SinceTimestamp, w, badger.StreamOptions{
-		NumGoroutines:    1,
 		CompressionLevel: replicationCompressionLevel,
-		MaxBatchSize:     uint64(replicationMaxBatchSize),
+		BatchSize:        replicationBatchSize,
 		Wait:             r.budget.Wait,
 	})
 	if err != nil {
@@ -462,6 +472,21 @@ func (r *replicator) evaluate(ctx context.Context, shadow pb.NodeServiceClient, 
 	case !ready && wasReady:
 		log.Warnn("Replication no longer ready", logger.NewStringField("reasons", strings.Join(reasons, ", ")))
 	}
+}
+
+// passDelay is the pause before the next pass. It grows as the brake lowers the budget: an incremental pass scans
+// every table written since the last one even when it sends little, so the brake has to space passes out too.
+func (r *replicator) passDelay() time.Duration {
+	bytesPerSecond, _, _ := r.budget.current()
+	maxBytes := r.budget.cfg.max()
+	if bytesPerSecond <= 0 {
+		return maxPassDelay
+	}
+	if bytesPerSecond >= maxBytes {
+		return r.cfg.PauseBetweenPasses
+	}
+	delay := time.Duration(float64(r.cfg.PauseBetweenPasses) * float64(maxBytes) / float64(bytesPerSecond))
+	return min(delay, maxPassDelay)
 }
 
 func (r *replicator) update(f func(p *replicationProgress)) {
