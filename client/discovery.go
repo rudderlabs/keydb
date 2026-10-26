@@ -1,0 +1,325 @@
+package client
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/rudderlabs/rudder-go-kit/logger"
+	"github.com/rudderlabs/rudder-go-kit/stats"
+	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
+
+	"github.com/rudderlabs/keydb/internal/hash"
+	pb "github.com/rudderlabs/keydb/proto"
+)
+
+// addressesTimeout bounds each call made to learn the cluster's addresses
+const addressesTimeout = 5 * time.Second
+
+// nodeResponse is what Get and Put responses have in common
+type nodeResponse interface {
+	GetClusterSize() int64
+	GetNodesAddresses() []string
+	GetErrorCode() pb.ErrorCode
+}
+
+// ensureDiscovered learns the cluster's addresses through the seeds the first time it is called.
+// Data requests never go through a seed: with a Service as seed, they would reach random nodes.
+func (c *Client) ensureDiscovered(ctx context.Context) error {
+	if c.discovered.Load() {
+		return nil
+	}
+	c.discoverMu.Lock()
+	defer c.discoverMu.Unlock()
+	if c.discovered.Load() {
+		return nil
+	}
+
+	addresses, err := c.discover(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := c.applyAddresses(addresses); err != nil {
+		return fmt.Errorf("applying discovered addresses: %w", err)
+	}
+	c.discovered.Store(true)
+	return nil
+}
+
+// discover asks the seeds for the cluster's addresses, opening a fresh connection for every attempt so that a
+// seed behind a Service spreads the attempts across nodes. It retries with backoff unless retries are disabled.
+// When the seeds answer without a list, as nodes that predate discovery may, the seeds are the list.
+func (c *Client) discover(ctx context.Context) ([]string, error) {
+	nextBackoff := c.getNextBackoffFunc()
+	for {
+		var lastErr error
+		answered := false
+		for _, seed := range c.seeds {
+			addresses, err := c.askForAddresses(ctx, seed)
+			if err == nil && len(addresses) > 0 {
+				return addresses, nil
+			}
+			if err == nil || status.Code(err) == codes.Unimplemented {
+				answered = true
+				continue
+			}
+			lastErr = err
+		}
+		if answered {
+			return c.seeds, nil
+		}
+		if c.config.RetryPolicy.Disabled {
+			return nil, fmt.Errorf("discovering the cluster through %s: %w", strings.Join(c.seeds, ","), lastErr)
+		}
+		delay := nextBackoff()
+		c.logger.Warnn("Discovering the cluster",
+			logger.NewStringField("seeds", strings.Join(c.seeds, ",")),
+			logger.NewDurationField("retryDelay", delay),
+			obskit.Error(lastErr),
+		)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+}
+
+// askForAddresses asks the node at address for the cluster's addresses on a fresh connection.
+func (c *Client) askForAddresses(ctx context.Context, address string) ([]string, error) {
+	conn, err := grpc.NewClient(address, c.getGrpcDialOptions()...)
+	if err != nil {
+		return nil, fmt.Errorf("creating gRPC client for %s: %w", address, err)
+	}
+	defer func() { _ = conn.Close() }()
+	return askNodeForAddresses(ctx, pb.NewNodeServiceClient(conn))
+}
+
+func askNodeForAddresses(ctx context.Context, client pb.NodeServiceClient) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, addressesTimeout)
+	defer cancel()
+	info, err := client.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return info.NodesAddresses, nil
+}
+
+// lookupAddresses asks the seeds, then the nodes other than failingNode, for the cluster's current addresses.
+// It is used when a node stops answering, for example because it was replaced by another one.
+func (c *Client) lookupAddresses(ctx context.Context, failingNode int64) ([]string, error) {
+	var lastErr error
+	for _, seed := range c.seeds {
+		addresses, err := c.askForAddresses(ctx, seed)
+		if err == nil && len(addresses) > 0 {
+			return addresses, nil
+		}
+		lastErr = err
+	}
+
+	c.mu.RLock()
+	others := make([]*connectionPool, 0, len(c.pools))
+	for i, pool := range c.pools {
+		if int64(i) != failingNode {
+			others = append(others, pool)
+		}
+	}
+	c.mu.RUnlock()
+	for _, pool := range others {
+		client, _, _ := pool.getClient()
+		addresses, err := askNodeForAddresses(ctx, client)
+		if err == nil && len(addresses) > 0 {
+			return addresses, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no node returned any address")
+	}
+	return nil, lastErr
+}
+
+// applyAddresses adopts a new list of node addresses. Only the connection pools whose address changed are
+// replaced. It returns true when the cluster size changed, in which case keys must be hashed again.
+func (c *Client) applyAddresses(addresses []string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if slices.Equal(addresses, c.config.Addresses) && len(c.pools) == len(addresses) {
+		return false, nil
+	}
+
+	dialOpts := c.getGrpcDialOptions()
+	for i, addr := range addresses {
+		if i < len(c.config.Addresses) && c.config.Addresses[i] == addr {
+			if _, ok := c.pools[i]; ok {
+				continue
+			}
+		}
+		pool, err := newConnectionPool(addr, c.config.ConnectionPoolSize, dialOpts...)
+		if err != nil {
+			return false, fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
+		}
+		if old, ok := c.pools[i]; ok {
+			_ = old.close() // requests still using it fail and retry on the new pool
+		}
+		c.pools[i] = pool
+		if c.metrics.connectionOps[i] == nil {
+			c.metrics.connectionOps[i] = make(map[int]stats.Counter)
+			for j := range c.config.ConnectionPoolSize {
+				c.metrics.connectionOps[i][j] = c.stats.NewTaggedStat(
+					"keydb_client_connection_ops_total", stats.CountType, stats.Tags{
+						"node": strconv.Itoa(i),
+						"conn": strconv.Itoa(j),
+					},
+				)
+			}
+		}
+	}
+	for i := len(addresses); i < len(c.config.Addresses) || i < len(c.pools); i++ {
+		if pool, ok := c.pools[i]; ok {
+			_ = pool.close()
+			delete(c.pools, i)
+			delete(c.metrics.connectionOps, i)
+		}
+	}
+
+	oldClusterSize := c.clusterSize
+	newClusterSize := int64(len(addresses))
+	c.config.Addresses = slices.Clone(addresses)
+	c.clusterSize = newClusterSize
+	if newClusterSize != oldClusterSize {
+		c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
+	}
+
+	c.logger.Infon("Adopted new node addresses",
+		logger.NewIntField("oldClusterSize", oldClusterSize),
+		logger.NewIntField("newClusterSize", newClusterSize),
+		logger.NewStringField("nodesAddresses", strings.Join(addresses, ",")),
+	)
+	return newClusterSize != oldClusterSize, nil
+}
+
+// routing returns the hash and cluster size requests must use.
+func (c *Client) routing() (*hash.Hash, int64) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.hash, c.clusterSize
+}
+
+// nodeClient returns the next pooled connection to a node, counting the operation.
+func (c *Client) nodeClient(nodeID int64) (pb.NodeServiceClient, *grpc.ClientConn, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pool, ok := c.pools[int(nodeID)]
+	if !ok {
+		return nil, nil, false
+	}
+	client, conn, connID := pool.getClient()
+	if counter, ok := c.metrics.connectionOps[int(nodeID)][connID]; ok {
+		counter.Increment()
+	}
+	return client, conn, true
+}
+
+// callNode sends a request to a node until it succeeds, the context is done, or the cluster size changes.
+//   - A failed response carries the node's address list: when it differs from the client's, the client adopts it.
+//   - When the node doesn't answer for DeadNodeLookupAfter, the client asks other nodes for the current list.
+//   - Every retry takes the next pooled connection and waits for the backoff, without holding the client's lock.
+func callNode[R nodeResponse](
+	ctx context.Context, c *Client, nodeID, clusterSize int64, method string, retries stats.Counter,
+	call func(ctx context.Context, client pb.NodeServiceClient) (R, error),
+	succeeded func(R) bool,
+) (R, error) {
+	var (
+		zero         R
+		nextBackoff  = c.getNextBackoffFunc()
+		failingSince time.Time
+	)
+	for attempt := int64(1); ; attempt++ {
+		if attempt > 1 {
+			retries.Increment()
+		}
+		client, conn, ok := c.nodeClient(nodeID)
+		if !ok {
+			// this should never happen unless clusterSize is updated and the pools map isn't
+			// or if there is a bug in the hashing function
+			return zero, fmt.Errorf("no connection pool for node %d", nodeID)
+		}
+
+		resp, respErr := call(ctx, client)
+		if respErr == nil {
+			addresses := resp.GetNodesAddresses()
+			if resp.GetClusterSize() != clusterSize && len(addresses) > 0 {
+				return zero, &errClusterSizeChanged{nodesAddresses: addresses}
+			}
+			if succeeded(resp) {
+				return resp, nil
+			}
+			failingSince = time.Time{}
+			if len(addresses) > 0 {
+				sizeChanged, err := c.applyAddresses(addresses)
+				if err != nil {
+					return zero, err
+				}
+				if sizeChanged {
+					return zero, &errClusterSizeChanged{nodesAddresses: addresses}
+				}
+			}
+		} else if ctx.Err() == nil {
+			if failingSince.IsZero() {
+				failingSince = time.Now()
+			} else if time.Since(failingSince) >= c.config.DeadNodeLookupAfter {
+				failingSince = time.Now()
+				if addresses, err := c.lookupAddresses(ctx, nodeID); err == nil {
+					sizeChanged, err := c.applyAddresses(addresses)
+					if err != nil {
+						return zero, err
+					}
+					if sizeChanged {
+						return zero, &errClusterSizeChanged{nodesAddresses: addresses}
+					}
+				}
+			}
+		}
+
+		// If retry is disabled, return immediately after first attempt
+		if c.config.RetryPolicy.Disabled {
+			if respErr != nil {
+				return zero, fmt.Errorf("failed to %s keys from node %d: %w", method, nodeID, respErr)
+			}
+			return zero, fmt.Errorf("failed to %s keys from node %d with error code %s",
+				method, nodeID, resp.GetErrorCode().String())
+		}
+
+		retryDelay := nextBackoff()
+		fields := []logger.Field{
+			logger.NewIntField("nodeId", nodeID),
+			logger.NewIntField("attempt", attempt),
+			logger.NewDurationField("retryDelay", retryDelay),
+			logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
+			logger.NewStringField("connState", conn.GetState().String()),
+		}
+		if respErr != nil {
+			c.logger.Errorn(method+" keys from node", append(fields, obskit.Error(respErr))...)
+		} else {
+			c.logger.Warnn(method+" keys from node",
+				append(fields, obskit.Error(errors.New(resp.GetErrorCode().String())))...)
+		}
+
+		// Wait before retrying
+		select {
+		case <-ctx.Done():
+			return zero, ctx.Err()
+		case <-time.After(retryDelay):
+		}
+	}
+}

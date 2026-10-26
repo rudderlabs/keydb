@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -15,11 +16,11 @@ import (
 	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	kitsync "github.com/rudderlabs/rudder-go-kit/sync"
-	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 
 	"github.com/rudderlabs/keydb/internal/hash"
 	pb "github.com/rudderlabs/keydb/proto"
@@ -41,6 +42,8 @@ const (
 	DefaultGrpcMinConnectTimeout = 20 * time.Second
 
 	DefaultConnectionPoolSize = 10
+
+	DefaultDeadNodeLookupAfter = 5 * time.Second
 
 	// FeaturesHeader is the gRPC metadata key the client uses to tell nodes which client features it supports.
 	// Nodes treat Get and Put requests without it as coming from a client that predates node moves.
@@ -101,6 +104,10 @@ type Config struct {
 
 	// GrpcConfig defines the gRPC connection configuration
 	GrpcConfig GrpcConfig
+
+	// DeadNodeLookupAfter is how long a node may fail without answering before the client asks another node for
+	// the current list of addresses (0 means use default)
+	DeadNodeLookupAfter time.Duration
 }
 
 // Client is a client for the KeyDB service
@@ -116,8 +123,15 @@ type Client struct {
 	// pools is a map of node index to gRPC connection pool
 	pools map[int]*connectionPool
 
-	// mu protects pools, clusterSize and hash
+	// mu protects pools, clusterSize, hash, config.Addresses and metrics.connectionOps
 	mu sync.RWMutex
+
+	// seeds are the configured addresses, used to discover the cluster and to look it up again
+	seeds []string
+	// discovered is true once the client learnt the cluster's addresses
+	discovered atomic.Bool
+	// discoverMu serialises discovery
+	discoverMu sync.Mutex
 
 	logger logger.Logger
 
@@ -195,8 +209,14 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		config.ConnectionPoolSize = DefaultConnectionPoolSize
 	}
 
+	if config.DeadNodeLookupAfter == 0 {
+		config.DeadNodeLookupAfter = DefaultDeadNodeLookupAfter
+	}
+	config.Addresses = slices.Clone(config.Addresses)
+
 	clusterSize := int64(len(config.Addresses))
 	client := &Client{
+		seeds:       slices.Clone(config.Addresses),
 		config:      config,
 		pools:       make(map[int]*connectionPool),
 		clusterSize: clusterSize,
@@ -304,8 +324,11 @@ func (c *Client) ClusterSize() int {
 func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	defer c.metrics.getReqLatency.RecordDuration()()
 	c.metrics.getReqCount.Increment()
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+
+	if err := c.ensureDiscovered(ctx); err != nil {
+		c.metrics.getReqFailures.Increment()
+		return nil, err
+	}
 
 	// Create a map to store results
 	results := make(map[string]bool)
@@ -324,13 +347,15 @@ func (c *Client) get(
 ) (
 	[]bool, error,
 ) {
+	h, clusterSize := c.routing()
+
 	// Group keys by node
 	keysByNode := make(map[int64][]string)
 	for _, key := range keys {
 		if _, alreadyFetched := results[key]; alreadyFetched {
 			continue
 		}
-		nodeID := c.hash.GetNodeNumber(key)
+		nodeID := h.GetNodeNumber(key)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
@@ -343,89 +368,19 @@ func (c *Client) get(
 
 	for nodeID, nodeKeys := range keysByNode {
 		group.Go(func() error {
-			// Get the connection pool for this node
-			pool, ok := c.pools[int(nodeID)]
-			if !ok {
-				// this should never happen unless clusterSize is updated and the c.pools map isn't
-				// or if there is a bug in the hashing function
-				cancel()
-				return fmt.Errorf("no connection pool for node %d", nodeID)
-			}
-
-			// Get a connection from the pool (round-robin)
-			client, conn, connID := pool.getClient()
-			c.metrics.connectionOps[int(nodeID)][connID].Increment()
-
-			// Create the request
 			req := &pb.GetRequest{Keys: nodeKeys}
-
-			// Send the request with retries
-			var (
-				respErr     error
-				resp        *pb.GetResponse
-				nextBackoff = c.getNextBackoffFunc()
+			resp, err := callNode(gCtx, c, nodeID, clusterSize, "get", c.metrics.getReqRetries,
+				func(ctx context.Context, client pb.NodeServiceClient) (*pb.GetResponse, error) {
+					return client.Get(ctx, req)
+				},
+				func(resp *pb.GetResponse) bool { return resp.ErrorCode == pb.ErrorCode_NO_ERROR },
 			)
-			for attempt := int64(1); ; attempt++ {
-				// Increment retry counter (except for the first attempt)
-				if attempt > 1 {
-					c.metrics.getReqRetries.Increment()
-				}
-				resp, respErr = client.Get(gCtx, req)
-				if resp != nil && c.clusterSize != resp.ClusterSize {
-					hasClusterSizeChanged.Store(resp.NodesAddresses)
+			if err != nil {
+				if changed, ok := errors.AsType[*errClusterSizeChanged](err); ok {
+					hasClusterSizeChanged.Store(changed.nodesAddresses)
 					cancel()
-					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
-				if respErr == nil && resp != nil {
-					if resp.ErrorCode == pb.ErrorCode_NO_ERROR {
-						break // for internal errors, scaling or wrong code we retry
-					}
-				}
-
-				// If retry is disabled, return immediately after first attempt
-				if c.config.RetryPolicy.Disabled {
-					if respErr != nil {
-						return fmt.Errorf("failed to get keys from node %d: %w",
-							nodeID, respErr)
-					}
-					if resp != nil {
-						return fmt.Errorf("failed to get keys from node %d with error code %s",
-							nodeID, resp.ErrorCode.String())
-					}
-					return fmt.Errorf("critical: failed to get keys from node %d: "+
-						"both error and response are nil", nodeID)
-				}
-
-				retryDelay := nextBackoff()
-
-				if respErr != nil {
-					c.logger.Errorn("get keys from node",
-						logger.NewIntField("nodeId", nodeID),
-						logger.NewIntField("attempt", attempt),
-						logger.NewDurationField("retryDelay", retryDelay),
-						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
-						logger.NewStringField("connState", conn.GetState().String()),
-						obskit.Error(respErr))
-				} else if resp != nil {
-					c.logger.Warnn("get keys from node",
-						logger.NewIntField("nodeId", nodeID),
-						logger.NewIntField("attempt", attempt),
-						logger.NewDurationField("retryDelay", retryDelay),
-						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
-						logger.NewStringField("connState", conn.GetState().String()),
-						obskit.Error(errors.New(resp.ErrorCode.String())))
-				} else {
-					cancel()
-					return fmt.Errorf("critical: failed to get keys from node %d: "+
-						"both error and response are nil", nodeID)
-				}
-
-				// Wait before retrying
-				select {
-				case <-gCtx.Done():
-					return gCtx.Err()
-				case <-time.After(retryDelay):
-				}
+				return err
 			}
 
 			// Store results
@@ -442,7 +397,7 @@ func (c *Client) get(
 	if err := group.Wait(); err != nil {
 		nodesAddresses, ok := hasClusterSizeChanged.Load().([]string)
 		if ok && len(nodesAddresses) > 0 {
-			if err = c.updateClusterSize(nodesAddresses); err != nil {
+			if _, err = c.applyAddresses(nodesAddresses); err != nil {
 				return nil, fmt.Errorf("failed to update cluster size: %w", err)
 			}
 			return c.get(ctx, keys, results, resultsMu)
@@ -469,8 +424,11 @@ func (c *Client) get(
 func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) error {
 	defer c.metrics.putReqLatency.RecordDuration()()
 	c.metrics.putReqCount.Increment()
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+
+	if err := c.ensureDiscovered(ctx); err != nil {
+		c.metrics.putReqFailures.Increment()
+		return err
+	}
 
 	err := c.put(ctx, keys, ttl)
 	if err != nil {
@@ -481,10 +439,12 @@ func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) erro
 }
 
 func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) error {
+	h, clusterSize := c.routing()
+
 	// Group keys by node
 	keysByNode := make(map[int64][]string)
 	for _, key := range keys {
-		nodeID := c.hash.GetNodeNumber(key)
+		nodeID := h.GetNodeNumber(key)
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
@@ -496,91 +456,20 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 	group, gCtx := kitsync.NewEagerGroup(cancellableCtx, len(keysByNode))
 	for nodeID, nodeKeys := range keysByNode {
 		group.Go(func() error {
-			// Get the connection pool for this node
-			pool, ok := c.pools[int(nodeID)]
-			if !ok {
-				// this should never happen unless clusterSize is updated and the c.pools map isn't
-				// or if there is a bug in the hashing function
-				cancel()
-				return fmt.Errorf("no connection pool for node %d", nodeID)
-			}
-
-			// Get a connection from the pool (round-robin)
-			client, conn, connID := pool.getClient()
-			c.metrics.connectionOps[int(nodeID)][connID].Increment()
-
-			// Create the request
 			req := &pb.PutRequest{Keys: nodeKeys, TtlSeconds: int64(ttl.Seconds())}
-
-			// Send the request with retries
-			var (
-				respErr     error
-				resp        *pb.PutResponse
-				nextBackoff = c.getNextBackoffFunc()
+			_, err := callNode(gCtx, c, nodeID, clusterSize, "put", c.metrics.putReqRetries,
+				func(ctx context.Context, client pb.NodeServiceClient) (*pb.PutResponse, error) {
+					return client.Put(ctx, req)
+				},
+				func(resp *pb.PutResponse) bool { return resp.Success && resp.ErrorCode == pb.ErrorCode_NO_ERROR },
 			)
-			for attempt := int64(1); ; attempt++ {
-				// Increment retry counter (except for the first attempt)
-				if attempt > 1 {
-					c.metrics.putReqRetries.Increment()
-				}
-				resp, respErr = client.Put(gCtx, req)
-				if resp != nil && c.clusterSize != resp.ClusterSize {
-					hasClusterSizeChanged.Store(resp.NodesAddresses)
+			if err != nil {
+				if changed, ok := errors.AsType[*errClusterSizeChanged](err); ok {
+					hasClusterSizeChanged.Store(changed.nodesAddresses)
 					cancel()
-					return &errClusterSizeChanged{nodesAddresses: resp.NodesAddresses}
 				}
-				if respErr == nil && resp != nil {
-					if resp.Success && resp.ErrorCode == pb.ErrorCode_NO_ERROR {
-						break // for internal errors, scaling or wrong code we retry
-					}
-				}
-
-				// If retry is disabled, return immediately after first attempt
-				if c.config.RetryPolicy.Disabled {
-					if respErr != nil {
-						return fmt.Errorf("failed to put keys from node %d: %w",
-							nodeID, respErr)
-					}
-					if resp != nil {
-						return fmt.Errorf("failed to put keys from node %d with error code %s",
-							nodeID, resp.ErrorCode.String())
-					}
-					return fmt.Errorf("critical: failed to put keys from node %d: "+
-						"both error and response are nil", nodeID)
-				}
-
-				retryDelay := nextBackoff()
-
-				if respErr != nil {
-					c.logger.Errorn("put keys in node",
-						logger.NewIntField("nodeID", nodeID),
-						logger.NewIntField("attempt", attempt),
-						logger.NewDurationField("retryDelay", retryDelay),
-						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
-						logger.NewStringField("connState", conn.GetState().String()),
-						obskit.Error(respErr))
-				} else if resp != nil {
-					c.logger.Warnn("put keys in node",
-						logger.NewIntField("nodeID", nodeID),
-						logger.NewIntField("attempt", attempt),
-						logger.NewDurationField("retryDelay", retryDelay),
-						logger.NewStringField("canonicalTarget", conn.CanonicalTarget()),
-						logger.NewStringField("connState", conn.GetState().String()),
-						obskit.Error(errors.New(resp.ErrorCode.String())))
-				} else {
-					cancel()
-					return fmt.Errorf("critical: failed to put keys from node %d: "+
-						"both error and response are nil", nodeID)
-				}
-
-				// Wait before retrying
-				select {
-				case <-gCtx.Done():
-					return gCtx.Err()
-				case <-time.After(retryDelay):
-				}
+				return err
 			}
-
 			return nil
 		})
 	}
@@ -588,82 +477,12 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 	if err := group.Wait(); err != nil {
 		nodesAddresses, ok := hasClusterSizeChanged.Load().([]string)
 		if ok && len(nodesAddresses) > 0 {
-			if err = c.updateClusterSize(nodesAddresses); err != nil {
+			if _, err = c.applyAddresses(nodesAddresses); err != nil {
 				return fmt.Errorf("failed to update cluster size: %w", err)
 			}
 			return c.put(ctx, keys, ttl)
 		}
 		return err
-	}
-
-	return nil
-}
-
-// updateClusterSize updates the cluster size in a race-condition safe manner.
-// It takes a new cluster size and the current keys being processed.
-// It returns a slice of keys that need to be fetched again.
-func (c *Client) updateClusterSize(nodesAddresses []string) error {
-	// Release read lock and acquire write lock
-	c.mu.RUnlock()
-	c.mu.Lock()
-	defer func() {
-		// Release write lock and reacquire read lock
-		c.mu.Unlock()
-		c.mu.RLock()
-	}()
-
-	newClusterSize := int64(len(nodesAddresses))
-
-	// Check if cluster size has already been updated by someone else
-	if c.clusterSize == newClusterSize {
-		return nil // No need to update or refetch
-	}
-
-	c.logger.Infon("Detected new cluster size",
-		logger.NewIntField("oldClusterSize", c.clusterSize),
-		logger.NewIntField("newClusterSize", newClusterSize),
-		logger.NewStringField("nodesAddresses", fmt.Sprintf("%+v", nodesAddresses)),
-	)
-
-	c.config.Addresses = nodesAddresses
-	oldClusterSize := c.clusterSize
-	c.clusterSize = newClusterSize
-
-	// Update hash instance with new cluster size
-	c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
-
-	// If cluster is smaller, close connection pools that are not needed
-	if newClusterSize < oldClusterSize {
-		for i := int(newClusterSize); i < int(oldClusterSize); i++ {
-			if pool, ok := c.pools[i]; ok {
-				_ = pool.close() // Ignore errors during close
-				delete(c.pools, i)
-				delete(c.metrics.connectionOps, i)
-			}
-		}
-	} else { // we get here if newClusterSize > oldClusterSize
-		// The cluster is bigger, create new connection pools
-		dialOpts := c.getGrpcDialOptions()
-		for i := int(oldClusterSize); i < int(newClusterSize); i++ {
-			addr := nodesAddresses[i]
-			pool, err := newConnectionPool(addr, c.config.ConnectionPoolSize, dialOpts...)
-			if err != nil {
-				return fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
-			}
-
-			c.pools[i] = pool
-			if c.metrics.connectionOps[i] == nil {
-				c.metrics.connectionOps[i] = make(map[int]stats.Counter)
-				for j := range c.config.ConnectionPoolSize {
-					c.metrics.connectionOps[i][j] = c.stats.NewTaggedStat(
-						"keydb_client_connection_ops_total", stats.CountType, stats.Tags{
-							"node": strconv.Itoa(i),
-							"conn": strconv.Itoa(j),
-						},
-					)
-				}
-			}
-		}
 	}
 
 	return nil
@@ -713,6 +532,14 @@ func (c *Client) getGrpcDialOptions() []grpc.DialOption {
 		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "tcp", addr)
+		}),
+		// tells the nodes this client discovers the cluster and follows moved nodes
+		grpc.WithUnaryInterceptor(func(
+			ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker,
+			opts ...grpc.CallOption,
+		) error {
+			ctx = metadata.AppendToOutgoingContext(ctx, FeaturesHeader, FeatureDiscovery)
+			return invoker(ctx, method, req, reply, cc, opts...)
 		}),
 	}
 }
@@ -766,7 +593,6 @@ func (p *connectionPool) close() error {
 			lastErr = fmt.Errorf("closing connection %d/%d: %w", i+1, len(p.connections), err)
 		}
 	}
-	p.connections = nil
-	p.clients = nil
+	// the slices are kept: a request that picked this pool before it was replaced fails and retries on the new one
 	return lastErr
 }

@@ -189,10 +189,11 @@ func TestClient_Put(t *testing.T) {
 // mockNodeServiceServer implements the NodeServiceServer interface for testing
 type mockNodeServiceServer struct {
 	proto.UnimplementedNodeServiceServer
-	getFunc        func(context.Context, *proto.GetRequest) (*proto.GetResponse, error)
-	putFunc        func(context.Context, *proto.PutRequest) (*proto.PutResponse, error)
-	clusterSize    int64
-	nodesAddresses []string
+	getFunc         func(context.Context, *proto.GetRequest) (*proto.GetResponse, error)
+	putFunc         func(context.Context, *proto.PutRequest) (*proto.PutResponse, error)
+	getNodeInfoFunc func(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error)
+	clusterSize     int64
+	nodesAddresses  []string
 }
 
 func (m *mockNodeServiceServer) Get(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
@@ -231,6 +232,9 @@ func (m *mockNodeServiceServer) Put(ctx context.Context, req *proto.PutRequest) 
 func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *proto.GetNodeInfoRequest) (
 	*proto.GetNodeInfoResponse, error,
 ) {
+	if m.getNodeInfoFunc != nil {
+		return m.getNodeInfoFunc(ctx, req)
+	}
 	return &proto.GetNodeInfoResponse{}, nil
 }
 
