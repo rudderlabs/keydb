@@ -33,6 +33,9 @@ import (
 const (
 	defaultCompressionLevel = zstd.DefaultCompression
 
+	// internalHashRange is the hash range the node reserves for its internal keys, like since markers
+	internalHashRange = int64(-1)
+
 	// maxTxnMarkerSize is the length of the largest commit timestamp, a uint64, as a decimal string.
 	// Badger stores it as the value of each transaction finish marker.
 	maxTxnMarkerSize = 20
@@ -509,6 +512,31 @@ func (c *Cache) LoadSnapshot(_ context.Context, reader io.Reader) error {
 	}
 
 	return nil
+}
+
+// HasData returns true when the cache holds at least one key outside the internal keys
+func (c *Cache) HasData() (bool, error) {
+	internalPrefix := []byte(getKeyPrefix(internalHashRange))
+	var hasData bool
+	err := c.cache.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = []byte("hr")
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			if !bytes.HasPrefix(it.Item().Key(), internalPrefix) {
+				hasData = true
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("iterating keys: %w", err)
+	}
+	return hasData, nil
 }
 
 // Levels returns information about all LSM tree levels and true if L0 tables count is high enough to stall

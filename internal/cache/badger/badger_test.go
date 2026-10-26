@@ -441,3 +441,25 @@ func TestPurgeValueLog(t *testing.T) {
 		require.Len(t, remaining, len(leaked)+1, "the leaked value log files and the one badger creates on open")
 	})
 }
+
+func TestHasData(t *testing.T) {
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	bdb, err := New(conf, logger.NOP)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, bdb.Close()) }()
+
+	hasData, err := bdb.HasData()
+	require.NoError(t, err)
+	require.False(t, hasData, "an empty cache has no data")
+
+	require.NoError(t, bdb.PutValue("_marker", internalHashRange, []byte("x"), 0))
+	hasData, err = bdb.HasData()
+	require.NoError(t, err)
+	require.False(t, hasData, "internal keys are not data")
+
+	require.NoError(t, bdb.Put(map[int64][]string{3: {"key1"}}, time.Hour))
+	hasData, err = bdb.HasData()
+	require.NoError(t, err)
+	require.True(t, hasData)
+}
