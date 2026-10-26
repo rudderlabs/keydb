@@ -41,6 +41,13 @@ const (
 	DefaultGrpcMinConnectTimeout = 20 * time.Second
 
 	DefaultConnectionPoolSize = 10
+
+	// FeaturesHeader is the gRPC metadata key the client uses to tell nodes which client features it supports.
+	// Nodes treat Get and Put requests without it as coming from a client that predates node moves.
+	FeaturesHeader = "keydb-client-features"
+	// FeatureDiscovery means the client discovers the cluster through a seed, adopts address lists from failed
+	// responses and looks the list up again when a node is gone.
+	FeatureDiscovery = "discovery"
 )
 
 type errClusterSizeChanged struct {

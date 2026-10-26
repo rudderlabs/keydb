@@ -71,6 +71,13 @@ enum ErrorCode {
   WRONG_NODE = 1; // Key should be handled by a different node
   SCALING = 2; // There is a scaling operation in progress, the client should retry with an exponential backoff
   INTERNAL_ERROR = 3;
+  NOT_READY = 4; // The node is a shadow that is still being filled, the client should retry with an exponential backoff
+}
+
+// NodeRole tells whether a node serves traffic or is a shadow being filled before replacing an active node
+enum NodeRole {
+  ACTIVE = 0; // The node serves reads and writes
+  SHADOW = 1; // The node only receives snapshots from the active node it is going to replace
 }
 
 // GetNodeInfoRequest to retrieve information about a node
@@ -85,6 +92,9 @@ message GetNodeInfoResponse {
   repeated string nodesAddresses = 3; // When the cluster_size changes the client can use this variable to connect to the new nodes
   repeated int64 hash_ranges = 4; // Hash ranges handled by this node
   int64 last_snapshot_timestamp = 5; // Unix timestamp of the last snapshot
+  NodeRole role = 6; // Whether the node is active or a shadow
+  bool all_ranges_synced = 7; // True when the node holds a since marker for every hash range it owns
+  int64 last_legacy_client_request_unix = 8; // Unix timestamp of the last Get/Put without the client features header
 }
 
 // LoadSnapshotsRequest initiates loading snapshots from cloud storage
@@ -141,6 +151,7 @@ message SnapshotChunk {
   bytes data = 2;                  // Chunk of snapshot data
   bool is_last = 3;                // Whether this is the final chunk
   uint64 timestamp = 4;            // Snapshot timestamp (for tracking)
+  string source_address = 5;       // Advertised address of the sending node, empty for senders that predate it
 }
 
 // ReceiveSnapshotResponse contains the result of receiving a streamed snapshot
