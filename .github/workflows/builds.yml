@@ -15,31 +15,6 @@ concurrency:
 permissions: {}
 
 jobs:
-  # DockerHub builds
-  keydb-dockerhub:
-    permissions:
-      contents: read # actions/checkout in the called workflow
-      id-token: write # cosign keyless signing in the called workflow
-    uses: ./.github/workflows/docker-build-dockerhub.yml
-    with:
-      image_name: rudderstack/rudder-keydb
-      dockerfile: Dockerfile
-    secrets:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-
-  keydb-scaler-dockerhub:
-    permissions:
-      contents: read # actions/checkout in the called workflow
-      id-token: write # cosign keyless signing in the called workflow
-    uses: ./.github/workflows/docker-build-dockerhub.yml
-    with:
-      image_name: rudderstack/rudder-keydb-scaler
-      dockerfile: Dockerfile-scaler
-    secrets:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-
   # ECR builds
   keydb-ecr:
     permissions:

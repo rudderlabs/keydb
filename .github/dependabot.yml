@@ -23,10 +23,6 @@ updates:
       default-days: 7
       exclude:
         - "rudderlabs/*"
-    ignore:
-      # build-scan-push-action v2.x drops the cosign signing that the Docker Hub workflow relies on.
-      - dependency-name: "rudderlabs/build-scan-push-action"
-        update-types: ["version-update:semver-major"]
     groups:
       actions-deps:
         patterns:
