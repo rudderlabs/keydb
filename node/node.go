@@ -151,6 +151,12 @@ type Cache interface {
 	// HasData returns true when the cache holds at least one key outside the internal keys
 	HasData() (bool, error)
 
+	// StreamSnapshot writes the entries of one hash range with a version above since to w without building the
+	// range in memory, and returns the highest version written and whether anything was written
+	StreamSnapshot(
+		ctx context.Context, hashRange int64, since uint64, w io.Writer, opts badger.StreamOptions,
+	) (uint64, bool, error)
+
 	// RunGarbageCollection is designed to do GC while the cache is online
 	RunGarbageCollection()
 

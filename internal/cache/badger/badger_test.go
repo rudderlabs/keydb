@@ -463,3 +463,103 @@ func TestHasData(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, hasData)
 }
+
+func newStreamTestCache(t *testing.T, compress bool) *Cache {
+	t.Helper()
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	conf.Set("BadgerDB.Dedup.Compress", compress)
+	bdb, err := New(conf, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, bdb.Close()) })
+	return bdb
+}
+
+func existsIn(t *testing.T, c *Cache, hashRange int64, keys ...string) []bool {
+	t.Helper()
+	indexes := make(map[string]int, len(keys))
+	for i, k := range keys {
+		indexes[k] = i
+	}
+	exists, err := c.Get(map[int64][]string{hashRange: keys}, indexes)
+	require.NoError(t, err)
+	return exists
+}
+
+func TestStreamSnapshotRoundTrip(t *testing.T) {
+	for _, compress := range []bool{false, true} {
+		t.Run("compress="+strconv.FormatBool(compress), func(t *testing.T) {
+			source := newStreamTestCache(t, compress)
+			require.NoError(t, source.Put(map[int64][]string{0: {"k1", "k2"}, 1: {"other"}}, time.Hour))
+			require.NoError(t, source.Put(map[int64][]string{0: {"expired"}}, time.Second))
+			time.Sleep(2 * time.Second) // let "expired" expire
+
+			var buf bytes.Buffer
+			maxVersion, hasData, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
+				NumGoroutines: 1, CompressionLevel: 1, MaxBatchSize: 1 << 20,
+			})
+			require.NoError(t, err)
+			require.True(t, hasData)
+			require.Positive(t, maxVersion)
+
+			destination := newStreamTestCache(t, compress)
+			require.NoError(t, destination.LoadSnapshot(context.Background(), &buf))
+			require.Equal(t, []bool{true, true, false}, existsIn(t, destination, 0, "k1", "k2", "expired"))
+			require.Equal(t, []bool{false}, existsIn(t, destination, 1, "other"), "other ranges are not streamed")
+		})
+	}
+}
+
+func TestStreamSnapshotWaitCalled(t *testing.T) {
+	source := newStreamTestCache(t, false)
+	keys := make([]string, 1000)
+	for i := range keys {
+		keys[i] = "key-" + strconv.Itoa(i)
+	}
+	require.NoError(t, source.Put(map[int64][]string{0: keys}, time.Hour))
+
+	var buf bytes.Buffer
+	var waited int
+	_, _, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
+		Wait: func(_ context.Context, n int) error {
+			waited += n
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Positive(t, waited)
+	require.Equal(t, buf.Len(), waited, "every byte written must go through the budget")
+
+	t.Run("a wait error stops the stream", func(t *testing.T) {
+		waitErr := errors.New("paused for good")
+		_, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
+			Wait: func(context.Context, int) error { return waitErr },
+		})
+		require.ErrorIs(t, err, waitErr)
+	})
+}
+
+func TestStreamSnapshotSince(t *testing.T) {
+	source := newStreamTestCache(t, true)
+	require.NoError(t, source.Put(map[int64][]string{0: {"old"}}, time.Hour))
+	since, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, source.Put(map[int64][]string{0: {"new"}}, time.Hour))
+	var buf bytes.Buffer
+	maxVersion, hasData, err := source.StreamSnapshot(context.Background(), 0, since, &buf, StreamOptions{})
+	require.NoError(t, err)
+	require.True(t, hasData)
+	require.Greater(t, maxVersion, since)
+
+	destination := newStreamTestCache(t, true)
+	require.NoError(t, destination.LoadSnapshot(context.Background(), &buf))
+	require.Equal(t, []bool{false, true}, existsIn(t, destination, 0, "old", "new"))
+
+	t.Run("nothing new", func(t *testing.T) {
+		var buf bytes.Buffer
+		_, hasData, err := source.StreamSnapshot(context.Background(), 0, maxVersion, &buf, StreamOptions{})
+		require.NoError(t, err)
+		require.False(t, hasData)
+	})
+}
