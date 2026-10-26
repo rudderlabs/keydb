@@ -145,6 +145,11 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	degradedNodes := conf.GetReloadableStringVar("", degradedNodesConfKey)
 	// shadowNodeAddresses is reloadable so that a shadow becomes active without a restart when a move is completed
 	shadowNodeAddresses := conf.GetReloadableStringVar("", shadowNodeAddressesConfKey)
+	// the replication budget can be capped or paused at runtime, without restarting the copy
+	replicationMaxBytesPerSecond := conf.GetReloadableInt64Var(
+		node.DefaultReplicationMaxBytesPerSecond, 1, "replication.maxBytesPerSecond",
+	)
+	replicationPaused := conf.GetReloadableBoolVar(false, "replication.paused")
 
 	nodeConfig := node.Config{
 		NodeID:          nodeID,
@@ -193,6 +198,14 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 				shadows[i] = strings.TrimSpace(shadows[i])
 			}
 			return shadows
+		},
+		Replication: node.ReplicationConfig{
+			MaxBytesPerSecond:       replicationMaxBytesPerSecond.Load,
+			Paused:                  replicationPaused.Load,
+			PauseBetweenPasses:      conf.GetDurationVar(5, time.Second, "replication.pauseBetweenPasses"),
+			GapThreshold:            conf.GetDurationVar(60, time.Second, "replication.gapThreshold"),
+			LegacyClientQuietPeriod: conf.GetDurationVar(15, time.Minute, "replication.legacyClientQuietPeriod"),
+			BrakeInterval:           conf.GetDurationVar(5, time.Second, "replication.brakeInterval"),
 		},
 	}
 

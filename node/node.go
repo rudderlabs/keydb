@@ -95,6 +95,15 @@ type Service struct {
 	// lastLegacyClientRequest is the unix time of the last Get or Put without the client features header
 	lastLegacyClientRequest atomic.Int64
 
+	// replication fills this node's shadow when it has one
+	replication *replicator
+	// replicating is true while a replication pass is in progress, garbage collection skips its ticks meanwhile
+	replicating atomic.Bool
+	// latency tracks the Get and Put latency the replication brake compares against its baseline
+	latency latencyTracker
+
+	closeOnce sync.Once
+
 	metrics struct {
 		legacyClientRequests        stats.Counter
 		shadowLeftoverDisk          stats.Counter
@@ -294,18 +303,23 @@ func NewService(
 	service.waitGroup.Add(1)
 	go service.recordLevelMetrics(ctx)
 
+	service.replication = newReplicator(service)
+	service.waitGroup.Go(func() { service.replication.run(ctx) })
+
 	return service, nil
 }
 
 func (s *Service) Close() {
-	s.cancel()
-	s.waitGroup.Wait()
-	// wait for the handlers still running before closing the cache under them
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.cache.Close(); err != nil {
-		s.logger.Errorn("Error closing cache", obskit.Error(err))
-	}
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.waitGroup.Wait()
+		// wait for the handlers still running before closing the cache under them
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.cache.Close(); err != nil {
+			s.logger.Errorn("Error closing cache", obskit.Error(err))
+		}
+	})
 }
 
 func (s *Service) garbageCollection(ctx context.Context) {
@@ -319,6 +333,11 @@ func (s *Service) garbageCollection(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if s.replicating.Load() {
+				// the write lock would queue behind a long range send and block every Get and Put meanwhile
+				s.logger.Debugn("Skipping garbage collection while a replication pass is in progress")
+				continue
+			}
 			func() {
 				s.mu.Lock() // TODO this might affect scaling operations
 				defer s.mu.Unlock()
@@ -679,6 +698,7 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...int64
 
 // Get implements the Get RPC method
 func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
+	defer func(start time.Time) { s.latency.observe(time.Since(start)) }(time.Now())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -738,6 +758,7 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 
 // Put implements the Put RPC method
 func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
+	defer func(start time.Time) { s.latency.observe(time.Since(start)) }(time.Now())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

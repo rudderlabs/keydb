@@ -53,6 +53,9 @@ type Config struct {
 	// ShadowAddresses returns, per node index, the address of the shadow being filled for that node, or an empty
 	// string when the node has no shadow. The function allows the list to be updated dynamically via configuration.
 	ShadowAddresses func() []string
+
+	// Replication configures how this node fills its shadow when it has one
+	Replication ReplicationConfig
 }
 
 func (c *Config) getClusterSize() int64 {
