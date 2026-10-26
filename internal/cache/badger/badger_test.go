@@ -417,3 +417,79 @@ func copyDir(t *testing.T, src string) string {
 	}
 	return dst
 }
+
+func TestPurgeValueLog(t *testing.T) {
+	// leakValueLog writes keys with a threshold that sends the transaction finish markers to the value log,
+	// reopening the database a few times so that the markers span several value log files.
+	leakValueLog := func(t *testing.T, dir string) ([]string, map[string]int) {
+		t.Helper()
+		fastForwardCommitTs(t, dir)
+		var (
+			keys    []string
+			indexes = make(map[string]int)
+		)
+		for range 3 {
+			conf := config.New()
+			conf.Set("BadgerDB.Dedup.Path", dir)
+			conf.Set("BadgerDB.Dedup.valueThreshold", 10)
+			bdb, err := New(conf, logger.NOP)
+			require.NoError(t, err)
+			for range 10 {
+				key := "key" + strconv.Itoa(len(keys))
+				indexes[key] = len(keys)
+				keys = append(keys, key)
+				require.NoError(t, bdb.Put(map[int64][]string{0: {key}}, time.Hour))
+			}
+			require.NoError(t, bdb.Close())
+		}
+		return keys, indexes
+	}
+
+	t.Run("purges all but the last value log file", func(t *testing.T) {
+		dir := t.TempDir()
+		keys, indexes := leakValueLog(t, dir)
+		leaked, err := valueLogFiles(dir)
+		require.NoError(t, err)
+		require.Greater(t, len(leaked), 2)
+		last := leaked[len(leaked)-1].Name()
+
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", dir)
+		conf.Set("BadgerDB.Dedup.purgeValueLog", true)
+		bdb, err := New(conf, logger.NOP)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, bdb.Close())
+		})
+
+		remaining, err := valueLogFiles(dir)
+		require.NoError(t, err)
+		require.Len(t, remaining, 2, "the last value log file and the one badger creates on open")
+		require.Equal(t, last, remaining[0].Name())
+
+		exists, err := bdb.Get(map[int64][]string{0: keys}, indexes)
+		require.NoError(t, err)
+		require.NotContains(t, exists, false)
+	})
+
+	t.Run("skips the purge with a small value threshold", func(t *testing.T) {
+		dir := t.TempDir()
+		leakValueLog(t, dir)
+		leaked, err := valueLogFiles(dir)
+		require.NoError(t, err)
+
+		conf := config.New()
+		conf.Set("BadgerDB.Dedup.Path", dir)
+		conf.Set("BadgerDB.Dedup.valueThreshold", 10)
+		conf.Set("BadgerDB.Dedup.purgeValueLog", true)
+		bdb, err := New(conf, logger.NOP)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, bdb.Close())
+		})
+
+		remaining, err := valueLogFiles(dir)
+		require.NoError(t, err)
+		require.Len(t, remaining, len(leaked)+1, "the leaked value log files and the one badger creates on open")
+	})
+}

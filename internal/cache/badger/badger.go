@@ -2,12 +2,17 @@ package badger
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +32,10 @@ import (
 
 const (
 	defaultCompressionLevel = zstd.DefaultCompression
+
+	// maxTxnMarkerSize is the length of the largest commit timestamp, a uint64, as a decimal string.
+	// Badger stores it as the value of each transaction finish marker.
+	maxTxnMarkerSize = 20
 )
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
@@ -121,6 +130,12 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 		)
 	}
 
+	if conf.GetBoolVar(false, "BadgerDB.Dedup.purgeValueLog") {
+		if err := purgeValueLog(opts.ValueDir, opts.ValueThreshold, log); err != nil {
+			return nil, fmt.Errorf("purging value log: %w", err)
+		}
+	}
+
 	log.Infon("Starting BadgerDB", logger.NewStringField("path", path))
 
 	db, err := badger.Open(opts)
@@ -139,6 +154,86 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 		jitterEnabled:           conf.GetBoolVar(false, "cache.ttlJitter.enabled"),
 		jitterDuration:          conf.GetDurationVar(1, time.Hour, "cache.ttlJitter.duration"),
 	}, nil
+}
+
+// purgeValueLog deletes every value log file in dir except the one with the highest file id, which
+// badger expects to find on open. It must run before the database is opened.
+//
+// keydb only stores nil and 8-byte values, which badger keeps in the LSM tree, so the value log holds
+// nothing but transaction finish markers. A value pointing to a deleted file would read back empty:
+// badger logs a missing value log file instead of returning an error.
+// With a threshold at or below maxTxnMarkerSize badger keeps writing markers to the value log, so the
+// purge is skipped.
+func purgeValueLog(dir string, valueThreshold int64, log logger.Logger) error {
+	if valueThreshold <= maxTxnMarkerSize {
+		log.Warnn("Skipping value log purge, the value threshold is too small",
+			logger.NewIntField("valueThreshold", valueThreshold),
+			logger.NewIntField("minValueThreshold", maxTxnMarkerSize+1),
+		)
+		return nil
+	}
+
+	start := time.Now()
+	files, err := valueLogFiles(dir)
+	if err != nil {
+		return err
+	}
+	if len(files) < 2 {
+		return nil
+	}
+	purge := files[:len(files)-1]
+	log.Infon("Purging value log", logger.NewIntField("files", int64(len(purge))))
+
+	var purgedBytes int64
+	for _, f := range purge {
+		info, err := f.Info()
+		if err != nil {
+			return fmt.Errorf("getting size of %s: %w", f.Name(), err)
+		}
+		if err := os.Remove(filepath.Join(dir, f.Name())); err != nil {
+			return fmt.Errorf("removing %s: %w", f.Name(), err)
+		}
+		purgedBytes += info.Size()
+	}
+	log.Infon("Purged value log",
+		logger.NewIntField("files", int64(len(purge))),
+		logger.NewIntField("bytes", purgedBytes),
+		logger.NewDurationField("duration", time.Since(start)),
+	)
+	return nil
+}
+
+// valueLogFiles returns the value log files in dir, ordered by file id.
+func valueLogFiles(dir string) ([]fs.DirEntry, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", dir, err)
+	}
+	type valueLogFile struct {
+		fid   uint64
+		entry fs.DirEntry
+	}
+	var vlogs []valueLogFile
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), ".vlog")
+		if !ok || e.IsDir() {
+			continue
+		}
+		fid, err := strconv.ParseUint(name, 10, 32)
+		if err != nil {
+			continue
+		}
+		vlogs = append(vlogs, valueLogFile{fid: fid, entry: e})
+	}
+	slices.SortFunc(vlogs, func(a, b valueLogFile) int { return cmp.Compare(a.fid, b.fid) })
+	files := make([]fs.DirEntry, len(vlogs))
+	for i, v := range vlogs {
+		files[i] = v.entry
+	}
+	return files, nil
 }
 
 // Get returns the values associated with the keys and an error if the operation failed
