@@ -563,3 +563,30 @@ func TestStreamSnapshotSince(t *testing.T) {
 		require.False(t, hasData)
 	})
 }
+
+func TestStreamSnapshotBatchesBounded(t *testing.T) {
+	// a range bigger than badger's 16 MB produce buffer
+	source := newStreamTestCache(t, false)
+	keys := make([]string, 50_000)
+	for b := range 12 {
+		for i := range keys {
+			keys[i] = "a-reasonably-long-key-" + strconv.Itoa(b) + "-" + strconv.Itoa(i)
+		}
+		require.NoError(t, source.Put(map[int64][]string{0: keys}, time.Hour))
+	}
+
+	var largest, total int
+	_, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
+		MaxBatchSize: 4 << 20,
+		Wait: func(_ context.Context, n int) error {
+			largest = max(largest, n)
+			total += n
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Logf("streamed %d bytes, largest batch %d bytes", total, largest)
+	require.Greater(t, total, 20<<20)
+	require.Less(t, largest, total/2, "the range must be streamed in batches, never held whole in memory")
+	require.LessOrEqual(t, largest, 20<<20, "a batch is bounded by badger's produce buffer, not by the range size")
+}
