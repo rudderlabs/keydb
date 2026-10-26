@@ -202,3 +202,44 @@ func TestShadowSourceClearedOnActivation(t *testing.T) {
 		return err == nil && !found
 	}, 5*time.Second, 10*time.Millisecond, "an active node must forget the source it was filled from")
 }
+
+func TestShadowGetNodeInfoDuringReceive(t *testing.T) {
+	ctx := context.Background()
+	address := freeAddress(t)
+	shadows := &shadowList{}
+	shadows.set(address)
+	s := newTestService(ctx, t, Config{
+		NodeID:            0,
+		Addresses:         staticList("active:1"),
+		AdvertisedAddress: address,
+		ShadowAddresses:   shadows.load,
+	}, newTestConf(t))
+	serveTestService(t, s, address)
+	c := nodeClient(t, address)
+
+	// a receive in progress: the sender is slow to send the next chunk
+	stream, err := c.ReceiveSnapshot(ctx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{HashRange: 0, SourceAddress: "active:1"}))
+	require.Eventually(t, func() bool { return s.receiving.Load() }, 5*time.Second, 10*time.Millisecond)
+
+	infoCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	info, err := c.GetNodeInfo(infoCtx, &pb.GetNodeInfoRequest{})
+	require.NoError(t, err, "a shadow must answer GetNodeInfo while it receives a range")
+	require.Equal(t, pb.NodeRole_SHADOW, info.Role)
+
+	t.Run("a shadow that became active refuses writes until the receive ends", func(t *testing.T) {
+		shadows.set("")
+		resp, err := s.Put(ctx, &pb.PutRequest{Keys: []string{"k"}, TtlSeconds: 60})
+		require.NoError(t, err)
+		require.Equal(t, pb.ErrorCode_NOT_READY, resp.ErrorCode)
+
+		_, err = stream.CloseAndRecv()
+		require.NoError(t, err)
+		require.Eventually(t, func() bool { return !s.receiving.Load() }, 5*time.Second, 10*time.Millisecond)
+		resp, err = s.Put(ctx, &pb.PutRequest{Keys: []string{"k"}, TtlSeconds: 60})
+		require.NoError(t, err)
+		require.Equal(t, pb.ErrorCode_NO_ERROR, resp.ErrorCode)
+	})
+}

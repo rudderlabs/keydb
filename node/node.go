@@ -99,6 +99,11 @@ type Service struct {
 	replication *replicator
 	// replicating is true while a replication pass is in progress, garbage collection skips its ticks meanwhile
 	replicating atomic.Bool
+	// receiving is true while a shadow loads a range as it arrives
+	receiving atomic.Bool
+	// loadMu keeps Get and Put off the cache while a shadow loads a range: badger's Load moves the oracle without
+	// synchronisation. A shadow's receive takes it exclusively, Get and Put try to take it shared.
+	loadMu sync.RWMutex
 	// latency tracks the Get and Put latency the replication brake compares against its baseline
 	latency latencyTracker
 
@@ -336,9 +341,10 @@ func (s *Service) garbageCollection(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if s.replicating.Load() {
-				// the write lock would queue behind a long range send and block every Get and Put meanwhile
-				s.logger.Debugn("Skipping garbage collection while a replication pass is in progress")
+			if s.replicating.Load() || s.receiving.Load() || s.role() == pb.NodeRole_SHADOW {
+				// value log GC competes with a move for disk and CPU, and on a shadow its write lock would queue
+				// behind the receive's read lock and stall GetNodeInfo meanwhile
+				s.logger.Debugn("Skipping garbage collection while a node move is in progress")
 				continue
 			}
 			func() {
@@ -712,11 +718,13 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.role() == pb.NodeRole_SHADOW {
+	if s.role() == pb.NodeRole_SHADOW || !s.loadMu.TryRLock() {
+		// a shadow that just became active may still be loading the last range it received
 		s.metrics.errNotReadyCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_NOT_READY
 		return response, nil
 	}
+	defer s.loadMu.RUnlock()
 
 	if isDegraded, _ := s.isDegraded(); isDegraded {
 		s.metrics.errScalingCounter.Increment()
@@ -773,11 +781,13 @@ func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse,
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.role() == pb.NodeRole_SHADOW {
+	if s.role() == pb.NodeRole_SHADOW || !s.loadMu.TryRLock() {
+		// a shadow that just became active may still be loading the last range it received
 		s.metrics.errNotReadyCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_NOT_READY
 		return resp, nil
 	}
+	defer s.loadMu.RUnlock()
 
 	if isDegraded, _ := s.isDegraded(); isDegraded {
 		s.metrics.errScalingCounter.Increment()
@@ -1239,8 +1249,18 @@ func (s *Service) ReceiveSnapshot(
 ) error {
 	defer s.metrics.receiveSnapshotDuration.RecordDuration()()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	shadow := s.role() == pb.NodeRole_SHADOW
+	if shadow {
+		// a shadow serves no traffic, so its receive only needs to keep Get and Put off the cache (loadMu).
+		// The read lock lets GetNodeInfo answer during a receive that can last as long as the sender's budget.
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		s.loadMu.Lock()
+		defer s.loadMu.Unlock()
+	} else {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
 
 	s.logger.Infon("ReceiveSnapshot stream started")
 
@@ -1256,7 +1276,7 @@ func (s *Service) ReceiveSnapshot(
 		})
 	}
 
-	if s.role() != pb.NodeRole_SHADOW {
+	if !shadow {
 		return s.receiveBuffered(stream, first)
 	}
 

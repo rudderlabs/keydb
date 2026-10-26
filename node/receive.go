@@ -63,6 +63,8 @@ func (s *Service) receiveBuffered(stream receiveStream, first *pb.SnapshotChunk)
 // receiveStreaming loads the chunks into the cache as they arrive, so a shadow never holds a whole range in memory.
 // The caller holds the write lock, which is fine because a shadow serves no traffic.
 func (s *Service) receiveStreaming(stream receiveStream, first *pb.SnapshotChunk) error {
+	s.receiving.Store(true)
+	defer s.receiving.Store(false)
 	var (
 		hashRange = first.HashRange
 		timestamp = first.Timestamp
@@ -112,6 +114,10 @@ func (s *Service) receiveStreaming(stream receiveStream, first *pb.SnapshotChunk
 			return fail("receiving chunk", err)
 		}
 		timestamp = chunk.Timestamp
+		if s.role() != pb.NodeRole_SHADOW {
+			// the node was promoted mid-receive: stop loading so it can serve, the sender retries the range
+			return fail("receiving chunk", errors.New("the shadow became active during the receive"))
+		}
 		if err := write(chunk.Data); err != nil {
 			return fail("loading snapshot", err)
 		}
