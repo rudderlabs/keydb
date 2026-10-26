@@ -48,16 +48,64 @@ func TestBudgetHalvesOnBreach(t *testing.T) {
 func TestBudgetRequestLatencyAgainstBaseline(t *testing.T) {
 	var paused atomic.Bool
 	b := newTestBudget(32*bytesize.MB, &paused)
-	b.tick(BrakeSample{RequestLatency: time.Millisecond}) // baseline
+	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond}) // baseline
 
-	b.tick(BrakeSample{RequestLatency: 1500 * time.Microsecond})
+	b.tick(BrakeSample{RequestLatency: 15 * time.Millisecond})
 	rate, _, _ := b.current()
 	require.EqualValues(t, 32*bytesize.MB, rate, "1.5x the baseline is healthy")
 
-	b.tick(BrakeSample{RequestLatency: 3 * time.Millisecond})
+	b.tick(BrakeSample{RequestLatency: 30 * time.Millisecond})
 	rate, _, reason := b.current()
 	require.EqualValues(t, 16*bytesize.MB, rate)
 	require.Contains(t, reason, "request latency")
+}
+
+func TestBudgetBaselineSkipsIdleSamples(t *testing.T) {
+	var paused atomic.Bool
+	b := newTestBudget(32*bytesize.MB, &paused)
+	b.tick(BrakeSample{}) // no traffic yet, no baseline
+	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond})
+	b.tick(BrakeSample{RequestLatency: 30 * time.Millisecond})
+	_, engaged, reason := b.current()
+	require.True(t, engaged, "the baseline must come from the first sample with traffic")
+	require.Contains(t, reason, "request latency")
+}
+
+func TestBudgetRequestLatencyFloor(t *testing.T) {
+	var paused atomic.Bool
+	b := newTestBudget(32*bytesize.MB, &paused)
+	b.tick(BrakeSample{RequestLatency: 100 * time.Microsecond}) // a quiet-hour baseline
+	b.tick(BrakeSample{RequestLatency: time.Millisecond})
+	_, engaged, _ := b.current()
+	require.False(t, engaged, "10x a tiny baseline is still below the floor")
+
+	b.tick(BrakeSample{RequestLatency: 6 * time.Millisecond})
+	_, engaged, reason := b.current()
+	require.True(t, engaged)
+	require.Contains(t, reason, "request latency")
+}
+
+func TestBudgetResetBaseline(t *testing.T) {
+	var paused atomic.Bool
+	b := newTestBudget(32*bytesize.MB, &paused)
+	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond})
+	b.resetBaseline()
+	b.tick(BrakeSample{RequestLatency: 50 * time.Millisecond}) // the new job's baseline
+	_, engaged, _ := b.current()
+	require.False(t, engaged, "after a reset the next sample with traffic is the new baseline")
+}
+
+func TestBudgetConfiguredThresholds(t *testing.T) {
+	var paused atomic.Bool
+	b := newBudget(budgetConfig{
+		max:                     func() int64 { return 32 * bytesize.MB },
+		paused:                  paused.Load,
+		schedLatencyThreshold:   time.Second,
+		throttledRatioThreshold: 0.9,
+	})
+	b.tick(BrakeSample{SchedLatencyP99: 500 * time.Millisecond, ThrottledRatio: 0.5})
+	_, engaged, _ := b.current()
+	require.False(t, engaged, "the configured thresholds apply")
 }
 
 func TestBudgetRecoversAfterHealthySamples(t *testing.T) {

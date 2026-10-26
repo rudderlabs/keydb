@@ -565,7 +565,8 @@ The move uses a **shadow**: a second StatefulSet for the same node index, with t
 - **Load:** the copy never starves the serving node:
   - one stream goroutine, one range at a time, and zstd level 1;
   - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s);
-  - an automatic brake that halves the budget, down to a pause, whenever Go scheduler latency, the node's own Get/Put latency or cgroup CPU throttling crosses its threshold, and raises it again in steps once healthy;
+  - an automatic brake that halves the budget, down to a pause, whenever Go scheduler latency, the node's own Get/Put latency or cgroup CPU throttling crosses its threshold, and raises it again in steps once healthy. Get/Put latency is compared with a baseline taken from the first sample with traffic of each job, and never counts below an absolute floor. A lower budget also spaces passes out, because an incremental pass still scans every table written since the previous one;
+  - a paused or fully braked copy doesn't scan at all, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
   - garbage collection skips its runs while a pass is in progress.
 - **Readiness:** the serving node is ready to switch once a full pass is done, the gap is under `replication.gapThreshold` (default 60s), the shadow holds a marker for every range, and no client without the features header has been seen for `replication.legacyClientQuietPeriod` (default 15m). The gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass.
 - **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after its last completed pass, at most the gap, are lost.
@@ -629,6 +630,10 @@ Before PR2, reverting PR1 removes the shadow and its disk. After PR2 the old dis
 | `replication.gapThreshold` | `60s` | no |
 | `replication.legacyClientQuietPeriod` | `15m` | no |
 | `replication.brakeInterval` | `5s` | no |
+| `replication.brake.schedLatencyThreshold` | `10ms` | no |
+| `replication.brake.requestLatencyFactor` | `2` | no |
+| `replication.brake.requestLatencyFloor` | `5ms` | no |
+| `replication.brake.throttledRatioThreshold` | `0.1` | no |
 
 `replication.maxBytesPerSecond` and `replication.paused` can be changed through the customer object's `configOverrides` while a copy runs, without restarting it. The brake always works below the configured ceiling.
 

@@ -57,6 +57,7 @@ type budgetConfig struct {
 
 	schedLatencyThreshold   time.Duration // 10ms when zero
 	requestLatencyFactor    float64       // 2 when zero
+	requestLatencyFloor     time.Duration // 5ms when zero, request latency below it never counts as load
 	throttledRatioThreshold float64       // 0.1 when zero
 	healthySamplesToGrow    int           // 3 when zero
 	maxPausedWait           time.Duration // defaultMaxPausedWait when zero
@@ -82,6 +83,9 @@ func newBudget(cfg budgetConfig) *budget {
 	}
 	if cfg.requestLatencyFactor == 0 {
 		cfg.requestLatencyFactor = 2
+	}
+	if cfg.requestLatencyFloor == 0 {
+		cfg.requestLatencyFloor = 5 * time.Millisecond
 	}
 	if cfg.throttledRatioThreshold == 0 {
 		cfg.throttledRatioThreshold = 0.1
@@ -125,25 +129,27 @@ func (b *budget) current() (bytesPerSecond int64, engaged bool, reason string) {
 	return bytesPerSecond, false, ""
 }
 
-// tick takes one brake step. The first sample only sets the request latency baseline.
-// It returns the reason when the sample showed the node under load, empty otherwise.
+// tick takes one brake step and returns the reason when the sample showed the node under load, empty otherwise.
+// The first sample with traffic sets the request latency baseline; until then request latency doesn't count.
 func (b *budget) tick(sample BrakeSample) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	maxBytes := b.cfg.max()
 	b.budgetBytes = min(b.budgetBytes, maxBytes)
-	if !b.baselineSet {
-		b.baseline = sample.RequestLatency
-		b.baselineSet = true
-		return ""
-	}
 
 	var reasons []string
 	if sample.SchedLatencyP99 > b.cfg.schedLatencyThreshold {
 		reasons = append(reasons, "scheduler latency")
 	}
-	if b.baseline > 0 && float64(sample.RequestLatency) > float64(b.baseline)*b.cfg.requestLatencyFactor {
+	switch {
+	case !b.baselineSet:
+		if sample.RequestLatency > 0 {
+			b.baseline, b.baselineSet = sample.RequestLatency, true
+		}
+	case float64(sample.RequestLatency) > max(
+		float64(b.baseline)*b.cfg.requestLatencyFactor, float64(b.cfg.requestLatencyFloor),
+	):
 		reasons = append(reasons, "request latency")
 	}
 	if sample.ThrottledRatio > b.cfg.throttledRatioThreshold {
@@ -174,6 +180,13 @@ func (b *budget) tick(sample BrakeSample) string {
 		b.reason = ""
 	}
 	return ""
+}
+
+// resetBaseline makes the next sample with traffic the new request latency baseline, for a new replication job.
+func (b *budget) resetBaseline() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.baseline, b.baselineSet = 0, false
 }
 
 // Wait blocks until n bytes fit in the budget. While the budget is 0 it waits for it to grow or be unpaused, and

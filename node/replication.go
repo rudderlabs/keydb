@@ -52,6 +52,15 @@ type ReplicationConfig struct {
 	ReconcileInterval time.Duration
 	// Signals measures the node's load, the Go runtime, request latency and cgroup throttling when nil
 	Signals BrakeSignals
+
+	// BrakeSchedLatencyThreshold is the scheduler latency p99 above which the brake engages, 10ms when zero
+	BrakeSchedLatencyThreshold time.Duration
+	// BrakeRequestLatencyFactor is how many times the baseline Get/Put latency engages the brake, 2 when zero
+	BrakeRequestLatencyFactor float64
+	// BrakeRequestLatencyFloor is the Get/Put latency below which the brake never engages, 5ms when zero
+	BrakeRequestLatencyFloor time.Duration
+	// BrakeThrottledRatioThreshold is the cgroup throttled ratio above which the brake engages, 0.1 when zero
+	BrakeThrottledRatioThreshold float64
 }
 
 func (c *ReplicationConfig) setDefaults() {
@@ -154,8 +163,12 @@ func newReplicator(s *Service) *replicator {
 		s:   s,
 		cfg: cfg,
 		budget: newBudget(budgetConfig{
-			max:    cfg.MaxBytesPerSecond,
-			paused: cfg.Paused,
+			max:                     cfg.MaxBytesPerSecond,
+			paused:                  cfg.Paused,
+			schedLatencyThreshold:   cfg.BrakeSchedLatencyThreshold,
+			requestLatencyFactor:    cfg.BrakeRequestLatencyFactor,
+			requestLatencyFloor:     cfg.BrakeRequestLatencyFloor,
+			throttledRatioThreshold: cfg.BrakeThrottledRatioThreshold,
 		}),
 		signals: cfg.Signals,
 	}
@@ -245,7 +258,8 @@ func (r *replicator) job(ctx context.Context, target string) {
 	}
 	defer r.s.closeNodeConnection(conn)
 
-	// take the request latency baseline before copying anything
+	// take the request latency baseline before copying anything, from this job's own window
+	r.budget.resetBaseline()
 	_ = r.signals.Sample()
 	if !sleepCtx(ctx, r.cfg.BrakeInterval) {
 		return

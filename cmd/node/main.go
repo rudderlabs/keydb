@@ -207,6 +207,14 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			GapThreshold:            conf.GetDurationVar(60, time.Second, "replication.gapThreshold"),
 			LegacyClientQuietPeriod: conf.GetDurationVar(15, time.Minute, "replication.legacyClientQuietPeriod"),
 			BrakeInterval:           conf.GetDurationVar(5, time.Second, "replication.brakeInterval"),
+			BrakeSchedLatencyThreshold: conf.GetDurationVar(
+				10, time.Millisecond, "replication.brake.schedLatencyThreshold",
+			),
+			BrakeRequestLatencyFactor: conf.GetFloat64Var(2, "replication.brake.requestLatencyFactor"),
+			BrakeRequestLatencyFloor: conf.GetDurationVar(
+				5, time.Millisecond, "replication.brake.requestLatencyFloor",
+			),
+			BrakeThrottledRatioThreshold: conf.GetFloat64Var(0.1, "replication.brake.throttledRatioThreshold"),
 		},
 	}
 
