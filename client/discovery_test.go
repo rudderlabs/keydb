@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -247,4 +248,26 @@ func TestFeaturesHeaderSent(t *testing.T) {
 	_, err := c.Get(context.Background(), []string{"key"})
 	require.NoError(t, err)
 	require.True(t, node0.sawHeader.Load())
+}
+
+func TestCallNodeAfterConcurrentShrink(t *testing.T) {
+	addresses := []string{freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)}
+	for _, address := range addresses {
+		newMockNode(t, address).setList(addresses...)
+	}
+	c := newDiscoveryClient(t, addresses[0])
+	require.NoError(t, c.ensureDiscovered(context.Background()))
+
+	// another request learnt that the cluster shrank to 2 nodes while this one was routed to node 2
+	_, err := c.applyAddresses(addresses[:2])
+	require.NoError(t, err)
+	_, err = callNode(context.Background(), c, 2, 3, "get", stats.NOP.NewStat("retries", stats.CountType),
+		func(ctx context.Context, client proto.NodeServiceClient) (*proto.GetResponse, error) {
+			return client.Get(ctx, &proto.GetRequest{Keys: []string{"k"}})
+		},
+		func(*proto.GetResponse) bool { return true },
+	)
+	changed, ok := errors.AsType[*errClusterSizeChanged](err)
+	require.True(t, ok, "the request must be re-routed, not failed: %v", err)
+	require.Equal(t, addresses[:2], changed.nodesAddresses)
 }

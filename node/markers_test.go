@@ -243,3 +243,25 @@ func TestShadowGetNodeInfoDuringReceive(t *testing.T) {
 		require.Equal(t, pb.ErrorCode_NO_ERROR, resp.ErrorCode)
 	})
 }
+
+func TestShadowStreamEndingEarlyIsAFailure(t *testing.T) {
+	ctx := context.Background()
+	address := freeAddress(t)
+	s := newTestService(ctx, t, Config{
+		NodeID:            0,
+		Addresses:         staticList("active:1"),
+		AdvertisedAddress: address,
+		ShadowAddresses:   staticList(address),
+	}, newTestConf(t))
+	serveTestService(t, s, address)
+
+	stream, err := nodeClient(t, address).ReceiveSnapshot(ctx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{HashRange: 0, SourceAddress: "active:1"}))
+	resp, err := stream.CloseAndRecv() // no last chunk
+	require.NoError(t, err)
+	require.False(t, resp.Success, "a stream that ends before its last chunk must not count as a sync")
+	_, found, err := s.getSnapshotTimestamp(0)
+	require.NoError(t, err)
+	require.False(t, found, "no marker over a partial range")
+}

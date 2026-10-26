@@ -474,3 +474,23 @@ Calendar time that is not effort:
 - how the streaming code is refactored;
 - how the chart helpers are structured;
 - how the integration tests are laid out.
+
+## Changes after the implementation review
+
+- **Streaming:** replication streams a range with a single Badger iterator instead of `badger.Stream`. `badger.Stream` queued up to about 32 × 32 MB buffers ahead of the budget, and allocated hundreds of MB per incremental pass over unchanged data. The iterator writes 256 KiB batches through the budget, and an idle incremental pass allocates next to nothing.
+- **Scan pacing:** the budget only throttles bytes that are sent, but an incremental pass also scans every table written since the previous one. So:
+  - a paused or fully braked copy waits before opening each range;
+  - the pause between passes grows as the brake lowers the budget, up to a minute;
+  - a range paused mid-stream for more than 30s is given up and started over later, so no read transaction stays open.
+- **Leftover-disk guard:** a node forgets its shadow source once it is the active node for its index. Slot addresses come back every two moves, so a kept marker would let a reused slot's leftover disk pass the check.
+- **Shadow receive locking:** a shadow's receive takes the service read lock plus an exclusive load lock, instead of the write lock. GetNodeInfo keeps answering during long receives. Get and Put answer `NOT_READY` while a promoted shadow is still loading its last range, and a receive stops if the node becomes active mid-stream. Garbage collection skips its ticks on shadows and during receives.
+- **Brake:**
+  - the request-latency baseline is the first sample with traffic of each job, taken again when a job restarts;
+  - the request-latency signal never counts below an absolute floor (5ms);
+  - every threshold is configurable (`replication.brake.*`).
+- **Smaller fixes:**
+  - a stopped job resets its readiness;
+  - a shadow stream that ends before its last chunk is a failure, not a sync;
+  - a node without an advertised address never replicates;
+  - a client request for a node a concurrent request found removed is re-routed instead of failing;
+  - sent chunks are never written to again.

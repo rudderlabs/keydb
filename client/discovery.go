@@ -230,6 +230,16 @@ func (c *Client) nodeClient(nodeID int64) (pb.NodeServiceClient, *grpc.ClientCon
 	return client, conn, true
 }
 
+// addressesIfShrunk returns the current addresses when the cluster no longer has the given node, nil otherwise.
+func (c *Client) addressesIfShrunk(nodeID int64) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if nodeID < c.clusterSize {
+		return nil
+	}
+	return slices.Clone(c.config.Addresses)
+}
+
 // callNode sends a request to a node until it succeeds, the context is done, or the cluster size changes.
 //   - A failed response carries the node's address list: when it differs from the client's, the client adopts it.
 //   - When the node doesn't answer for DeadNodeLookupAfter, the client asks other nodes for the current list.
@@ -250,6 +260,10 @@ func callNode[R nodeResponse](
 		}
 		client, conn, ok := c.nodeClient(nodeID)
 		if !ok {
+			if addresses := c.addressesIfShrunk(nodeID); addresses != nil {
+				// another request learnt that the cluster shrank: route the keys again
+				return zero, &errClusterSizeChanged{nodesAddresses: addresses}
+			}
 			// this should never happen unless clusterSize is updated and the pools map isn't
 			// or if there is a bug in the hashing function
 			return zero, fmt.Errorf("no connection pool for node %d", nodeID)

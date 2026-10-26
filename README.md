@@ -617,6 +617,8 @@ The next move of node 0 goes back to slot `a`: `{active: b, shadow: a, slots: {a
 
 Before PR2, reverting PR1 removes the shadow and its disk. After PR2 the old disk is gone, and going back means another move.
 
+**Leftover disk.** If `keydb_shadow_leftover_disk_total` grows, or `/replication/status` shows a `lastError` about a leftover disk, the shadow found data on its disk that it didn't receive from the serving node. Typically this is a disk Kubernetes didn't delete after an earlier move, and the shadow refuses it rather than merging stale data into the new disk. Revert PR1, delete the shadow's PVC (`data-keydb-<i>-0` for slot `a`, `data-keydb-<i>-b-0` for slot `b`), then apply PR1 again.
+
 ### Configuration
 
 | Key | Default | Reloadable |

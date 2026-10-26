@@ -108,7 +108,8 @@ func (s *Service) receiveStreaming(stream receiveStream, first *pb.SnapshotChunk
 		var err error
 		chunk, err = stream.Recv()
 		if errors.Is(err, io.EOF) {
-			break
+			// without the last chunk the range may be partial, it must not be marked as synced
+			return fail("receiving chunk", errors.New("the stream ended before the last chunk"))
 		}
 		if err != nil {
 			return fail("receiving chunk", err)

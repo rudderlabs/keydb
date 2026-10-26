@@ -204,7 +204,8 @@ func (r *replicator) reconcile(ctx context.Context) {
 	r.s.forgetShadowSource()
 
 	target := ""
-	if r.s.role() == pb.NodeRole_ACTIVE {
+	// without its own address a node can't tell whether it is the shadow listed for its index
+	if r.s.config.AdvertisedAddress != "" && r.s.role() == pb.NodeRole_ACTIVE {
 		target = r.s.shadowAddress()
 	}
 	if target == r.s.config.AdvertisedAddress {
@@ -227,6 +228,9 @@ func (r *replicator) switchTarget(ctx context.Context, target string) {
 	if cancel != nil {
 		cancel()
 		<-done
+		r.mu.Lock()
+		r.progress = replicationProgress{} // a stopped copy has no readiness to report
+		r.mu.Unlock()
 		r.metrics.ready.Gauge(0)
 		r.s.logger.Infon("Replication stopped")
 	}
@@ -310,10 +314,12 @@ func (r *replicator) brakeLoop(ctx context.Context, shadow pb.NodeServiceClient,
 
 // pass sends every hash range the node owns, retrying a range until it is sent or ctx is done.
 func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log logger.Logger) {
+	r.s.mu.RLock() // the hasher is swapped under the write lock when the degraded nodes change
 	ranges := make([]int64, 0)
 	for hashRange := range r.s.getCurrentRanges() {
 		ranges = append(ranges, hashRange)
 	}
+	r.s.mu.RUnlock()
 	slices.Sort(ranges)
 
 	start := r.s.now()
@@ -577,11 +583,13 @@ type chunkWriter struct {
 func (w *chunkWriter) Write(p []byte) (int, error) {
 	w.buf = append(w.buf, p...)
 	for len(w.buf) >= w.max {
-		if err := w.send(w.buf[:w.max]); err != nil {
+		chunk, rest := w.buf[:w.max:w.max], w.buf[w.max:]
+		if err := w.send(chunk); err != nil {
 			return 0, err
 		}
 		w.total += int64(w.max)
-		w.buf = append(w.buf[:0], w.buf[w.max:]...)
+		// a message handed to gRPC must not change afterwards, so the rest goes to a new buffer
+		w.buf = append([]byte(nil), rest...)
 	}
 	return len(p), nil
 }
@@ -594,7 +602,7 @@ func (w *chunkWriter) flush() error {
 		return err
 	}
 	w.total += int64(len(w.buf))
-	w.buf = w.buf[:0]
+	w.buf = nil
 	return nil
 }
 

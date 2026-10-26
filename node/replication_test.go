@@ -176,12 +176,64 @@ func TestReplicationReadiness(t *testing.T) {
 func TestReplicationStopsOnClear(t *testing.T) {
 	p := newReplicationPair(t, fastReplication(nil), stats.NOP)
 	p.shadows.set(p.shadowAddress)
-	require.Eventually(t, func() bool { return p.source.ReplicationStatus().State == "running" },
+	require.Eventually(t, func() bool { return p.source.ReplicationStatus().Ready },
 		10*time.Second, 20*time.Millisecond)
 
 	p.shadows.set("")
 	require.Eventually(t, func() bool { return p.source.ReplicationStatus().State == "idle" },
 		10*time.Second, 20*time.Millisecond)
+	status := p.source.ReplicationStatus()
+	require.False(t, status.Ready, "a stopped copy must not report the old readiness")
+	require.Zero(t, status.PassesCompleted)
+}
+
+func TestReplicationNeedsAdvertisedAddress(t *testing.T) {
+	ctx := context.Background()
+	shadowAddress := freeAddress(t)
+	s := newTestService(ctx, t, Config{
+		NodeID:          0,
+		Addresses:       staticList("a:1"),
+		ShadowAddresses: staticList(shadowAddress),
+		Replication:     fastReplication(nil),
+	}, newTestConf(t))
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, "idle", s.ReplicationStatus().State,
+		"without an advertised address a node can't tell it isn't the shadow itself")
+}
+
+func TestReplicationNoRaceWithDegradedChange(t *testing.T) {
+	p := newReplicationPair(t, fastReplication(nil), stats.NOP)
+	p.put(t, testKeys(200)...)
+	p.shadows.set(p.shadowAddress)
+	stop := time.After(300 * time.Millisecond)
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+			p.source.DegradedNodesChanged() // swaps the hasher under the write lock while passes run
+		}
+	}
+}
+
+func TestChunkWriterDoesNotReuseSentChunks(t *testing.T) {
+	var sent [][]byte
+	w := &chunkWriter{max: 4, send: func(data []byte) error {
+		sent = append(sent, data) // keeps the slice, as a message handed to gRPC must not change afterwards
+		return nil
+	}}
+	_, err := w.Write([]byte("aaaabbbbcc"))
+	require.NoError(t, err)
+	_, err = w.Write([]byte("ccdddd"))
+	require.NoError(t, err)
+	require.NoError(t, w.flush())
+	require.Equal(t, []string{"aaaa", "bbbb", "cccc", "dddd"}, func() []string {
+		out := make([]string, len(sent))
+		for i, b := range sent {
+			out[i] = string(b)
+		}
+		return out
+	}())
 }
 
 func TestReplicationStopsOnShutdown(t *testing.T) {
