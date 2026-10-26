@@ -8,9 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 
@@ -349,4 +352,68 @@ func TestSnapshotContextCancellationResourceCleanup(t *testing.T) {
 	// Try to create another snapshot to ensure the cache is in a good state
 	_, _, err = bdb.CreateSnapshots(context.Background(), map[int64]io.Writer{0: &bytes.Buffer{}}, map[int64]uint64{})
 	require.NoError(t, err, "Cache should be in a good state after context cancellation")
+}
+
+func TestCrashRecoveryPastOneBillionCommits(t *testing.T) {
+	dir := t.TempDir()
+	fastForwardCommitTs(t, dir)
+
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", dir)
+	bdb, err := New(conf, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, bdb.Close())
+	})
+
+	keys := make([]string, 100)
+	indexes := make(map[string]int, len(keys))
+	for i := range keys {
+		keys[i] = "key" + strconv.Itoa(i)
+		indexes[keys[i]] = i
+		require.NoError(t, bdb.Put(map[int64][]string{0: {keys[i]}}, time.Hour))
+	}
+
+	// Copying the directory of an open database leaves the writes in the WAL only, as after a crash.
+	crashConf := config.New()
+	crashConf.Set("BadgerDB.Dedup.Path", copyDir(t, dir))
+	recovered, err := New(crashConf, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, recovered.Close())
+	})
+
+	exists, err := recovered.Get(map[int64][]string{0: keys}, indexes)
+	require.NoError(t, err)
+	require.NotContains(t, exists, false, "keys lost after replaying the WAL")
+}
+
+// fastForwardCommitTs commits a single entry at timestamp 1e9 so that the commit timestamps of a
+// database opened later in dir have at least 10 decimal digits.
+func fastForwardCommitTs(t *testing.T, dir string) {
+	t.Helper()
+	const commitTs = 1_000_000_000
+	db, err := badger.OpenManaged(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	txn := db.NewTransactionAt(commitTs, true)
+	require.NoError(t, txn.SetEntry(badger.NewEntry([]byte("seed"), nil)))
+	require.NoError(t, txn.CommitAt(commitTs, nil))
+	require.NoError(t, db.Close())
+}
+
+// copyDir copies the files of a badger directory, except for its lock file, into a new directory.
+func copyDir(t *testing.T, src string) string {
+	t.Helper()
+	dst := t.TempDir()
+	entries, err := os.ReadDir(src)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.Name() == "LOCK" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(src, e.Name()))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dst, e.Name()), data, 0o600))
+	}
+	return dst
 }

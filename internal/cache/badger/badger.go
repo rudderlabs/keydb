@@ -87,8 +87,12 @@ func New(conf *config.Config, log logger.Logger) (*Cache, error) {
 		WithMaxLevels(conf.GetIntVar(7, 1, "BadgerDB.Dedup.maxLevels", "BadgerDB.maxLevels")).
 		// Cannot have 1 compactor. Need at least 2
 		WithNumCompactors(conf.GetIntVar(4, 1, "BadgerDB.Dedup.numCompactors", "BadgerDB.numCompactors")).
+		// Every commit writes a transaction finish marker holding the commit timestamp as a decimal string
+		// (up to 20 bytes). With a threshold at or below 20 the marker lands in the value log, where it is
+		// never garbage collected and breaks WAL replay after an unclean shutdown.
+		// See https://github.com/dgraph-io/badger/issues/2353
 		WithValueThreshold(conf.GetInt64Var(
-			10*bytesize.B, 1, "BadgerDB.Dedup.valueThreshold", "BadgerDB.valueThreshold",
+			1*bytesize.KB, 1, "BadgerDB.Dedup.valueThreshold", "BadgerDB.valueThreshold",
 		)).
 		WithSyncWrites(conf.GetBoolVar(false, "BadgerDB.Dedup.syncWrites", "BadgerDB.syncWrites")).
 		WithBlockCacheSize(conf.GetInt64Var(0, 1, "BadgerDB.Dedup.blockCacheSize", "BadgerDB.blockCacheSize")).
