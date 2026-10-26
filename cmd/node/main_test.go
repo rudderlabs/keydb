@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
@@ -172,10 +174,13 @@ func TestRunWith_HealthEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	profilerPort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
+	adminPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
 
 	conf := config.New()
 	conf.Set("port", mainPort)
 	conf.Set("healthPort", healthPort)
+	conf.Set("adminPort", adminPort)
 	conf.Set("Profiler.Port", profilerPort)
 	conf.Set("nodeId", "keydb-1-0")
 	conf.Set("nodeAddresses", "localhost:"+strconv.Itoa(mainPort)+",localhost:"+strconv.Itoa(mainPort))
@@ -259,6 +264,18 @@ func TestRunWith_HealthEndpoints(t *testing.T) {
 		resp, err := pb.NewNodeServiceClient(conn).GetNodeInfo(reqCtx, &pb.GetNodeInfoRequest{})
 		require.NoError(t, err)
 		require.Equal(t, int64(1), resp.NodeId)
+	})
+
+	t.Run("admin port serves the replication status", func(t *testing.T) {
+		statusCode := func() int {
+			resp, err := http.Get("http://localhost:" + strconv.Itoa(adminPort) + "/replication/status")
+			if err != nil {
+				return 0
+			}
+			defer func() { httputil.CloseResponse(resp) }()
+			return resp.StatusCode
+		}
+		require.Eventually(t, func() bool { return statusCode() == http.StatusOK }, 10*time.Second, 50*time.Millisecond)
 	})
 
 	// Step 2: simulate SIGTERM via context cancel. The shutdown handler must

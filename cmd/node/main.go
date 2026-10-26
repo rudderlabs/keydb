@@ -25,6 +25,7 @@ import (
 
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
+	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	_ "github.com/rudderlabs/rudder-go-kit/maxprocs"
 	"github.com/rudderlabs/rudder-go-kit/profiler"
@@ -211,9 +212,11 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 
 	port := conf.GetIntVar(50051, 1, "port")
 	healthPort := conf.GetIntVar(50052, 1, "healthPort")
+	adminPort := conf.GetIntVar(8080, 1, "adminPort")
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
 		logger.NewIntField("healthPort", int64(healthPort)),
+		logger.NewIntField("adminPort", int64(adminPort)),
 		logger.NewIntField("nodeId", nodeConfig.NodeID),
 		logger.NewIntField("totalHashRanges", nodeConfig.TotalHashRanges),
 	)
@@ -347,6 +350,18 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewStringField("addresses", strings.Join(addresses, ",")),
 		logger.NewStringField("degradedNodes", degradedNodes.Load()),
 	)
+
+	adminServer := &http.Server{
+		Addr:              fmt.Sprintf(":%d", adminPort),
+		Handler:           service.AdminHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	wg.Go(func() {
+		defer log.Infon("Admin server terminated")
+		if err := httputil.ListenAndServe(ctx, adminServer); err != nil {
+			log.Warnn("Admin server failed", obskit.Error(err))
+		}
+	})
 
 	wg.Go(func() {
 		defer log.Infon("Profiler server terminated")
