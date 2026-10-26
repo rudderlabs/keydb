@@ -729,6 +729,6 @@ func TestMoveLeftoverDiskReusedSlot(t *testing.T) {
 	c.start(leftover)
 	require.Eventually(t, func() bool {
 		return strings.Contains(slotAAgain.service.ReplicationStatus().LastError, "leftover")
-	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse to merge into a leftover disk, even on a reused slot")
+	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse a leftover disk, even on a reused slot")
 	require.False(t, slotAAgain.service.ReplicationStatus().Ready)
 }
