@@ -111,6 +111,11 @@ for i, key := range keys {
 - **Cluster Awareness**: Automatically adapts to cluster size changes (including degraded mode)
   - The cluster size is dynamically calculated based on active (non-degraded) nodes
   - When a node is marked as degraded, it's excluded from the effective cluster size
+- **Discovery**: `Addresses` can be a single seed, such as the `keydb` Kubernetes Service. On first use the client asks the seed for the cluster's addresses (`GetNodeInfo`), then talks to every node directly; data requests never go through the seed
+- **Moved nodes**: Every node response carries the cluster's address list
+  - When a request fails with a response, the client adopts that response's list if it differs from its own, and retries after the usual backoff
+  - When a node stops answering for `DeadNodeLookupAfter` (default 5s), the client asks the seed and the other nodes for the current list
+  - The client sends the `keydb-client-features` gRPC header, so nodes can tell older clients apart
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
 - **Automatic retries**: Automatically retries requests that fail for a configured number of times
@@ -544,6 +549,95 @@ This approach ensures that if any old node restarts during scaling, it won't use
   the cluster
 - `POST /hashRangeMovements` - Get hash range movement information (supports snapshot creation and loading)
 - `POST /backup` - Create and/or load snapshots for all (or specific) nodes without scaling
+
+Each node also serves `GET /replication/status` on its admin port (`adminPort`, default 8080), see [Moving a Node to a New Disk](#moving-a-node-to-a-new-disk).
+
+## Moving a Node to a New Disk
+
+A node can be moved onto a new disk, for example a smaller one, while it keeps serving. Kubernetes and EBS can't shrink a volume, so the data has to be copied onto a new one.
+
+The move uses a **shadow**: a second StatefulSet for the same node index, with the new disk. The serving node fills the shadow on its own, and a second PR promotes the shadow and removes the old StatefulSet. Node IDs, the cluster size and the hash ranges each node owns never change.
+
+### How it works
+
+- **Roles:** a pod listed in `shadowNodeAddresses` for its node index is a SHADOW. It refuses `Get` and `Put` with `NOT_READY` and only receives snapshots. Every other pod is ACTIVE. A pod knows its own address from `advertisedAddress`.
+- **Replication:** an ACTIVE node with a shadow copies every hash range it owns to the shadow, then sends incremental passes back to back for as long as the shadow exists, readiness included. Expired keys are not copied. After a restart the node resumes on its own, and the shadow's since markers keep the passes incremental.
+- **Load:** the copy never starves the serving node:
+  - one stream goroutine, one range at a time, and zstd level 1;
+  - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s);
+  - an automatic brake that halves the budget, down to a pause, whenever Go scheduler latency, the node's own Get/Put latency or cgroup CPU throttling crosses its threshold, and raises it again in steps once healthy;
+  - garbage collection skips its runs while a pass is in progress.
+- **Readiness:** the serving node is ready to switch once a full pass is done, the gap is under `replication.gapThreshold` (default 60s), the shadow holds a marker for every range, and no client without the features header has been seen for `replication.legacyClientQuietPeriod` (default 15m). The gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass.
+- **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after its last completed pass, at most the gap, are lost.
+- **Leftover disks:** a shadow refuses to receive data when its disk already holds data from another source, so a disk Kubernetes didn't delete can't silently turn a move into a merge.
+
+### Prerequisites
+
+- A keydb image with node moves, and `global.keydb.nodeMoves: true` in the customer object, which restarts the keydb pods once.
+- Processors running a rudder-server version with this client and the `keydb` Service as their URL. Older clients never follow a moved node, and readiness stays false while one is connected.
+- No `/hashRangeMovements` or `/backup` while a move is in progress: they compete with replication for the snapshot slot.
+
+### Procedure
+
+Every values snippet is the full `nodes` state after the PR, not a diff. A slot's `diskSize` must never change while the slot exists, because `volumeClaimTemplates` are immutable.
+
+1. **PR1, add the shadow:**
+
+   ```yaml
+   global:
+     keydb:
+       nodes:
+         "0": {active: a, shadow: b, slots: {b: {diskSize: 20Gi}}}
+   ```
+
+   `keydb-0-b` starts as a shadow and `keydb-0` starts copying to it. The first pass is a full copy, which takes hours for big nodes. The node keeps serving throughout.
+
+2. **Wait for readiness.** Watch `keydb_replication_ready` (1 means ready) or the `Replication ready to switch` log line from `keydb-0`. The node also logs `Replication no longer ready`, with the reasons, whenever readiness is lost. Then check the gap and the verdict on the node itself:
+
+   ```bash
+   kubectl port-forward pod/keydb-0-0 8080:8080
+   curl -s localhost:8080/replication/status
+   ```
+
+3. **PR2, the switch:**
+
+   ```yaml
+   global:
+     keydb:
+       nodes:
+         "0": {active: b, slots: {b: {diskSize: 20Gi}}}
+   ```
+
+   `keydb-0` is deleted, cancels its in-flight calls and exits, and Kubernetes deletes its disk. `keydb-0-b` starts serving as soon as its configmap refreshes. Clients see node 0 fail, ask another node for the list and move to `keydb-0-b`. Only node 0's keys stall, for about a minute or two.
+
+4. **Afterwards**, check that `data-keydb-0-0` is gone. If it isn't, delete it with `kubectl delete pvc data-keydb-0-0`.
+
+The next move of node 0 goes back to slot `a`: `{active: b, shadow: a, slots: {a: {diskSize: 15Gi}, b: {diskSize: 20Gi}}}`, then `{active: a, slots: {a: {diskSize: 15Gi}}}`. Slot `a` needs its size stated from then on.
+
+Before PR2, reverting PR1 removes the shadow and its disk. After PR2 the old disk is gone, and going back means another move.
+
+### Configuration
+
+| Key | Default | Reloadable |
+|-----|---------|------------|
+| `advertisedAddress` | empty | no |
+| `shadowNodeAddresses` | empty | yes |
+| `adminPort` | `8080` | no |
+| `replication.maxBytesPerSecond` | 32 MiB | yes |
+| `replication.paused` | `false` | yes |
+| `replication.pauseBetweenPasses` | `5s` | no |
+| `replication.gapThreshold` | `60s` | no |
+| `replication.legacyClientQuietPeriod` | `15m` | no |
+| `replication.brakeInterval` | `5s` | no |
+
+`replication.maxBytesPerSecond` and `replication.paused` can be changed through the customer object's `configOverrides` while a copy runs, without restarting it. The brake always works below the configured ceiling.
+
+### Metrics
+
+- `keydb_replication_ready`, `keydb_replication_gap_seconds`
+- `keydb_replication_pass_duration_seconds`, `keydb_replication_bytes_total`, `keydb_replication_errors_total`
+- `keydb_replication_budget_bytes_per_second`, `keydb_replication_brake_events_total` (by `reason`)
+- `keydb_legacy_client_requests_total`, `keydb_err_not_ready_count`, `keydb_shadow_leftover_disk_total`
 
 ## Performance
 
