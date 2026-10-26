@@ -299,3 +299,61 @@ func TestRunWith_HealthEndpoints(t *testing.T) {
 		}
 	})
 }
+
+// TestShutdownCancelsInFlight checks that shutdown cancels in-flight calls instead of waiting for them.
+// A client keeps a ReceiveSnapshot stream open, which a graceful stop would wait for until the shutdown timeout.
+func TestShutdownCancelsInFlight(t *testing.T) {
+	mainPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	healthPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	profilerPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	adminPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+
+	mainAddr := "localhost:" + strconv.Itoa(mainPort)
+	conf := config.New()
+	conf.Set("port", mainPort)
+	conf.Set("healthPort", healthPort)
+	conf.Set("adminPort", adminPort)
+	conf.Set("Profiler.Port", profilerPort)
+	conf.Set("nodeId", "keydb-0-0")
+	conf.Set("nodeAddresses", mainAddr)
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	conf.Set("shutdownTimeout", "10s")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- run(ctx, cancel, conf, stats.NOP, logger.NOP, &mockedCloudStorage{})
+	}()
+
+	conn, err := grpc.NewClient(mainAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	nodeClient := pb.NewNodeServiceClient(conn)
+	require.Eventually(t, func() bool {
+		_, err := nodeClient.GetNodeInfo(context.Background(), &pb.GetNodeInfoRequest{})
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond, "node never became reachable")
+
+	stream, err := nodeClient.ReceiveSnapshot(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{HashRange: 0, Data: []byte("partial")}))
+	time.Sleep(200 * time.Millisecond) // let the handler start waiting for the next chunk
+
+	shutdownStart := time.Now()
+	cancel()
+	select {
+	case <-runErrCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not return")
+	}
+	require.Less(t, time.Since(shutdownStart), 3*time.Second, "shutdown waited for the in-flight stream")
+
+	_, err = stream.CloseAndRecv()
+	require.Error(t, err, "the in-flight stream must be cancelled")
+}

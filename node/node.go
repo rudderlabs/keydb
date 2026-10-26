@@ -76,6 +76,9 @@ type Service struct {
 
 	config Config
 
+	// cancel stops the service's background jobs
+	cancel context.CancelFunc
+
 	// mu protects cache, lastSnapshotTime and hasher
 	mu               sync.RWMutex
 	cache            Cache
@@ -199,7 +202,10 @@ func NewService(
 		config.LoadedSnapshotTTL = DefaultLoadedSnapshotTTL
 	}
 
+	// the service owns its context so that Close stops the background jobs even if the caller's context is alive
+	ctx, cancel := context.WithCancel(ctx)
 	service := &Service{
+		cancel:         cancel,
 		now:            time.Now,
 		config:         config,
 		storage:        storage,
@@ -218,6 +224,7 @@ func NewService(
 	var err error
 	service.cache, err = badger.New(kitConf, log.Child("badger"))
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
 
@@ -263,6 +270,7 @@ func NewService(
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
+		cancel()
 		return nil, err
 	}
 
@@ -284,7 +292,11 @@ func NewService(
 }
 
 func (s *Service) Close() {
+	s.cancel()
 	s.waitGroup.Wait()
+	// wait for the handlers still running before closing the cache under them
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.cache.Close(); err != nil {
 		s.logger.Errorn("Error closing cache", obskit.Error(err))
 	}

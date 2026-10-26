@@ -356,9 +356,11 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		// Flip health status to NOT_SERVING first so readiness probes fail and
 		// Kubernetes removes this pod from Service endpoints before we stop serving.
 		healthServer.Shutdown()
-		service.Close()
-		server.GracefulStop()
+		// Stop cancels in-flight calls instead of waiting for them: clients retry them, and after a node move the
+		// retries land on the node that replaced this one. Badger is closed only once no handler is running.
+		server.Stop()
 		_ = lis.Close()
+		service.Close()
 		// Stop the dedicated health server last so probes can still be answered
 		// (with NOT_SERVING) while the main server is draining.
 		healthGrpcServer.GracefulStop()
