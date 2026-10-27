@@ -130,8 +130,15 @@ type Client struct {
 	seeds []string
 	// discovered is true once the client learnt the cluster's addresses
 	discovered atomic.Bool
-	// discoverMu serialises discovery
-	discoverMu sync.Mutex
+	// discoverMu protects discovering, which is closed when the discovery in progress ends
+	discoverMu  sync.Mutex
+	discovering chan struct{}
+	// closed is true once Close was called, requests still retrying then stop
+	closed atomic.Bool
+
+	// failMu protects failingSince, when each node started failing without answering, across requests
+	failMu       sync.Mutex
+	failingSince map[int64]time.Time
 
 	logger logger.Logger
 
@@ -298,6 +305,7 @@ func (c *Client) initConnectionMetrics(config Config) {
 
 // Close will terminate all connection pools
 func (c *Client) Close() error {
+	c.closed.Store(true)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

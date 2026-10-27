@@ -24,6 +24,9 @@ import (
 // addressesTimeout bounds each call made to learn the cluster's addresses
 const addressesTimeout = 5 * time.Second
 
+// errClientClosed is returned by requests made or still retrying after Close
+var errClientClosed = errors.New("keydb client closed")
+
 // nodeResponse is what Get and Put responses have in common
 type nodeResponse interface {
 	GetClusterSize() int64
@@ -33,16 +36,44 @@ type nodeResponse interface {
 
 // ensureDiscovered learns the cluster's addresses through the seeds the first time it is called.
 // Data requests never go through a seed: with a Service as seed, they would reach random nodes.
+// One caller discovers while the others wait for it, each giving up when its own context ends.
 func (c *Client) ensureDiscovered(ctx context.Context) error {
-	if c.discovered.Load() {
-		return nil
-	}
-	c.discoverMu.Lock()
-	defer c.discoverMu.Unlock()
-	if c.discovered.Load() {
-		return nil
-	}
+	for {
+		if c.closed.Load() {
+			return errClientClosed
+		}
+		if c.discovered.Load() {
+			return nil
+		}
+		c.discoverMu.Lock()
+		if c.discovered.Load() {
+			c.discoverMu.Unlock()
+			return nil
+		}
+		if running := c.discovering; running != nil {
+			c.discoverMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-running:
+				continue // it either succeeded, or failed and this caller tries in turn
+			}
+		}
+		running := make(chan struct{})
+		c.discovering = running
+		c.discoverMu.Unlock()
 
+		err := c.discoverAndApply(ctx)
+
+		c.discoverMu.Lock()
+		c.discovering = nil
+		c.discoverMu.Unlock()
+		close(running)
+		return err
+	}
+}
+
+func (c *Client) discoverAndApply(ctx context.Context) error {
 	addresses, err := c.discover(ctx)
 	if err != nil {
 		return err
@@ -78,6 +109,9 @@ func (c *Client) discover(ctx context.Context) ([]string, error) {
 		}
 		if c.config.RetryPolicy.Disabled {
 			return nil, fmt.Errorf("discovering the cluster through %s: %w", strings.Join(c.seeds, ","), lastErr)
+		}
+		if c.closed.Load() {
+			return nil, errClientClosed
 		}
 		delay := nextBackoff()
 		c.logger.Warnn("Discovering the cluster",
@@ -153,6 +187,9 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.closed.Load() {
+		return false, errClientClosed // never reopen connections after Close
+	}
 	if slices.Equal(addresses, c.config.Addresses) && len(c.pools) == len(addresses) {
 		return false, nil
 	}
@@ -172,6 +209,7 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 			_ = old.close() // requests still using it fail and retry on the new pool
 		}
 		c.pools[i] = pool
+		c.clearFailure(int64(i)) // a new address starts with a clean slate
 		if c.metrics.connectionOps[i] == nil {
 			c.metrics.connectionOps[i] = make(map[int]stats.Counter)
 			for j := range c.config.ConnectionPoolSize {
@@ -240,6 +278,34 @@ func (c *Client) addressesIfShrunk(nodeID int64) []string {
 	return slices.Clone(c.config.Addresses)
 }
 
+// noteFailure records that a node failed without answering, and returns true when it has been failing for
+// DeadNodeLookupAfter, across requests, so that the caller looks the addresses up again.
+func (c *Client) noteFailure(nodeID int64) bool {
+	c.failMu.Lock()
+	defer c.failMu.Unlock()
+	if c.failingSince == nil {
+		c.failingSince = make(map[int64]time.Time)
+	}
+	now := time.Now()
+	since, ok := c.failingSince[nodeID]
+	if !ok {
+		c.failingSince[nodeID] = now
+		return false
+	}
+	if now.Sub(since) < c.config.DeadNodeLookupAfter {
+		return false
+	}
+	c.failingSince[nodeID] = now // the next lookup waits for another DeadNodeLookupAfter
+	return true
+}
+
+// clearFailure forgets that a node was failing, once it answers or its address changes.
+func (c *Client) clearFailure(nodeID int64) {
+	c.failMu.Lock()
+	defer c.failMu.Unlock()
+	delete(c.failingSince, nodeID)
+}
+
 // callNode sends a request to a node until it succeeds, the context is done, or the cluster size changes.
 //   - A failed response carries the node's address list: when it differs from the client's, the client adopts it.
 //   - When the node doesn't answer for DeadNodeLookupAfter, the client asks other nodes for the current list.
@@ -250,11 +316,13 @@ func callNode[R nodeResponse](
 	succeeded func(R) bool,
 ) (R, error) {
 	var (
-		zero         R
-		nextBackoff  = c.getNextBackoffFunc()
-		failingSince time.Time
+		zero        R
+		nextBackoff = c.getNextBackoffFunc()
 	)
 	for attempt := int64(1); ; attempt++ {
+		if c.closed.Load() {
+			return zero, errClientClosed
+		}
 		if attempt > 1 {
 			retries.Increment()
 		}
@@ -275,10 +343,10 @@ func callNode[R nodeResponse](
 			if resp.GetClusterSize() != clusterSize && len(addresses) > 0 {
 				return zero, &errClusterSizeChanged{nodesAddresses: addresses}
 			}
+			c.clearFailure(nodeID)
 			if succeeded(resp) {
 				return resp, nil
 			}
-			failingSince = time.Time{}
 			if len(addresses) > 0 {
 				sizeChanged, err := c.applyAddresses(addresses)
 				if err != nil {
@@ -289,10 +357,7 @@ func callNode[R nodeResponse](
 				}
 			}
 		} else if ctx.Err() == nil {
-			if failingSince.IsZero() {
-				failingSince = time.Now()
-			} else if time.Since(failingSince) >= c.config.DeadNodeLookupAfter {
-				failingSince = time.Now()
+			if c.noteFailure(nodeID) {
 				if addresses, err := c.lookupAddresses(ctx, nodeID); err == nil {
 					sizeChanged, err := c.applyAddresses(addresses)
 					if err != nil {

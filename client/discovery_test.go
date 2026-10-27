@@ -270,3 +270,66 @@ func TestCallNodeAfterConcurrentShrink(t *testing.T) {
 	require.True(t, ok, "the request must be re-routed, not failed: %v", err)
 	require.Equal(t, addresses[:2], changed.nodesAddresses)
 }
+
+func TestCloseStopsInFlightRetries(t *testing.T) {
+	a0 := freeMockAddress(t)
+	node0 := newMockNode(t, a0)
+	node0.notReady.Store(true) // the request keeps retrying
+
+	c := newDiscoveryClient(t, a0)
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Get(context.Background(), []string{"k"})
+		done <- err
+	}()
+	require.Eventually(t, func() bool { return node0.gets.Load() > 0 }, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, c.Close())
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, errClientClosed)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request kept retrying after Close")
+	}
+	c.mu.RLock()
+	pools := len(c.pools)
+	c.mu.RUnlock()
+	require.Zero(t, pools, "a request must not reopen connections after Close")
+}
+
+func TestDeadNodeLookupAcrossShortRequests(t *testing.T) {
+	a0, dead1, new1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
+	node0 := newMockNode(t, a0)
+	node0.setList(a0, dead1)
+	newNode1 := newMockNode(t, new1)
+	newNode1.setList(a0, new1)
+
+	c := newDiscoveryClient(t, a0) // DeadNodeLookupAfter is 200ms
+	require.NoError(t, c.ensureDiscovered(context.Background()))
+	node0.setList(a0, new1)
+
+	// every request gives up well before DeadNodeLookupAfter, the failures must add up across requests
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+		defer cancel()
+		_, err := c.Get(ctx, keysFor(1, 2, 1))
+		return err == nil
+	}, 10*time.Second, 10*time.Millisecond, "short requests never moved off the dead node")
+	require.Positive(t, newNode1.gets.Load())
+}
+
+func TestDiscoveryWaitersHonourContext(t *testing.T) {
+	unreachable := freeMockAddress(t) // nothing listens here
+	c := newDiscoveryClient(t, unreachable)
+
+	leaderCtx := t.Context()
+	go func() { _ = c.ensureDiscovered(leaderCtx) }() // keeps retrying discovery
+	time.Sleep(100 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := c.ensureDiscovered(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), 2*time.Second, "a waiter must give up when its own context ends")
+}
