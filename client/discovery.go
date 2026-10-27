@@ -98,7 +98,8 @@ func (c *Client) discoverAndApply(ctx context.Context) error {
 }
 
 // discover asks the seeds for the cluster's addresses, opening a fresh connection for every attempt so that a
-// seed behind a Service spreads the attempts across nodes. It retries with backoff unless retries are disabled.
+// seed behind a Service spreads the attempts across nodes. It retries with backoff unless retries are disabled,
+// counting every failed attempt it retries in keydb_client_discovery_retries_total.
 // When the seeds answer without a list, as nodes that predate discovery may, the seeds are the list.
 func (c *Client) discover(ctx context.Context) ([]string, error) {
 	nextBackoff := c.getNextBackoffFunc()
@@ -117,6 +118,9 @@ func (c *Client) discover(ctx context.Context) ([]string, error) {
 			lastErr = err
 		}
 		if answered {
+			// A node also answers an empty list when every node of the cluster is marked degraded. Using the seeds
+			// as the list is then harmless: the first data response carries the cluster's size and addresses, and
+			// the client adopts them before it routes the keys again.
 			return c.seeds, nil
 		}
 		if c.config.RetryPolicy.Disabled {
@@ -125,6 +129,7 @@ func (c *Client) discover(ctx context.Context) ([]string, error) {
 		if c.closed.Load() {
 			return nil, errClientClosed
 		}
+		c.metrics.discoveryRetries.Increment()
 		delay := nextBackoff()
 		c.logger.Warnn("Discovering the cluster",
 			logger.NewStringField("seeds", strings.Join(c.seeds, ",")),

@@ -15,6 +15,7 @@ import (
 
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
+	"github.com/rudderlabs/rudder-go-kit/stats/memstats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
 
 	"github.com/rudderlabs/keydb/internal/hash"
@@ -599,4 +600,22 @@ func TestAbandonedAddressMemory(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, []string{x, a1}, address0(c))
 	})
+}
+
+func TestDiscoveryRetriesAreCounted(t *testing.T) {
+	statsStore, err := memstats.New()
+	require.NoError(t, err)
+	c, err := NewClient(Config{
+		Addresses:   []string{freeMockAddress(t)}, // nothing listens there
+		RetryPolicy: RetryPolicy{InitialInterval: 10 * time.Millisecond, MaxInterval: 20 * time.Millisecond},
+	}, logger.NOP, WithStats(statsStore))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, c.ensureDiscovered(ctx), context.DeadlineExceeded)
+	retries := statsStore.Get("keydb_client_discovery_retries_total", nil)
+	require.NotNil(t, retries, "a stuck discovery must show in the client's metrics")
+	require.Greater(t, retries.LastValue(), float64(1))
 }

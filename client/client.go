@@ -154,6 +154,8 @@ type Client struct {
 		putReqFailures stats.Counter
 		putReqRetries  stats.Counter
 		connectionOps  map[int]map[int]stats.Counter
+
+		discoveryRetries stats.Counter
 	}
 }
 
@@ -292,6 +294,8 @@ func (c *Client) initMetrics() {
 	c.metrics.putReqRetries = c.stats.NewTaggedStat("keydb_client_req_retries_total", stats.CountType, stats.Tags{
 		"method": "put",
 	})
+
+	c.metrics.discoveryRetries = c.stats.NewStat("keydb_client_discovery_retries_total", stats.CountType)
 }
 
 func (c *Client) initConnectionMetrics(config Config) {
