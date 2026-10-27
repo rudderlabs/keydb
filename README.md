@@ -112,17 +112,19 @@ for i, key := range keys {
   - The cluster size is dynamically calculated based on active (non-degraded) nodes
   - When a node is marked as degraded, it's excluded from the effective cluster size
 - **Discovery**: `Addresses` can be a single seed, such as the `keydb` Kubernetes Service. On first use the client asks the seed for the cluster's addresses (`GetNodeInfo`), then talks to every node directly; data requests never go through the seed
+  - Every failed discovery attempt that the client retries is counted in `keydb_client_discovery_retries_total`
 - **Moved nodes**: Every node response carries the cluster's address list
-  - When a request fails with a response, the client adopts that response's list if it differs from its own, and retries after the usual backoff
-  - When a node stops answering for `DeadNodeLookupAfter` (default 5s), the client asks the seed and the other nodes for the current list
+  - The client adopts the list from failed responses when it differs from its own: a same-size list is retried after the usual backoff, a size change re-routes the keys at once, and later size changes within the same request wait for the backoff
+  - When a node stops answering for `DeadNodeLookupAfter` (default 5s), counted from the start of the first failing attempt, the client asks the seeds, then the other nodes, for the current list. An answer equal to the client's own list doesn't end the lookup. Against an address that drops packets each attempt blocks for `MinConnectTimeout` (default 20s) before it fails, so with the defaults the lookup comes as soon as the first attempt fails, after 20s
+  - When a lookup moves a node away from an address, the client keeps the node off that address for 3 minutes, which covers the kubelet's configmap refresh: a same-size list that puts the node back there, as a promoted shadow that hasn't reloaded its config still hands out, keeps the node on its new address and adopts the other entries. A list of another size is adopted as is
+  - After a `NOT_READY` answer, such as a shadow's, the retry waits for the backoff capped at 2s, so a request is served within about 2s of the shadow's promotion
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
-- **Automatic retries**: Automatically retries requests that fail for a configured number of times
-  - The client tries again if the cluster size was changed and it hits a node not managing a requested key,
-    although before trying again it will update its internal metadata with the new cluster node addresses first
-    - Cluster changes trigger retries via recursion so there is no limit on the retries here
-    - The client will retry as soon as possible right after trying to establish connections to new nodes (if any)
-  - Normal errors trigger retries with an exponential backoff configured with a `RetryPolicy`
+- **Automatic retries**: Automatically retries failed requests until they succeed or their context ends. With `RetryPolicy.Disabled` a request returns after its first failed attempt, though it still re-routes after a cluster size change
+  - The client tries again if the cluster size changed and it hit a node that doesn't manage a requested key; before trying again it adopts the new cluster node addresses
+    - There is no limit on these retries, so a request doesn't fail because the nodes disagree on the cluster size for a while
+    - The first retry after a size change goes at once, every later one within the same request waits for the backoff
+  - Normal errors trigger retries with an exponential backoff configured with a `RetryPolicy`; after a `NOT_READY` answer the wait is capped at 2s
   - For the retries client configuration please refer to the client [Config](./client/client.go) `struct`
 
 ## Node Configuration
