@@ -77,3 +77,44 @@ func TestShadowRefusesRequests(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, pb.NodeRole_SHADOW, info.Role)
 }
+
+func TestReplacedNodeRefusesRequests(t *testing.T) {
+	ctx := context.Background()
+	addresses := &shadowList{}
+	addresses.set("old:1", "other:1")
+	shadows := &shadowList{}
+	shadows.set("new:1", "")
+	old := newTestService(ctx, t, Config{
+		NodeID:            0,
+		Addresses:         addresses.load,
+		AdvertisedAddress: "old:1",
+		ShadowAddresses:   shadows.load,
+	}, newTestConf(t))
+	keys := []string{"k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8"} // some of them belong to node 0
+
+	putResp, err := old.Put(ctx, &pb.PutRequest{Keys: keys, TtlSeconds: 60})
+	require.NoError(t, err)
+	require.NotEqual(t, pb.ErrorCode_NOT_READY, putResp.ErrorCode, "listed for its index, the node serves")
+
+	// the second PR reaches this pod before it is stopped: its index now belongs to the shadow
+	addresses.set("new:1", "other:1")
+	shadows.set("", "")
+
+	putResp, err = old.Put(ctx, &pb.PutRequest{Keys: keys, TtlSeconds: 60})
+	require.NoError(t, err)
+	require.False(t, putResp.Success)
+	require.Equal(t, pb.ErrorCode_NOT_READY, putResp.ErrorCode, "writes it acknowledged now would be lost")
+	require.Equal(t, []string{"new:1", "other:1"}, putResp.NodesAddresses)
+
+	getResp, err := old.Get(ctx, &pb.GetRequest{Keys: keys})
+	require.NoError(t, err)
+	require.Equal(t, pb.ErrorCode_NOT_READY, getResp.ErrorCode)
+	require.Equal(t, []string{"new:1", "other:1"}, getResp.NodesAddresses)
+
+	t.Run("a node without an advertised address keeps serving", func(t *testing.T) {
+		s := newTestService(ctx, t, Config{NodeID: 0, Addresses: staticList("somewhere:1")}, newTestConf(t))
+		resp, err := s.Get(ctx, &pb.GetRequest{Keys: keys})
+		require.NoError(t, err)
+		require.NotEqual(t, pb.ErrorCode_NOT_READY, resp.ErrorCode)
+	})
+}

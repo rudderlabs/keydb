@@ -316,10 +316,13 @@ const (
 	oldNodeStopsFirst switchOrder = iota
 	// newNodeRefreshesFirst: the shadow picks up the new config before the old node gets SIGTERM
 	newNodeRefreshesFirst
+	// oldNodeRefreshesFirst: the old node picks up the new config a while before it gets SIGTERM
+	oldNodeRefreshesFirst
 )
 
 // move moves node 0 from the from node onto the to node, which must be a fresh node for the same index, the
-// way PR1 and PR2 would. It returns the start of the old node's last completed pass and when the old node stopped.
+// way PR1 and PR2 would. It returns the start of the old node's last completed pass and when the old node stopped
+// acknowledging writes.
 func (c *moveCluster) move(
 	t *testing.T, from, to, other *moveNode, cl *client.Client, order switchOrder,
 ) (lastPassStart, stopped time.Time) {
@@ -352,6 +355,13 @@ func (c *moveCluster) move(
 		c.stop(from)
 		stopped = time.Now()
 		c.setTopology(after.active, after.shadows, other)
+	case oldNodeRefreshesFirst:
+		c.setTopology(after.active, after.shadows, from)
+		stopped = time.Now()
+		time.Sleep(500 * time.Millisecond) // the client keeps sending node 0's keys to the old node meanwhile
+		c.stop(from)
+		c.setTopology(after.active, after.shadows, to)
+		c.setTopology(after.active, after.shadows, other)
 	}
 	require.True(t, hasKeys(t, to, []string{afterReady}),
 		"a key written after readiness must reach the shadow")
@@ -359,7 +369,7 @@ func (c *moveCluster) move(
 }
 
 func TestMoveHappyPath(t *testing.T) {
-	for _, order := range []switchOrder{oldNodeStopsFirst, newNodeRefreshesFirst} {
+	for _, order := range []switchOrder{oldNodeStopsFirst, newNodeRefreshesFirst, oldNodeRefreshesFirst} {
 		t.Run("order "+strconv.Itoa(int(order)), func(t *testing.T) {
 			c := newMoveCluster(t, fastMoveReplication())
 			node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)

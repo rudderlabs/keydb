@@ -723,8 +723,9 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.role() == pb.NodeRole_SHADOW || !s.loadMu.TryRLock() {
-		// a shadow that just became active may still be loading the last range it received
+	if s.role() == pb.NodeRole_SHADOW || s.replaced() || !s.loadMu.TryRLock() {
+		// a shadow that just became active may still be loading the last range it received, and a replaced pod
+		// must leave its index to the pod that took it over
 		s.metrics.errNotReadyCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_NOT_READY
 		return response, nil
@@ -784,8 +785,9 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.role() == pb.NodeRole_SHADOW || !s.loadMu.TryRLock() {
-		// a shadow that just became active may still be loading the last range it received
+	if s.role() == pb.NodeRole_SHADOW || s.replaced() || !s.loadMu.TryRLock() {
+		// a shadow that just became active may still be loading the last range it received, and a replaced pod
+		// must leave its index to the pod that took it over
 		s.metrics.errNotReadyCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_NOT_READY
 		return resp, nil

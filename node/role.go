@@ -26,3 +26,17 @@ func (s *Service) shadowAddress() string {
 	}
 	return shadows[s.config.NodeID]
 }
+
+// replaced returns true when the configuration gives this pod's node index to another pod and doesn't list this pod
+// as its shadow either: the other pod is taking over, so writes this pod acknowledged now would never reach it.
+// A pod without an advertised address, or whose index is past the end of the list, is never replaced.
+func (s *Service) replaced() bool {
+	if s.config.AdvertisedAddress == "" || s.config.Addresses == nil {
+		return false
+	}
+	addresses := s.config.Addresses()
+	if s.config.NodeID < 0 || s.config.NodeID >= int64(len(addresses)) {
+		return false
+	}
+	return addresses[s.config.NodeID] != s.config.AdvertisedAddress && s.shadowAddress() != s.config.AdvertisedAddress
+}
