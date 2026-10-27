@@ -378,3 +378,52 @@ func TestNotReadyRetryDelayIsCapped(t *testing.T) {
 	require.Less(t, time.Since(*readyAt.Load()), 3*time.Second,
 		"a request must be served within notReadyMaxRetryDelay of the node turning ready")
 }
+
+func TestDeadNodeLookupSources(t *testing.T) {
+	cases := []struct {
+		name string
+		// moved changes what the seed and node 0 answer once node 1 moved
+		moved func(seed, node0 *mockNode, newList []string)
+	}{
+		{
+			name: "only the seed knows",
+			moved: func(seed, _ *mockNode, newList []string) {
+				seed.setList(newList...)
+			},
+		},
+		{
+			name: "the seed is gone and another node knows",
+			moved: func(seed, node0 *mockNode, newList []string) {
+				seed.stop()
+				node0.setList(newList...)
+			},
+		},
+		{
+			name: "the seed still hands out the client's list and another node knows",
+			moved: func(_, node0 *mockNode, newList []string) {
+				node0.setList(newList...)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a0, dead1, new1, s := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
+			node0 := newMockNode(t, a0)
+			node0.setList(a0, dead1)
+			newNode1 := newMockNode(t, new1)
+			newNode1.setList(a0, new1)
+			seed := newMockNode(t, s) // a seed that isn't one of the nodes, like the keydb Service
+			seed.setList(a0, dead1)
+
+			c := newDiscoveryClient(t, s)
+			require.NoError(t, c.ensureDiscovered(context.Background()))
+			tc.moved(seed, node0, []string{a0, new1})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err := c.Get(ctx, keysFor(1, 2, 2))
+			require.NoError(t, err, "the lookup must find the node's new address")
+			require.Positive(t, newNode1.gets.Load())
+		})
+	}
+}

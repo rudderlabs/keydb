@@ -156,14 +156,33 @@ func askNodeForAddresses(ctx context.Context, client pb.NodeServiceClient) ([]st
 
 // lookupAddresses asks the seeds, then the nodes other than failingNode, for the cluster's current addresses.
 // It is used when a node stops answering, for example because it was replaced by another one.
+// An answer equal to the client's own list doesn't end the lookup: a source that hasn't refreshed its config yet,
+// such as a pod reached through the Service, would hide the sources that did. The client's own list is returned
+// only when every source that answered returned it.
 func (c *Client) lookupAddresses(ctx context.Context, failingNode int64) ([]string, error) {
-	var lastErr error
+	c.mu.RLock()
+	current := slices.Clone(c.config.Addresses)
+	c.mu.RUnlock()
+
+	var (
+		lastErr  error
+		answered bool // a source answered with the client's own list
+	)
+	differs := func(addresses []string, err error) bool {
+		switch {
+		case err != nil:
+			lastErr = err
+		case slices.Equal(addresses, current):
+			answered = true
+		case len(addresses) > 0:
+			return true
+		}
+		return false
+	}
 	for _, seed := range c.seeds {
-		addresses, err := c.askForAddresses(ctx, seed)
-		if err == nil && len(addresses) > 0 {
+		if addresses, err := c.askForAddresses(ctx, seed); differs(addresses, err) {
 			return addresses, nil
 		}
-		lastErr = err
 	}
 
 	c.mu.RLock()
@@ -176,11 +195,12 @@ func (c *Client) lookupAddresses(ctx context.Context, failingNode int64) ([]stri
 	c.mu.RUnlock()
 	for _, pool := range others {
 		client, _, _ := pool.getClient()
-		addresses, err := askNodeForAddresses(ctx, client)
-		if err == nil && len(addresses) > 0 {
+		if addresses, err := askNodeForAddresses(ctx, client); differs(addresses, err) {
 			return addresses, nil
 		}
-		lastErr = err
+	}
+	if answered {
+		return current, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no node returned any address")
