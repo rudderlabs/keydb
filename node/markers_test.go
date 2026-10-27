@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -338,10 +339,23 @@ func TestShadowMetadataReadsDuringLoad(t *testing.T) {
 func TestForgetShadowSourceSkipsWhileLocked(t *testing.T) {
 	ctx := context.Background()
 	address := "self:1"
+	// the startup reconcile reads the shadow list right after its own forgetShadowSource, which would otherwise
+	// delete the marker planted below
+	reconciled := make(chan struct{})
+	var once sync.Once
 	s := newTestService(ctx, t, Config{
 		NodeID: 0, Addresses: staticList(address), AdvertisedAddress: address,
+		ShadowAddresses: func() []string {
+			once.Do(func() { close(reconciled) })
+			return nil
+		},
 		Replication: ReplicationConfig{ReconcileInterval: time.Hour},
 	}, newTestConf(t))
+	select {
+	case <-reconciled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the startup reconcile never ran")
+	}
 	require.NoError(t, s.cache.PutValue(shadowSourceKey, internalKeysHashRange, []byte("old:1"), 0))
 
 	s.mu.Lock() // a load holds the write lock
