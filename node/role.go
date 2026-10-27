@@ -26,7 +26,7 @@ func (s *Service) shadowAddress() string {
 		return ""
 	}
 	shadows := s.config.ShadowAddresses()
-	if s.config.NodeID < 0 || int(s.config.NodeID) >= len(shadows) {
+	if s.config.NodeID < 0 || s.config.NodeID >= int64(len(shadows)) {
 		return ""
 	}
 	return shadows[s.config.NodeID]

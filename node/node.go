@@ -1135,7 +1135,7 @@ func (s *Service) isDegraded() (bool, int64) {
 	if len(degradedNodes) == 0 {
 		return false, 0
 	}
-	if int(s.config.NodeID) >= len(degradedNodes) {
+	if s.config.NodeID >= int64(len(degradedNodes)) {
 		s.logger.Warnn("Node ID out of range for degraded nodes list",
 			logger.NewIntField("nodeId", s.config.NodeID),
 			logger.NewIntField("degradedNodes", int64(len(degradedNodes))),

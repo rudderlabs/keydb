@@ -78,7 +78,7 @@ func (s *Service) forgetShadowSource() {
 		return
 	}
 	addresses := s.config.Addresses()
-	if s.config.NodeID < 0 || int(s.config.NodeID) >= len(addresses) ||
+	if s.config.NodeID < 0 || s.config.NodeID >= int64(len(addresses)) ||
 		addresses[s.config.NodeID] != s.config.AdvertisedAddress {
 		return
 	}
