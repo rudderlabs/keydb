@@ -1,11 +1,6 @@
 package node
 
 import (
-	"context"
-
-	"google.golang.org/grpc/metadata"
-
-	"github.com/rudderlabs/keydb/client"
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
@@ -30,14 +25,4 @@ func (s *Service) shadowAddress() string {
 		return ""
 	}
 	return shadows[s.config.NodeID]
-}
-
-// trackLegacyClient records a Get or Put from a client that doesn't send the features header.
-// Such a client never learns that a node moved, so readiness to switch waits until none has been seen for a while.
-func (s *Service) trackLegacyClient(ctx context.Context) {
-	if md, ok := metadata.FromIncomingContext(ctx); ok && len(md.Get(client.FeaturesHeader)) > 0 {
-		return
-	}
-	s.lastLegacyClientRequest.Store(s.now().Unix())
-	s.metrics.legacyClientRequests.Increment()
 }

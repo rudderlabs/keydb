@@ -14,7 +14,6 @@ import (
 	"github.com/ory/dockertest/v3"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
 	"github.com/rudderlabs/rudder-go-kit/config"
@@ -580,38 +579,6 @@ func TestMoveSeedThroughService(t *testing.T) {
 	}
 	require.Equal(t, 2, cl.ClusterSize())
 	require.Positive(t, proxy.next.Load(), "discovery must have gone through the Service")
-}
-
-func TestMoveOldClients(t *testing.T) {
-	c := newMoveCluster(t, fastMoveReplication())
-	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-	active := []string{node0.address, node1.address}
-	c.setTopology(active, []string{node0b.address, ""})
-	c.start(node0)
-	c.start(node1)
-	c.start(node0b)
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond)
-
-	// a client that predates node moves sends no features header
-	rawClient := func(address string) pb.NodeServiceClient {
-		conn, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = conn.Close() })
-		return pb.NewNodeServiceClient(conn)
-	}
-	_, err := rawClient(node0.address).Get(context.Background(), &pb.GetRequest{Keys: []string{"k"}})
-	require.NoError(t, err)
-	require.Eventually(t, func() bool { return !node0.service.ReplicationStatus().Ready }, 10*time.Second,
-		20*time.Millisecond)
-	require.Contains(t, strings.Join(node0.service.ReplicationStatus().NotReadyReasons, ","), "old clients")
-
-	// a shadow answers such a client with the real cluster size and the full list, a retryable error
-	resp, err := rawClient(node0b.address).Get(context.Background(), &pb.GetRequest{Keys: []string{"k"}})
-	require.NoError(t, err)
-	require.Equal(t, pb.ErrorCode_NOT_READY, resp.ErrorCode)
-	require.EqualValues(t, 2, resp.ClusterSize)
-	require.Equal(t, active, resp.NodesAddresses)
 }
 
 // switchableSignals reports load when told to

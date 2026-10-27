@@ -16,7 +16,6 @@ import (
 	grpcbackoff "google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/metadata"
 
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
@@ -44,13 +43,6 @@ const (
 	DefaultConnectionPoolSize = 10
 
 	DefaultDeadNodeLookupAfter = 5 * time.Second
-
-	// FeaturesHeader is the gRPC metadata key the client uses to tell nodes which client features it supports.
-	// Nodes treat Get and Put requests without it as coming from a client that predates node moves.
-	FeaturesHeader = "keydb-client-features"
-	// FeatureDiscovery means the client discovers the cluster through a seed, adopts address lists from failed
-	// responses and looks the list up again when a node is gone.
-	FeatureDiscovery = "discovery"
 )
 
 type errClusterSizeChanged struct {
@@ -540,14 +532,6 @@ func (c *Client) getGrpcDialOptions() []grpc.DialOption {
 		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
 			var dialer net.Dialer
 			return dialer.DialContext(ctx, "tcp", addr)
-		}),
-		// tells the nodes this client discovers the cluster and follows moved nodes
-		grpc.WithUnaryInterceptor(func(
-			ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker,
-			opts ...grpc.CallOption,
-		) error {
-			ctx = metadata.AppendToOutgoingContext(ctx, FeaturesHeader, FeatureDiscovery)
-			return invoker(ctx, method, req, reply, cc, opts...)
 		}),
 	}
 }

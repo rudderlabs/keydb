@@ -11,13 +11,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/metadata"
 
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/stats/memstats"
 
-	"github.com/rudderlabs/keydb/client"
 	"github.com/rudderlabs/keydb/internal/cache/badger"
 	pb "github.com/rudderlabs/keydb/proto"
 )
@@ -128,8 +126,7 @@ func TestLeftoverDiskGuard(t *testing.T) {
 }
 
 func TestShadowReceiveMultiChunk(t *testing.T) {
-	ctx := metadata.NewOutgoingContext(context.Background(),
-		metadata.Pairs(client.FeaturesHeader, client.FeatureDiscovery))
+	ctx := context.Background()
 	newConf := func() *config.Config {
 		conf := newTestConf(t)
 		conf.Set("BadgerDB.Dedup.Compress", false)

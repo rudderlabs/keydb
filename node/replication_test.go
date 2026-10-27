@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,8 +12,6 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/stats/memstats"
-
-	pb "github.com/rudderlabs/keydb/proto"
 )
 
 // healthySignals reports a node under no load
@@ -164,13 +161,6 @@ func TestReplicationReadiness(t *testing.T) {
 	require.True(t, status.ShadowAllRangesSynced)
 	require.Empty(t, status.NotReadyReasons)
 	require.GreaterOrEqual(t, status.GapSeconds, float64(0))
-
-	// a request from a client without the features header blocks the switch
-	_, err := p.source.Get(context.Background(), &pb.GetRequest{Keys: []string{"key-1"}})
-	require.NoError(t, err)
-	require.Eventually(t, func() bool { return !p.source.ReplicationStatus().Ready },
-		10*time.Second, 20*time.Millisecond)
-	require.Contains(t, strings.Join(p.source.ReplicationStatus().NotReadyReasons, ","), "old clients")
 }
 
 func TestReplicationStopsOnClear(t *testing.T) {

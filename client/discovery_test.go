@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/metadata"
 
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
@@ -29,8 +28,6 @@ type mockNode struct {
 	list atomic.Pointer[[]string]
 	// notReady makes Get answer NOT_READY with the node's list
 	notReady atomic.Bool
-	// sawHeader is true once a Get carried the client features header
-	sawHeader atomic.Bool
 }
 
 func (n *mockNode) setList(list ...string) { n.list.Store(&list) }
@@ -50,11 +47,8 @@ func newMockNode(t *testing.T, address string) *mockNode {
 	n := &mockNode{address: address}
 	n.setList(address)
 	server := &mockNodeServiceServer{
-		getFunc: func(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
+		getFunc: func(_ context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
 			n.gets.Add(1)
-			if md, ok := metadata.FromIncomingContext(ctx); ok && len(md.Get(FeaturesHeader)) > 0 {
-				n.sawHeader.Store(true)
-			}
 			list := n.currentList()
 			resp := &proto.GetResponse{ClusterSize: int64(len(list)), NodesAddresses: list}
 			if n.notReady.Load() {
@@ -238,15 +232,6 @@ func TestNoLockAcrossBackoff(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("a request to node 1 was blocked by node 0 backing off")
 	}
-}
-
-func TestFeaturesHeaderSent(t *testing.T) {
-	a0 := freeMockAddress(t)
-	node0 := newMockNode(t, a0)
-	c := newDiscoveryClient(t, a0)
-	_, err := c.Get(context.Background(), []string{"key"})
-	require.NoError(t, err)
-	require.True(t, node0.sawHeader.Load())
 }
 
 func TestCallNodeAfterConcurrentShrink(t *testing.T) {

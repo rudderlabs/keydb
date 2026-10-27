@@ -44,8 +44,6 @@ type ReplicationConfig struct {
 	PauseBetweenPasses time.Duration
 	// GapThreshold is the largest gap at which the node is ready to switch, 60s when zero
 	GapThreshold time.Duration
-	// LegacyClientQuietPeriod is how long no old client must have been seen before the node is ready, 15m when zero
-	LegacyClientQuietPeriod time.Duration
 	// BrakeInterval is how often the brake samples the node's load, 5s when zero
 	BrakeInterval time.Duration
 	// ReconcileInterval is how often the shadow list is re-read, 1s when zero
@@ -76,9 +74,6 @@ func (c *ReplicationConfig) setDefaults() {
 	if c.GapThreshold == 0 {
 		c.GapThreshold = 60 * time.Second
 	}
-	if c.LegacyClientQuietPeriod == 0 {
-		c.LegacyClientQuietPeriod = 15 * time.Minute
-	}
 	if c.BrakeInterval == 0 {
 		c.BrakeInterval = 5 * time.Second
 	}
@@ -89,26 +84,25 @@ func (c *ReplicationConfig) setDefaults() {
 
 // ReplicationStatus is what GET /replication/status returns.
 type ReplicationStatus struct {
-	Role                    string    `json:"role"`
-	ShadowAddress           string    `json:"shadowAddress"`
-	State                   string    `json:"state"` // "idle" or "running"
-	PassesCompleted         int64     `json:"passesCompleted"`
-	CurrentPassRangesDone   int       `json:"currentPassRangesDone"`
-	CurrentPassRangesTotal  int       `json:"currentPassRangesTotal"`
-	LastPassStartedAt       time.Time `json:"lastPassStartedAt"`
-	LastPassEndedAt         time.Time `json:"lastPassEndedAt"`
-	LastPassDuration        string    `json:"lastPassDuration"`
-	LastPassBytes           int64     `json:"lastPassBytes"`
-	LastPassRanges          int       `json:"lastPassRanges"`
-	GapSeconds              float64   `json:"gapSeconds"` // -1 before the first full pass
-	ShadowAllRangesSynced   bool      `json:"shadowAllRangesSynced"`
-	LastLegacyClientRequest time.Time `json:"lastLegacyClientRequest"`
-	BudgetBytesPerSecond    int64     `json:"budgetBytesPerSecond"`
-	BrakeEngaged            bool      `json:"brakeEngaged"`
-	BrakeReason             string    `json:"brakeReason"`
-	Ready                   bool      `json:"ready"`
-	NotReadyReasons         []string  `json:"notReadyReasons"`
-	LastError               string    `json:"lastError"`
+	Role                   string    `json:"role"`
+	ShadowAddress          string    `json:"shadowAddress"`
+	State                  string    `json:"state"` // "idle" or "running"
+	PassesCompleted        int64     `json:"passesCompleted"`
+	CurrentPassRangesDone  int       `json:"currentPassRangesDone"`
+	CurrentPassRangesTotal int       `json:"currentPassRangesTotal"`
+	LastPassStartedAt      time.Time `json:"lastPassStartedAt"`
+	LastPassEndedAt        time.Time `json:"lastPassEndedAt"`
+	LastPassDuration       string    `json:"lastPassDuration"`
+	LastPassBytes          int64     `json:"lastPassBytes"`
+	LastPassRanges         int       `json:"lastPassRanges"`
+	GapSeconds             float64   `json:"gapSeconds"` // -1 before the first full pass
+	ShadowAllRangesSynced  bool      `json:"shadowAllRangesSynced"`
+	BudgetBytesPerSecond   int64     `json:"budgetBytesPerSecond"`
+	BrakeEngaged           bool      `json:"brakeEngaged"`
+	BrakeReason            string    `json:"brakeReason"`
+	Ready                  bool      `json:"ready"`
+	NotReadyReasons        []string  `json:"notReadyReasons"`
+	LastError              string    `json:"lastError"`
 }
 
 // replicator fills the node's shadow, if it has one. It re-reads the shadow list periodically and runs a job
@@ -461,11 +455,6 @@ func (r *replicator) evaluate(ctx context.Context, shadow pb.NodeServiceClient, 
 		}
 	}
 
-	if last := r.s.lastLegacyClientRequest.Load(); last > 0 &&
-		now.Sub(time.Unix(last, 0)) < r.cfg.LegacyClientQuietPeriod {
-		reasons = append(reasons, "old clients seen recently")
-	}
-
 	ready := len(reasons) == 0
 	if ctx.Err() != nil {
 		return // the job is stopping, its last evaluation means nothing
@@ -560,9 +549,6 @@ func (r *replicator) status() ReplicationStatus {
 	}
 	if p.fullPassDone {
 		status.GapSeconds = r.s.now().Sub(p.lastCompletedPassStart).Seconds()
-	}
-	if last := r.s.lastLegacyClientRequest.Load(); last > 0 {
-		status.LastLegacyClientRequest = time.Unix(last, 0)
 	}
 	status.BudgetBytesPerSecond, status.BrakeEngaged, status.BrakeReason = r.budget.current()
 	if !p.ready && status.NotReadyReasons == nil {

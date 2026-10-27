@@ -5,9 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/metadata"
 
-	"github.com/rudderlabs/keydb/client"
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
@@ -78,31 +76,4 @@ func TestShadowRefusesRequests(t *testing.T) {
 	info, err := shadow.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
 	require.NoError(t, err)
 	require.Equal(t, pb.NodeRole_SHADOW, info.Role)
-}
-
-func TestLegacyClientTracking(t *testing.T) {
-	ctx := context.Background()
-	newService := func(t *testing.T) *Service {
-		return newTestService(ctx, t, Config{NodeID: 0, Addresses: staticList("a:1")}, newTestConf(t))
-	}
-
-	t.Run("request without header", func(t *testing.T) {
-		s := newService(t)
-		_, err := s.Get(ctx, &pb.GetRequest{Keys: []string{"k1"}})
-		require.NoError(t, err)
-		info, err := s.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
-		require.NoError(t, err)
-		require.Positive(t, info.LastLegacyClientRequestUnix)
-		require.Equal(t, pb.NodeRole_ACTIVE, info.Role)
-	})
-
-	t.Run("request with header", func(t *testing.T) {
-		s := newService(t)
-		md := metadata.Pairs(client.FeaturesHeader, client.FeatureDiscovery)
-		_, err := s.Put(metadata.NewIncomingContext(ctx, md), &pb.PutRequest{Keys: []string{"k1"}, TtlSeconds: 60})
-		require.NoError(t, err)
-		info, err := s.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
-		require.NoError(t, err)
-		require.Zero(t, info.LastLegacyClientRequestUnix)
-	})
 }

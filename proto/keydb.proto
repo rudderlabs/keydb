@@ -94,7 +94,6 @@ message GetNodeInfoResponse {
   int64 last_snapshot_timestamp = 5; // Unix timestamp of the last snapshot
   NodeRole role = 6; // Whether the node is active or a shadow
   bool all_ranges_synced = 7; // True when the node holds a since marker for every hash range it owns
-  int64 last_legacy_client_request_unix = 8; // Unix timestamp of the last Get/Put without the client features header
 }
 
 // LoadSnapshotsRequest initiates loading snapshots from cloud storage

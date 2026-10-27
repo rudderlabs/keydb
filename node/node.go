@@ -92,9 +92,6 @@ type Service struct {
 	stats          stats.Stats
 	logger         logger.Logger
 
-	// lastLegacyClientRequest is the unix time of the last Get or Put without the client features header
-	lastLegacyClientRequest atomic.Int64
-
 	// markers mirrors the since markers kept in the cache, so that GetNodeInfo and GetSnapshotSince never open a
 	// transaction while a shadow loads a range (badger's Load moves the oracle without synchronisation)
 	markers struct {
@@ -117,7 +114,6 @@ type Service struct {
 	closeOnce sync.Once
 
 	metrics struct {
-		legacyClientRequests        stats.Counter
 		shadowLeftoverDisk          stats.Counter
 		errNotReadyCounter          stats.Counter
 		getKeysCounters             map[int64]stats.Counter
@@ -268,9 +264,6 @@ func NewService(
 	service.metrics.errNotReadyCounter = stat.NewTaggedStat("keydb_err_not_ready_count", stats.CountType, statsTags)
 	service.metrics.shadowLeftoverDisk = stat.NewTaggedStat(
 		"keydb_shadow_leftover_disk_total", stats.CountType, statsTags,
-	)
-	service.metrics.legacyClientRequests = stat.NewTaggedStat(
-		"keydb_legacy_client_requests_total", stats.CountType, statsTags,
 	)
 	service.metrics.getKeysCounters = make(map[int64]stats.Counter)
 	service.metrics.putKeysCounter = make(map[int64]stats.Counter)
@@ -720,12 +713,10 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...int64
 }
 
 // Get implements the Get RPC method
-func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
+func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
 	defer func(start time.Time) { s.latency.observe(time.Since(start)) }(time.Now())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	s.trackLegacyClient(ctx)
 
 	response := &pb.GetResponse{
 		ClusterSize:    s.config.getClusterSize(),
@@ -782,12 +773,10 @@ func (s *Service) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse,
 }
 
 // Put implements the Put RPC method
-func (s *Service) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
+func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
 	defer func(start time.Time) { s.latency.observe(time.Since(start)) }(time.Now())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	s.trackLegacyClient(ctx)
 
 	resp := &pb.PutResponse{
 		Success:        false,
@@ -867,14 +856,13 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 	}
 
 	return &pb.GetNodeInfoResponse{
-		NodeId:                      s.config.NodeID,
-		ClusterSize:                 s.config.getClusterSize(),
-		NodesAddresses:              s.getNonDegradedAddresses(),
-		HashRanges:                  hashRanges,
-		LastSnapshotTimestamp:       s.lastSnapshotTime.Unix(),
-		Role:                        s.role(),
-		AllRangesSynced:             s.allRangesSynced(),
-		LastLegacyClientRequestUnix: s.lastLegacyClientRequest.Load(),
+		NodeId:                s.config.NodeID,
+		ClusterSize:           s.config.getClusterSize(),
+		NodesAddresses:        s.getNonDegradedAddresses(),
+		HashRanges:            hashRanges,
+		LastSnapshotTimestamp: s.lastSnapshotTime.Unix(),
+		Role:                  s.role(),
+		AllRangesSynced:       s.allRangesSynced(),
 	}, nil
 }
 

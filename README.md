@@ -115,7 +115,6 @@ for i, key := range keys {
 - **Moved nodes**: Every node response carries the cluster's address list
   - When a request fails with a response, the client adopts that response's list if it differs from its own, and retries after the usual backoff
   - When a node stops answering for `DeadNodeLookupAfter` (default 5s), the client asks the seed and the other nodes for the current list
-  - The client sends the `keydb-client-features` gRPC header, so nodes can tell older clients apart
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
 - **Automatic retries**: Automatically retries requests that fail for a configured number of times
@@ -568,14 +567,14 @@ The move uses a **shadow**: a second StatefulSet for the same node index, with t
   - an automatic brake that halves the budget, down to a pause, whenever Go scheduler latency, the node's own Get/Put latency or cgroup CPU throttling crosses its threshold, and raises it again in steps once healthy. Get/Put latency is compared with a baseline taken from the first sample with traffic of each job, and never counts below an absolute floor. A lower budget also spaces passes out, because an incremental pass still scans every table written since the previous one;
   - a paused or fully braked copy doesn't scan at all, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
   - garbage collection skips its runs while a pass is in progress.
-- **Readiness:** the serving node is ready to switch once a full pass is done, the gap is under `replication.gapThreshold` (default 60s), the shadow holds a marker for every range, and no client without the features header has been seen for `replication.legacyClientQuietPeriod` (default 15m). The gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass.
+- **Readiness:** the serving node is ready to switch once a full pass is done, the gap is under `replication.gapThreshold` (default 60s), and the shadow holds a marker for every range. The gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass.
 - **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after its last completed pass, at most the gap, are lost.
 - **Leftover disks:** a shadow refuses to receive data when its disk already holds data from another source, so a disk Kubernetes didn't delete can't silently turn a move into a merge.
 
 ### Prerequisites
 
 - A keydb image with node moves, and `global.keydb.nodeMoves: true` in the customer object, which restarts the keydb pods once.
-- Processors running a rudder-server version with this client and the `keydb` Service as their URL. Older clients never follow a moved node, and readiness stays false while one is connected.
+- Every processor of the customer running a rudder-server version with this client, and the `keydb` Service as their URL. Older clients never follow a moved node, and nodes can't tell them apart, so check the rudder-server version before adding the shadow.
 - No `/hashRangeMovements` or `/backup` while a move is in progress: they compete with replication for the snapshot slot.
 
 ### Procedure
@@ -630,7 +629,6 @@ Before PR2, reverting PR1 removes the shadow and its disk. After PR2 the old dis
 | `replication.paused` | `false` | yes |
 | `replication.pauseBetweenPasses` | `5s` | no |
 | `replication.gapThreshold` | `60s` | no |
-| `replication.legacyClientQuietPeriod` | `15m` | no |
 | `replication.brakeInterval` | `5s` | no |
 | `replication.brake.schedLatencyThreshold` | `10ms` | no |
 | `replication.brake.requestLatencyFactor` | `2` | no |
@@ -644,7 +642,7 @@ Before PR2, reverting PR1 removes the shadow and its disk. After PR2 the old dis
 - `keydb_replication_ready`, `keydb_replication_gap_seconds`
 - `keydb_replication_pass_duration_seconds`, `keydb_replication_bytes_total`, `keydb_replication_errors_total`
 - `keydb_replication_budget_bytes_per_second`, `keydb_replication_brake_events_total` (by `reason`)
-- `keydb_legacy_client_requests_total`, `keydb_err_not_ready_count`, `keydb_shadow_leftover_disk_total`
+- `keydb_err_not_ready_count`, `keydb_shadow_leftover_disk_total`
 
 ## Performance
 
