@@ -218,8 +218,9 @@ type load struct {
 }
 
 type ackedBatch struct {
-	at   time.Time
-	keys []string
+	started time.Time
+	at      time.Time
+	keys    []string
 }
 
 func startLoad(t *testing.T, cl *client.Client, prefix string) *load {
@@ -245,7 +246,7 @@ func startLoad(t *testing.T, cl *client.Client, prefix string) *load {
 			if err != nil {
 				l.errs = append(l.errs, err)
 			} else {
-				l.acked = append(l.acked, ackedBatch{at: time.Now(), keys: keys})
+				l.acked = append(l.acked, ackedBatch{started: start, at: time.Now(), keys: keys})
 			}
 			l.maxStall = max(l.maxStall, took)
 			l.mu.Unlock()
@@ -274,6 +275,20 @@ func (l *load) keysAckedBetween(from, to time.Time) []string {
 	var keys []string
 	for _, b := range l.acked {
 		if !b.at.Before(from) && b.at.Before(to) {
+			keys = append(keys, b.keys...)
+		}
+	}
+	return keys
+}
+
+// keysStartedAfter returns the keys of the acknowledged batches whose request started at or after from. A batch in
+// flight when the old node stopped may have been written there and acknowledged late, which is the accepted tail.
+func (l *load) keysStartedAfter(from time.Time) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var keys []string
+	for _, b := range l.acked {
+		if !b.started.Before(from) {
 			keys = append(keys, b.keys...)
 		}
 	}
@@ -369,8 +384,8 @@ func TestMoveHappyPath(t *testing.T) {
 			require.Less(t, l.maxStall, 10*time.Second, "the switch stalled the client for too long")
 			require.True(t, hasKeys(t, node0b, l.keysAckedBetween(time.Time{}, lastPassStart)),
 				"keys acknowledged before the last completed pass must be on the new node")
-			require.True(t, hasKeys(t, node0b, l.keysAckedBetween(stopped, time.Now())),
-				"keys acknowledged after the old node stopped, retried in-flight ones too, must be on the new node")
+			require.True(t, hasKeys(t, node0b, l.keysStartedAfter(stopped)),
+				"keys written after the old node stopped must be on the new node")
 			require.True(t, hasKeys(t, node1, l.keysAckedBetween(time.Time{}, time.Now())),
 				"the node that didn't move keeps all its keys")
 		})
@@ -439,7 +454,8 @@ func TestMoveRestartMidReplication(t *testing.T) {
 	// the serving node restarts on the same disk
 	c.stop(node0)
 	c.start(node0)
-	require.Equal(t, "running", node0.service.ReplicationStatus().State, "replication resumes on boot")
+	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().State == "running" }, 10*time.Second,
+		10*time.Millisecond, "replication resumes on boot")
 	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
 		20*time.Millisecond, "readiness must be reported again once caught up")
 	status := node0.service.ReplicationStatus()

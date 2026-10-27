@@ -196,9 +196,8 @@ func TestReplicationNeedsAdvertisedAddress(t *testing.T) {
 		ShadowAddresses: staticList(shadowAddress),
 		Replication:     fastReplication(nil),
 	}, newTestConf(t))
-	time.Sleep(200 * time.Millisecond)
-	require.Equal(t, "idle", s.ReplicationStatus().State,
-		"without an advertised address a node can't tell it isn't the shadow itself")
+	require.Never(t, func() bool { return s.ReplicationStatus().State != "idle" }, 200*time.Millisecond,
+		10*time.Millisecond, "without an advertised address a node can't tell it isn't the shadow itself")
 }
 
 func TestReplicationNoRaceWithDegradedChange(t *testing.T) {
