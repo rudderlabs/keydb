@@ -224,13 +224,11 @@ func (r *replicator) switchTarget(ctx context.Context, target string) {
 	r.mu.Lock()
 	cancel, done := r.cancel, r.done
 	r.target, r.cancel, r.done = "", nil, nil
+	r.progress = replicationProgress{} // a stopped copy has no readiness to report, not even while it winds down
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
 		<-done
-		r.mu.Lock()
-		r.progress = replicationProgress{} // a stopped copy has no readiness to report
-		r.mu.Unlock()
 		r.metrics.ready.Gauge(0)
 		r.s.logger.Infon("Replication stopped")
 	}
@@ -473,6 +471,10 @@ func (r *replicator) evaluate(ctx context.Context, shadow pb.NodeServiceClient, 
 		return // the job is stopping, its last evaluation means nothing
 	}
 	r.mu.Lock()
+	if r.target == "" {
+		r.mu.Unlock()
+		return // stopped after the check above
+	}
 	wasReady := r.progress.ready
 	r.progress.ready = ready
 	r.progress.notReadyReasons = reasons
@@ -511,9 +513,14 @@ func (r *replicator) passDelay() time.Duration {
 	return min(delay, maxPassDelay)
 }
 
+// update changes the progress of the running job. A job that is stopping changes nothing: its target is already
+// cleared, and the next job only starts once it has ended.
 func (r *replicator) update(f func(p *replicationProgress)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.target == "" {
+		return
+	}
 	f(&r.progress)
 }
 
