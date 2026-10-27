@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/metrics"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -201,17 +202,30 @@ func TestRuntimeSignalsCgroup(t *testing.T) {
 		require.Zero(t, s.Sample().ThrottledRatio)
 	})
 
-	t.Run("throttled half of the window", func(t *testing.T) {
+	t.Run("throttled in half of the periods", func(t *testing.T) {
 		file := filepath.Join(t.TempDir(), "cpu.stat")
-		require.NoError(t, os.WriteFile(file, []byte("usage_usec 10\nthrottled_usec 1000\n"), 0o600))
-		now := time.Unix(100, 0)
+		stat := func(periods, throttled, throttledUsec int) []byte {
+			return []byte("usage_usec 10\nnr_periods " + strconv.Itoa(periods) +
+				"\nnr_throttled " + strconv.Itoa(throttled) + "\nthrottled_usec " + strconv.Itoa(throttledUsec) + "\n")
+		}
+		require.NoError(t, os.WriteFile(file, stat(100, 10, 1000), 0o600))
 		s := newRuntimeSignals(func() time.Duration { return 0 }, file)
-		s.now = func() time.Time { return now }
-		_ = s.Sample()
+		require.Zero(t, s.Sample().ThrottledRatio, "the first sample has nothing to compare with")
 
-		require.NoError(t, os.WriteFile(file, []byte("usage_usec 20\nthrottled_usec 501000\n"), 0o600))
-		now = now.Add(time.Second)
+		// throttled time adds up across CPUs, so it can exceed the window: only the periods make a ratio
+		require.NoError(t, os.WriteFile(file, stat(200, 60, 9_000_000), 0o600))
 		require.InDelta(t, 0.5, s.Sample().ThrottledRatio, 0.001)
+
+		require.NoError(t, os.WriteFile(file, stat(200, 60, 9_000_000), 0o600))
+		require.Zero(t, s.Sample().ThrottledRatio, "no period elapsed")
+	})
+
+	t.Run("no CPU limit", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "cpu.stat")
+		require.NoError(t, os.WriteFile(file, []byte("usage_usec 10\nnr_periods 0\nnr_throttled 0\n"), 0o600))
+		s := newRuntimeSignals(func() time.Duration { return 0 }, file)
+		_ = s.Sample()
+		require.Zero(t, s.Sample().ThrottledRatio)
 	})
 
 	t.Run("request latency comes from the tracker", func(t *testing.T) {
@@ -259,4 +273,22 @@ func TestBudgetAbandonsLongPause(t *testing.T) {
 		require.Eventually(t, func() bool { return len(done) > 0 }, 3*time.Second, 50*time.Millisecond)
 		require.NoError(t, <-done)
 	})
+}
+
+func TestBudgetNonPositiveMax(t *testing.T) {
+	for _, maxBytes := range []int64{0, -1} {
+		var paused atomic.Bool
+		b := newTestBudget(maxBytes, &paused)
+		b.tick(BrakeSample{})
+
+		rate, engaged, reason := b.current()
+		require.Zero(t, rate)
+		require.True(t, engaged, "a copy that can't move must not look unbraked")
+		require.Equal(t, "maxBytesPerSecond is not positive", reason)
+
+		done := make(chan error, 1)
+		go func() { done <- b.waitNonZero(context.Background()) }()
+		require.Never(t, func() bool { return len(done) > 0 }, 300*time.Millisecond, 50*time.Millisecond,
+			"the copy waits like a paused one")
+	}
 }

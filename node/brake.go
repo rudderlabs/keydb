@@ -40,7 +40,8 @@ type BrakeSample struct {
 	SchedLatencyP99 time.Duration
 	// RequestLatency is the mean Get and Put latency
 	RequestLatency time.Duration
-	// ThrottledRatio is the fraction of the window the cgroup was throttled
+	// ThrottledRatio is the fraction of the cgroup's CPU periods in which it was throttled. It stays at 0 without a
+	// CPU limit, since a cgroup without a quota is never throttled.
 	ThrottledRatio float64
 }
 
@@ -111,7 +112,7 @@ func (b *budget) effective() int64 {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return min(b.budgetBytes, b.cfg.max())
+	return max(min(b.budgetBytes, b.cfg.max()), 0)
 }
 
 // current returns the budget that applies now, whether the brake (or a pause) holds it below the max, and why.
@@ -119,9 +120,13 @@ func (b *budget) current() (bytesPerSecond int64, engaged bool, reason string) {
 	if b.cfg.paused() {
 		return 0, true, "paused manually"
 	}
+	maxBytes := b.cfg.max()
+	if maxBytes <= 0 {
+		// for example a value written with a unit, which the config reads as 0
+		return 0, true, "maxBytesPerSecond is not positive"
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	maxBytes := b.cfg.max()
 	bytesPerSecond = min(b.budgetBytes, maxBytes)
 	if bytesPerSecond < maxBytes {
 		return bytesPerSecond, true, b.reason
@@ -245,20 +250,17 @@ func (b *budget) waitNonZero(ctx context.Context) error {
 type runtimeSignals struct {
 	requestLatency func() time.Duration
 	cgroupFile     string
-	now            func() time.Time
 
-	samples           []metrics.Sample
-	prevSched         *metrics.Float64Histogram
-	prevThrottledUsec int64
-	prevThrottledOK   bool
-	prevTime          time.Time
+	samples   []metrics.Sample
+	prevSched *metrics.Float64Histogram
+	prevCPU   cgroupCPUStat
+	prevCPUOK bool
 }
 
 func newRuntimeSignals(requestLatency func() time.Duration, cgroupFile string) *runtimeSignals {
 	return &runtimeSignals{
 		requestLatency: requestLatency,
 		cgroupFile:     cgroupFile,
-		now:            time.Now,
 		samples:        []metrics.Sample{{Name: "/sched/latencies:seconds"}},
 	}
 }
@@ -277,18 +279,14 @@ func (r *runtimeSignals) Sample() BrakeSample {
 		r.prevSched = cur
 	}
 
-	now := r.now()
-	if throttledUsec, ok := readThrottledUsec(r.cgroupFile); ok {
-		if r.prevThrottledOK {
-			window := now.Sub(r.prevTime)
-			if window > 0 {
-				delta := time.Duration(throttledUsec-r.prevThrottledUsec) * time.Microsecond
-				sample.ThrottledRatio = float64(delta) / float64(window)
+	if cpu, ok := readCgroupCPUStat(r.cgroupFile); ok {
+		if r.prevCPUOK {
+			if periods := cpu.periods - r.prevCPU.periods; periods > 0 {
+				sample.ThrottledRatio = float64(cpu.throttled-r.prevCPU.throttled) / float64(periods)
 			}
 		}
-		r.prevThrottledUsec, r.prevThrottledOK = throttledUsec, true
+		r.prevCPU, r.prevCPUOK = cpu, true
 	}
-	r.prevTime = now
 	return sample
 }
 
@@ -324,28 +322,43 @@ func histogramP99(prev, cur *metrics.Float64Histogram) time.Duration {
 	return 0
 }
 
-// readThrottledUsec reads throttled_usec from a cgroup v2 cpu.stat file.
-func readThrottledUsec(file string) (int64, bool) {
+// cgroupCPUStat holds the CPU period counters of a cgroup v2 cpu.stat file.
+type cgroupCPUStat struct {
+	periods, throttled int64
+}
+
+// readCgroupCPUStat reads nr_periods and nr_throttled from a cgroup v2 cpu.stat file. Both stay at 0 without a CPU
+// limit. Throttled time (throttled_usec) isn't used: it adds up across CPUs, so it makes no ratio of the window.
+func readCgroupCPUStat(file string) (cgroupCPUStat, bool) {
 	if file == "" {
-		return 0, false
+		return cgroupCPUStat{}, false
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return 0, false
+		return cgroupCPUStat{}, false
 	}
+	var (
+		stat                         cgroupCPUStat
+		foundPeriods, foundThrottled bool
+	)
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
 		name, value, ok := strings.Cut(scanner.Text(), " ")
-		if !ok || name != "throttled_usec" {
+		if !ok {
 			continue
 		}
-		usec, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 		if err != nil {
-			return 0, false
+			continue
 		}
-		return usec, true
+		switch name {
+		case "nr_periods":
+			stat.periods, foundPeriods = n, true
+		case "nr_throttled":
+			stat.throttled, foundThrottled = n, true
+		}
 	}
-	return 0, false
+	return stat, foundPeriods && foundThrottled
 }
 
 // latencyTracker keeps the mean Get and Put latency since it was last read.
