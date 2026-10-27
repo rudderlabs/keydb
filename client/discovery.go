@@ -479,10 +479,9 @@ func callNode[R nodeResponse](
 		// If retry is disabled, return immediately after first attempt
 		if c.config.RetryPolicy.Disabled {
 			if respErr != nil {
-				return zero, fmt.Errorf("failed to %s keys from node %d: %w", method, nodeID, respErr)
+				return zero, fmt.Errorf("%s keys from node %d: %w", method, nodeID, respErr)
 			}
-			return zero, fmt.Errorf("failed to %s keys from node %d with error code %s",
-				method, nodeID, resp.GetErrorCode().String())
+			return zero, fmt.Errorf("%s keys from node %d: error code %s", method, nodeID, resp.GetErrorCode().String())
 		}
 
 		retryDelay := nextBackoff()
