@@ -29,6 +29,11 @@ const (
 	// as soon as its kubelet refreshes the config and a NOT_READY answer is cheap, so this bounds how long a request
 	// that kept retrying waits once the node is promoted, instead of a full backoff of up to 1.5×MaxInterval.
 	notReadyMaxRetryDelay = 2 * time.Second
+
+	// abandonedAddressMemory is how long a client keeps a node off the address a dead-node lookup moved it away
+	// from. Until every pod's kubelet has refreshed the ConfigMap (a 1 minute sync plus jitter), the pods that
+	// haven't, such as a shadow just promoted, still hand out the list with the old address.
+	abandonedAddressMemory = 3 * time.Minute
 )
 
 // errClientClosed is returned by requests made or still retrying after Close
@@ -209,17 +214,31 @@ func (c *Client) lookupAddresses(ctx context.Context, failingNode int64) ([]stri
 }
 
 // applyAddresses adopts a new list of node addresses. Only the connection pools whose address changed are
-// replaced. It returns true when the cluster size changed, in which case keys must be hashed again.
+// replaced. A list of the client's size never puts a node back on an address that a dead-node lookup just moved it
+// away from (see keepOffAbandoned). It returns true when the cluster size changed, in which case keys must be
+// hashed again.
 func (c *Client) applyAddresses(addresses []string) (bool, error) {
+	return c.adoptAddresses(addresses, -1)
+}
+
+// applyLookedUpAddresses is applyAddresses for the list a dead-node lookup returned for deadNode. When the list
+// moves deadNode to another address, the client remembers the one it left for abandonedAddressMemory.
+func (c *Client) applyLookedUpAddresses(addresses []string, deadNode int64) (bool, error) {
+	return c.adoptAddresses(addresses, int(deadNode))
+}
+
+func (c *Client) adoptAddresses(addresses []string, deadNode int) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.closed.Load() {
 		return false, errClientClosed // never reopen connections after Close
 	}
+	addresses = c.keepOffAbandoned(addresses)
 	if slices.Equal(addresses, c.config.Addresses) && len(c.pools) == len(addresses) {
 		return false, nil
 	}
+	previous := c.config.Addresses
 
 	dialOpts := c.getGrpcDialOptions()
 	for i, addr := range addresses {
@@ -263,6 +282,16 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 	c.clusterSize = newClusterSize
 	if newClusterSize != oldClusterSize {
 		c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
+		clear(c.abandoned) // the nodes' indexes changed meaning
+	} else if deadNode >= 0 && deadNode < len(previous) && previous[deadNode] != addresses[deadNode] {
+		c.abandoned[deadNode] = abandonedAddress{
+			address: previous[deadNode], movedTo: addresses[deadNode], until: time.Now().Add(abandonedAddressMemory),
+		}
+		c.logger.Infon("Moved a dead node off its address",
+			logger.NewIntField("nodeId", int64(deadNode)),
+			logger.NewStringField("abandonedAddress", previous[deadNode]),
+			logger.NewStringField("address", addresses[deadNode]),
+		)
 	}
 
 	c.logger.Infon("Adopted new node addresses",
@@ -271,6 +300,39 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 		logger.NewStringField("nodesAddresses", strings.Join(addresses, ",")),
 	)
 	return newClusterSize != oldClusterSize, nil
+}
+
+// keepOffAbandoned returns the list with every node that a dead-node lookup moved away from an address kept on its
+// new address, where the list would put it back on the old one. Nodes that haven't refreshed their config yet keep
+// handing out the old list for a while, a promoted shadow included, and would otherwise send the client back to an
+// address that no longer answers. Only a list of the client's size is changed: one of another size is adopted as
+// is. A memory ends after abandonedAddressMemory, or as soon as the node is no longer on the address it was moved
+// to. The caller must hold c.mu.
+func (c *Client) keepOffAbandoned(addresses []string) []string {
+	if len(c.abandoned) == 0 || len(addresses) != len(c.config.Addresses) {
+		return addresses
+	}
+	now := time.Now()
+	cloned := false
+	for i, abandoned := range c.abandoned {
+		if now.After(abandoned.until) || c.config.Addresses[i] != abandoned.movedTo {
+			delete(c.abandoned, i)
+			continue
+		}
+		if addresses[i] != abandoned.address {
+			continue
+		}
+		if !cloned {
+			addresses, cloned = slices.Clone(addresses), true // the caller's slice stays as it is
+		}
+		addresses[i] = abandoned.movedTo
+		c.logger.Debugn("Kept a node off the address it was moved away from",
+			logger.NewIntField("nodeId", int64(i)),
+			logger.NewStringField("abandonedAddress", abandoned.address),
+			logger.NewStringField("address", abandoned.movedTo),
+		)
+	}
+	return addresses
 }
 
 // routing returns the hash and cluster size requests must use.
@@ -398,7 +460,7 @@ func callNode[R nodeResponse](
 		} else if ctx.Err() == nil {
 			if c.noteFailure(nodeID, attemptStart) {
 				if addresses, err := c.lookupAddresses(ctx, nodeID); err == nil {
-					sizeChanged, err := c.applyAddresses(addresses)
+					sizeChanged, err := c.applyLookedUpAddresses(addresses, nodeID)
 					if err != nil {
 						return zero, err
 					}

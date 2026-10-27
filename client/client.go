@@ -128,6 +128,9 @@ type Client struct {
 	// closed is true once Close was called, requests still retrying then stop
 	closed atomic.Bool
 
+	// abandoned is, for each node a dead-node lookup moved, the address it was moved away from. It is protected by mu.
+	abandoned map[int]abandonedAddress
+
 	// failMu protects failingSince, when each node started failing without answering, across requests, and
 	// clearedAt, when each node last answered or got a new address
 	failMu       sync.Mutex
@@ -152,6 +155,14 @@ type Client struct {
 		putReqRetries  stats.Counter
 		connectionOps  map[int]map[int]stats.Counter
 	}
+}
+
+// abandonedAddress is an address a dead-node lookup moved a node away from
+type abandonedAddress struct {
+	// address is the address the node was moved away from, movedTo the one it was moved to
+	address, movedTo string
+	// until is when the client forgets it
+	until time.Time
 }
 
 type Opts func(*Client)
@@ -220,6 +231,7 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		seeds:       slices.Clone(config.Addresses),
 		config:      config,
 		pools:       make(map[int]*connectionPool),
+		abandoned:   make(map[int]abandonedAddress),
 		clusterSize: clusterSize,
 		hash:        hash.New(clusterSize, config.TotalHashRanges),
 		logger:      log,

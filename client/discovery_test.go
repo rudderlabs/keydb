@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -426,4 +427,132 @@ func TestDeadNodeLookupSources(t *testing.T) {
 			require.Positive(t, newNode1.gets.Load())
 		})
 	}
+}
+
+// TestNoReturnToAbandonedAddress moves node 0 the way PR2 does when node 1 reloads its config before the promoted
+// shadow: the old pod is gone, the lookup finds the shadow's address, and the shadow still answers NOT_READY with
+// the old list until its own config refreshes.
+func TestNoReturnToAbandonedAddress(t *testing.T) {
+	old0, new0, a1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t) // nothing listens on old0
+	node1 := newMockNode(t, a1)
+	node1.setList(old0, a1)
+	c := newDiscoveryClient(t, a1)
+	require.NoError(t, c.ensureDiscovered(context.Background()))
+
+	shadow := newMockNode(t, new0)
+	shadow.setList(old0, a1)
+	shadow.notReady.Store(true)
+	node1.setList(new0, a1)
+
+	// every address the client puts node 0 on
+	var (
+		addressesMu sync.Mutex
+		addresses   = []string{old0}
+	)
+	stopWatching := make(chan struct{})
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		for {
+			select {
+			case <-stopWatching:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			c.mu.RLock()
+			current := c.config.Addresses[0]
+			c.mu.RUnlock()
+			addressesMu.Lock()
+			if addresses[len(addresses)-1] != current {
+				addresses = append(addresses, current)
+			}
+			addressesMu.Unlock()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Get(ctx, keysFor(0, 2, 2))
+		done <- err
+	}()
+	require.Eventually(t, func() bool { return shadow.gets.Load() > 0 }, 10*time.Second, time.Millisecond,
+		"the lookup never found the shadow")
+	time.Sleep(time.Second) // the shadow keeps answering with the old list
+
+	promoted := time.Now()
+	shadow.setList(new0, a1)
+	shadow.notReady.Store(false)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request never completed after the shadow was promoted")
+	}
+	served := time.Since(promoted)
+	close(stopWatching)
+	<-watched
+
+	addressesMu.Lock()
+	defer addressesMu.Unlock()
+	require.Equal(t, []string{old0, new0}, addresses, "after the lookup, the client must stay off the old address")
+	require.Less(t, served, time.Second, "the request must be served as soon as the shadow is promoted")
+}
+
+func TestAbandonedAddressMemory(t *testing.T) {
+	const x, y, z, a1, b1, c2 = "x:1", "y:1", "z:1", "a1:1", "b1:1", "c2:1" // never dialled
+	address0 := func(c *Client) []string {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		return slices.Clone(c.config.Addresses)
+	}
+	movedByLookup := func(t *testing.T) *Client {
+		t.Helper()
+		c := newDiscoveryClient(t, x, a1)
+		_, err := c.applyLookedUpAddresses([]string{y, a1}, 0) // node 0 was dead on x
+		require.NoError(t, err)
+		return c
+	}
+
+	t.Run("a list of the same size keeps the node off the abandoned address and adopts the rest", func(t *testing.T) {
+		c := movedByLookup(t)
+		_, err := c.applyAddresses([]string{x, b1})
+		require.NoError(t, err)
+		require.Equal(t, []string{y, b1}, address0(c))
+	})
+	t.Run("a list of another size is adopted as is", func(t *testing.T) {
+		c := movedByLookup(t)
+		sizeChanged, err := c.applyAddresses([]string{x, a1, c2})
+		require.NoError(t, err)
+		require.True(t, sizeChanged)
+		require.Equal(t, []string{x, a1, c2}, address0(c))
+	})
+	t.Run("the memory expires", func(t *testing.T) {
+		c := movedByLookup(t)
+		c.mu.Lock()
+		memory := c.abandoned[0]
+		memory.until = time.Now().Add(-time.Second)
+		c.abandoned[0] = memory
+		c.mu.Unlock()
+		_, err := c.applyAddresses([]string{x, a1})
+		require.NoError(t, err)
+		require.Equal(t, []string{x, a1}, address0(c))
+	})
+	t.Run("the memory is dropped once the node moves on", func(t *testing.T) {
+		c := movedByLookup(t)
+		_, err := c.applyAddresses([]string{z, a1})
+		require.NoError(t, err)
+		_, err = c.applyAddresses([]string{x, a1})
+		require.NoError(t, err)
+		require.Equal(t, []string{x, a1}, address0(c))
+	})
+	t.Run("a list from a failed response leaves no memory", func(t *testing.T) {
+		c := newDiscoveryClient(t, x, a1)
+		_, err := c.applyAddresses([]string{y, a1})
+		require.NoError(t, err)
+		_, err = c.applyAddresses([]string{x, a1})
+		require.NoError(t, err)
+		require.Equal(t, []string{x, a1}, address0(c))
+	})
 }
