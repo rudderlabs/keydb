@@ -647,7 +647,13 @@ func (c *Cache) LoadSnapshot(_ context.Context, reader io.Reader) error {
 		reader = zstd.NewReader(reader)
 	}
 	if err := c.cache.Load(reader, maxPendingWrites); err != nil {
-		return fmt.Errorf("failed to load snapshot: %w", err)
+		// Load moves the oracle's next timestamp forward for every key it sets, but marks those timestamps done
+		// only once it reaches the end of the stream. Cut short, it leaves every later transaction waiting for
+		// them forever. An empty Load marks them done. What was loaded stays, and the caller sends it again.
+		if settleErr := c.cache.Load(bytes.NewReader(nil), 1); settleErr != nil {
+			err = errors.Join(err, fmt.Errorf("settling transaction timestamps: %w", settleErr))
+		}
+		return fmt.Errorf("loading snapshot: %w", err)
 	}
 
 	// Force a sync to ensure data is committed

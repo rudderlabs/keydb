@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/stats/memstats"
 
@@ -266,6 +267,132 @@ func TestShadowStreamEndingEarlyIsAFailure(t *testing.T) {
 	_, found, err := s.getSnapshotTimestamp(0)
 	require.NoError(t, err)
 	require.False(t, found, "no marker over a partial range")
+}
+
+// rangeSnapshot returns an uncompressed snapshot of range 0 holding keys written in many commits, so that loading
+// it moves the destination's transaction timestamps forward. Small batches make any prefix of it loadable.
+func rangeSnapshot(t *testing.T) (snapshot []byte, keys []string) {
+	t.Helper()
+	conf := newTestConf(t)
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	source, err := badger.New(conf, logger.NOP)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, source.Close()) }()
+	for i := range 50 {
+		key := "key-" + strconv.Itoa(i)
+		keys = append(keys, key)
+		require.NoError(t, source.Put(map[int64][]string{0: {key}}, time.Hour))
+	}
+	var buf bytes.Buffer
+	_, _, err = source.StreamSnapshot(context.Background(), 0, 0, &buf, badger.StreamOptions{BatchSize: 64})
+	require.NoError(t, err)
+	return buf.Bytes(), keys
+}
+
+// returnsWithin reports whether f returns within the timeout. f keeps running in the background if it doesn't.
+func returnsWithin(timeout time.Duration, f func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func TestShadowRetriesAnInterruptedRange(t *testing.T) {
+	ctx := context.Background()
+	conf := newTestConf(t)
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	address := freeAddress(t)
+	s := newTestService(ctx, t, Config{
+		NodeID:            0,
+		TotalHashRanges:   1,
+		Addresses:         staticList("active:1"),
+		AdvertisedAddress: address,
+		ShadowAddresses:   staticList(address),
+	}, conf)
+	serveTestService(t, s, address)
+	c := nodeClient(t, address)
+	snapshot, keys := rangeSnapshot(t)
+
+	// the sender stops after the first chunk with data, as when its pass is paused for too long or it restarts
+	streamCtx, cancel := context.WithCancel(ctx)
+	stream, err := c.ReceiveSnapshot(streamCtx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{
+		HashRange: 0, Timestamp: 1, SourceAddress: "active:1", Data: snapshot[:len(snapshot)/2],
+	}))
+	require.Eventually(t, func() bool { return s.receiving.Load() }, 5*time.Second, 10*time.Millisecond)
+	cancel()
+	require.Eventually(t, func() bool { return !s.receiving.Load() }, 5*time.Second, 10*time.Millisecond)
+
+	var resp *pb.ReceiveSnapshotResponse
+	require.True(t, returnsWithin(10*time.Second, func() {
+		resp = sendChunks(t, c, &pb.SnapshotChunk{
+			HashRange: 0, Timestamp: 2, SourceAddress: "active:1", Data: snapshot, IsLast: true,
+		})
+	}), "the retry of an interrupted range must not block")
+	require.True(t, resp.Success, resp.ErrorMessage)
+	keysByHashRange, indexes, err := s.GetKeysByHashRangeWithIndexes(keys)
+	require.NoError(t, err)
+	exists, err := s.cache.Get(keysByHashRange, indexes)
+	require.NoError(t, err)
+	require.NotContains(t, exists, false, "every key of the retried range is on the shadow")
+}
+
+func TestShadowPromotedMidRange(t *testing.T) {
+	ctx := context.Background()
+	conf := newTestConf(t)
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	address := freeAddress(t)
+	actives, shadows := &shadowList{}, &shadowList{}
+	actives.set("active:1")
+	shadows.set(address)
+	s := newTestService(ctx, t, Config{
+		NodeID:            0,
+		TotalHashRanges:   1,
+		Addresses:         actives.load,
+		AdvertisedAddress: address,
+		ShadowAddresses:   shadows.load,
+	}, conf)
+	serveTestService(t, s, address)
+	snapshot, _ := rangeSnapshot(t)
+
+	stream, err := nodeClient(t, address).ReceiveSnapshot(ctx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{
+		HashRange: 0, Timestamp: 1, SourceAddress: "active:1", Data: snapshot[:len(snapshot)/2],
+	}))
+	require.Eventually(t, func() bool { return s.receiving.Load() }, 5*time.Second, 10*time.Millisecond)
+
+	// the move completes while the range is half loaded, then the next chunk arrives
+	actives.set(address)
+	shadows.set("")
+	_ = stream.Send(&pb.SnapshotChunk{
+		HashRange: 0, Timestamp: 1, SourceAddress: "active:1", Data: snapshot[len(snapshot)/2:],
+	})
+	resp, err := stream.CloseAndRecv()
+	require.NoError(t, err)
+	require.False(t, resp.Success, "the receive stops once the shadow is promoted")
+	require.Eventually(t, func() bool { return !s.receiving.Load() }, 5*time.Second, 10*time.Millisecond)
+
+	var putResp *pb.PutResponse
+	var getResp *pb.GetResponse
+	require.True(t, returnsWithin(10*time.Second, func() {
+		putResp, err = s.Put(ctx, &pb.PutRequest{Keys: []string{"new"}, TtlSeconds: 60})
+		if err == nil {
+			getResp, err = s.Get(ctx, &pb.GetRequest{Keys: []string{"new"}})
+		}
+	}), "the promoted node must serve after an interrupted receive")
+	require.NoError(t, err)
+	require.Equal(t, pb.ErrorCode_NO_ERROR, putResp.ErrorCode)
+	require.Equal(t, pb.ErrorCode_NO_ERROR, getResp.ErrorCode)
+	require.Equal(t, []bool{true}, getResp.Exists)
 }
 
 // loadGuardCache records any GetValue made while a snapshot is being loaded: badger's Load moves the oracle

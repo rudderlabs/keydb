@@ -511,6 +511,46 @@ func TestStreamSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
+// erroringReader fails every read, like a snapshot stream cut short.
+type erroringReader struct{ err error }
+
+func (r erroringReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestInterruptedLoadSnapshot(t *testing.T) {
+	for _, compress := range []bool{false, true} {
+		t.Run("compress="+strconv.FormatBool(compress), func(t *testing.T) {
+			source := newStreamTestCache(t, compress)
+			for i := range 50 { // raise the source's versions above the destination's
+				require.NoError(t, source.Put(map[int64][]string{0: {"k" + strconv.Itoa(i)}}, time.Hour))
+			}
+			var buf bytes.Buffer
+			_, _, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{})
+			require.NoError(t, err)
+			snapshot := buf.Bytes()
+
+			destination := newStreamTestCache(t, compress)
+			cut := erroringReader{err: errors.New("stream cancelled")}
+			err = destination.LoadSnapshot(context.Background(), io.MultiReader(bytes.NewReader(snapshot), cut))
+			require.Error(t, err)
+
+			read := make(chan error, 1)
+			go func() {
+				_, err := destination.Get(map[int64][]string{0: {"k0"}}, map[string]int{"k0": 0})
+				read <- err
+			}()
+			require.Eventually(t, func() bool { return len(read) == 1 }, 5*time.Second, 10*time.Millisecond,
+				"a read after an interrupted load must not block")
+			require.NoError(t, <-read)
+			require.NoError(t, destination.PutValue("after", internalHashRange, []byte("x"), 0),
+				"writes must not block either")
+
+			require.NoError(t, destination.LoadSnapshot(context.Background(), bytes.NewReader(snapshot)),
+				"the range can be loaded again")
+			require.Equal(t, []bool{true, true}, existsIn(t, destination, 0, "k0", "k49"))
+		})
+	}
+}
+
 func TestStreamSnapshotWaitCalled(t *testing.T) {
 	source := newStreamTestCache(t, false)
 	keys := make([]string, 1000)
