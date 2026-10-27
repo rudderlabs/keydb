@@ -31,12 +31,21 @@ func (s *Service) shadowAddress() string {
 // as its shadow either: the other pod is taking over, so writes this pod acknowledged now would never reach it.
 // A pod without an advertised address, or whose index is past the end of the list, is never replaced.
 func (s *Service) replaced() bool {
-	if s.config.AdvertisedAddress == "" || s.config.Addresses == nil {
+	if s.config.AdvertisedAddress == "" {
 		return false
+	}
+	active := s.activeAddress()
+	return active != "" && active != s.config.AdvertisedAddress && s.shadowAddress() != s.config.AdvertisedAddress
+}
+
+// activeAddress returns the address listed for this node's index, or an empty string.
+func (s *Service) activeAddress() string {
+	if s.config.Addresses == nil {
+		return ""
 	}
 	addresses := s.config.Addresses()
 	if s.config.NodeID < 0 || s.config.NodeID >= int64(len(addresses)) {
-		return false
+		return ""
 	}
-	return addresses[s.config.NodeID] != s.config.AdvertisedAddress && s.shadowAddress() != s.config.AdvertisedAddress
+	return addresses[s.config.NodeID]
 }
