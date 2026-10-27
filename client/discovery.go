@@ -285,9 +285,12 @@ func (c *Client) addressesIfShrunk(nodeID int64) []string {
 	return slices.Clone(c.config.Addresses)
 }
 
-// noteFailure records that a node failed without answering, and returns true when it has been failing for
-// DeadNodeLookupAfter, across requests, so that the caller looks the addresses up again.
-func (c *Client) noteFailure(nodeID int64) bool {
+// noteFailure records that a node failed without answering in an attempt that started at attemptStart. It returns
+// true when the node has been failing for DeadNodeLookupAfter, across requests, so that the caller looks the
+// addresses up again. The time counts from the start of the first failing attempt: against an address that drops
+// packets one attempt already blocks for MinConnectTimeout. It never counts from before the node last answered or
+// got a new address, so an attempt still blocked on a replaced address doesn't count against the new one.
+func (c *Client) noteFailure(nodeID int64, attemptStart time.Time) bool {
 	c.failMu.Lock()
 	defer c.failMu.Unlock()
 	if c.failingSince == nil {
@@ -296,8 +299,11 @@ func (c *Client) noteFailure(nodeID int64) bool {
 	now := time.Now()
 	since, ok := c.failingSince[nodeID]
 	if !ok {
-		c.failingSince[nodeID] = now
-		return false
+		since = attemptStart
+		if cleared, ok := c.clearedAt[nodeID]; ok && cleared.After(since) {
+			since = cleared
+		}
+		c.failingSince[nodeID] = since
 	}
 	if now.Sub(since) < c.config.DeadNodeLookupAfter {
 		return false
@@ -311,6 +317,10 @@ func (c *Client) clearFailure(nodeID int64) {
 	c.failMu.Lock()
 	defer c.failMu.Unlock()
 	delete(c.failingSince, nodeID)
+	if c.clearedAt == nil {
+		c.clearedAt = make(map[int64]time.Time)
+	}
+	c.clearedAt[nodeID] = time.Now()
 }
 
 // callNode sends a request to a node until it succeeds, the context is done, or the cluster size changes.
@@ -345,6 +355,7 @@ func callNode[R nodeResponse](
 			return zero, fmt.Errorf("no connection pool for node %d", nodeID)
 		}
 
+		attemptStart := time.Now()
 		resp, respErr := call(ctx, client)
 		if respErr == nil {
 			addresses := resp.GetNodesAddresses()
@@ -365,7 +376,7 @@ func callNode[R nodeResponse](
 				}
 			}
 		} else if ctx.Err() == nil {
-			if c.noteFailure(nodeID) {
+			if c.noteFailure(nodeID, attemptStart) {
 				if addresses, err := c.lookupAddresses(ctx, nodeID); err == nil {
 					sizeChanged, err := c.applyAddresses(addresses)
 					if err != nil {

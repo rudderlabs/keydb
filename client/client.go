@@ -128,9 +128,11 @@ type Client struct {
 	// closed is true once Close was called, requests still retrying then stop
 	closed atomic.Bool
 
-	// failMu protects failingSince, when each node started failing without answering, across requests
+	// failMu protects failingSince, when each node started failing without answering, across requests, and
+	// clearedAt, when each node last answered or got a new address
 	failMu       sync.Mutex
 	failingSince map[int64]time.Time
+	clearedAt    map[int64]time.Time
 
 	logger logger.Logger
 
