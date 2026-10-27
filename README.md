@@ -555,31 +555,41 @@ Each node also serves `GET /replication/status` on its admin port (`adminPort`, 
 
 A node can be moved onto a new disk, for example a smaller one, while it keeps serving. Kubernetes and EBS can't shrink a volume, so the data has to be copied onto a new one.
 
-The move uses a **shadow**: a second StatefulSet for the same node index, with the new disk. The serving node fills the shadow on its own, and a second PR promotes the shadow and removes the old StatefulSet. Node IDs, the cluster size and the hash ranges each node owns never change.
+A move takes two config PRs. The first adds a **shadow**: a second StatefulSet for the same node index, with the new disk, which the serving node fills on its own. The second promotes the shadow and removes the old StatefulSet. Node IDs, the cluster size and the hash ranges each node owns never change.
 
 ### How it works
 
-- **Roles:** a pod listed in `shadowNodeAddresses` for its node index is a SHADOW. It refuses `Get` and `Put` with `NOT_READY` and only receives snapshots. Every other pod is ACTIVE. A pod knows its own address from `advertisedAddress`.
+- **Roles:** a pod listed in `shadowNodeAddresses` for its node index is a SHADOW. It refuses `Get` and `Put` with `NOT_READY` and only receives replication streams. Every other pod is ACTIVE. A pod knows its own address from `advertisedAddress`. A pod whose index the config gives to another pod, without listing it as the shadow, refuses `Get` and `Put` with `NOT_READY` too: once the second PR's config reaches the old pod, it stops acknowledging writes the new pod would never get.
 - **Replication:** an ACTIVE node with a shadow copies every hash range it owns to the shadow, then sends incremental passes back to back for as long as the shadow exists, readiness included. Expired keys are not copied. After a restart the node resumes on its own, and the shadow's since markers keep the passes incremental.
 - **Load:** the copy never starves the serving node:
   - one stream goroutine, one range at a time, and zstd level 1;
-  - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s);
-  - an automatic brake that halves the budget, down to a pause, whenever Go scheduler latency, the node's own Get/Put latency or cgroup CPU throttling crosses its threshold, and raises it again in steps once healthy. Get/Put latency is compared with a baseline taken from the first sample with traffic of each job, and never counts below an absolute floor. A lower budget also spaces passes out, because an incremental pass still scans every table written since the previous one;
-  - a paused or fully braked copy doesn't scan at all, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
-  - garbage collection skips its runs while a pass is in progress.
-- **Readiness:** the serving node is ready to switch once a full pass is done, the gap is under `replication.gapThreshold` (default 60s), and the shadow holds a marker for every range. The gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass.
-- **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after its last completed pass, at most the gap, are lost.
-- **Leftover disks:** a shadow refuses to receive data when its disk already holds data from another source, so a disk Kubernetes didn't delete can't silently turn a move into a merge.
+  - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s), counted on the data read from the cache, before compression;
+  - an automatic brake that halves the budget, down to a pause, whenever Go scheduler latency, the node's own Get/Put latency or cgroup CPU throttling crosses its threshold, and raises it again in steps once healthy. Get/Put latency is compared with a baseline taken from the first sample with traffic of each job, and never counts below an absolute floor. Throttling is the share of CPU periods in which the pod was throttled, so it only ever fires for a pod with a CPU limit. A lower budget also spaces passes out, because an incremental pass still scans every table written since the previous one;
+  - a paused or fully braked copy stops at its next batch or range, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
+  - garbage collection skips its runs while a pass is in progress, and never runs on a shadow.
+- **Readiness:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends, and peaks at two pass durations plus the pause between passes, the worst-case gap. The serving node is ready to switch once a pass is done, both the gap and the worst-case gap are under `replication.gapThreshold` (default 60s), and the shadow holds a marker for every range. While it is ready, switching at any moment loses at most the threshold.
+- **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after the start of its last completed pass, at most the gap, are lost.
+- **Leftover disks:** a shadow refuses to receive data when its disk already holds data from another source, so a disk Kubernetes didn't delete can't silently turn a move into a merge. When it records its first source, it drops any since markers left on its disk.
 
 ### Prerequisites
 
 - A keydb image with node moves, and `global.keydb.nodeMoves: true` in the customer object, which restarts the keydb pods once.
-- Every processor of the customer running a rudder-server version with this client, and the `keydb` Service as their URL. Older clients never follow a moved node, and nodes can't tell them apart, so check the rudder-server version before adding the shadow.
+- Every processor of the customer running a rudder-server with this client, which it needs before the operator release that makes the `keydb` Service their URL. An older client given the Service URL hangs on node 0's keys whenever more than one keydb pod is behind the Service: with several nodes, or with a shadow.
 - No `/hashRangeMovements` or `/backup` while a move is in progress: they compete with replication for the snapshot slot.
+- **Disk size:** the new disk holds the live data, without what expired. Give it at least 25% headroom, so that it stays under the volume usage alerts (80% and 90%). The old disk's usage overstates the live data when it holds expired keys, so watch the shadow's disk usage during the first pass, and revert PR1 if it would fill up.
 
 ### Procedure
 
-Every values snippet is the full `nodes` state after the PR, not a diff. A slot's `diskSize` must never change while the slot exists, because `volumeClaimTemplates` are immutable.
+Every values snippet is the full `nodes` state after the PR, not a diff. The examples move node 0 from slot `a` to slot `b`. Pod and PVC names depend on the slot:
+
+- **Slot `a`:** StatefulSet `keydb-<i>`, pod `keydb-<i>-0`, PVC `data-keydb-<i>-0`.
+- **Slot `b`:** StatefulSet `keydb-<i>-b`, pod `keydb-<i>-b-0`, PVC `data-keydb-<i>-b-0`.
+
+Rules for the whole move:
+
+- A slot's `diskSize` must never change while the slot exists, because `volumeClaimTemplates` are immutable.
+- Don't set or change the serving slot's `resources` in either PR: it restarts the serving pod. The shadow slot's `resources` must be the same in both PRs, or PR2 restarts the pod it promotes.
+- While a shadow exists, deleting either StatefulSet, the customer object or the release deletes that slot's PVC too, the serving one included. Don't delete them during a move. If a StatefulSet must be recreated, delete it with `--cascade=orphan`.
 
 1. **PR1, add the shadow:**
 
@@ -592,12 +602,14 @@ Every values snippet is the full `nodes` state after the PR, not a diff. A slot'
 
    `keydb-0-b` starts as a shadow and `keydb-0` starts copying to it. The first pass is a full copy, which takes hours for big nodes. The node keeps serving throughout.
 
-2. **Wait for readiness.** Watch `keydb_replication_ready` (1 means ready) or the `Replication ready to switch` log line from `keydb-0`. The node also logs `Replication no longer ready`, with the reasons, whenever readiness is lost. Then check the gap and the verdict on the node itself:
+2. **Wait for readiness.** Watch `keydb_replication_ready` (1 means ready) or the `Replication ready to switch` log line from the serving pod. The node also logs `Replication no longer ready`, with the reasons, whenever readiness is lost. Then check the verdict on the serving pod itself, here `keydb-0-0` (slot `a`):
 
    ```bash
-   kubectl port-forward pod/keydb-0-0 8080:8080
+   kubectl port-forward -n <namespace> pod/keydb-0-0 8080:8080
    curl -s localhost:8080/replication/status
    ```
+
+   The status shows `ready`, `notReadyReasons`, `gapSeconds`, `worstCaseGapSeconds`, `lastPassDuration` and the progress of the current pass (`currentPassStartedAt`, `currentPassRangesDone` of `currentPassRangesTotal`, `currentPassBytes`). The shadow answers with `state: shadow`, and names the pod to ask instead.
 
 3. **PR2, the switch:**
 
@@ -608,13 +620,15 @@ Every values snippet is the full `nodes` state after the PR, not a diff. A slot'
          "0": {active: b, slots: {b: {diskSize: 20Gi}}}
    ```
 
-   `keydb-0` is deleted, cancels its in-flight calls and exits, and Kubernetes deletes its disk. `keydb-0-b` starts serving as soon as its configmap refreshes. Clients see node 0 fail, ask another node for the list and move to `keydb-0-b`. Only node 0's keys stall, for about a minute or two.
+   `keydb-0` is deleted, cancels its in-flight calls and exits, and Kubernetes deletes its PVC. `keydb-0-b` starts serving as soon as its configmap refreshes. Clients see node 0 fail, ask another node for the list and move to `keydb-0-b`. Every request that includes node 0's keys waits meanwhile, for about a minute or two. A processor batch holds keys of every node, so in practice every batch waits.
 
-4. **Afterwards**, check that `data-keydb-0-0` is gone. If it isn't, delete it with `kubectl delete pvc data-keydb-0-0`.
+4. **Afterwards, delete the old volume.** Check that the old slot's PVC is gone: here `data-keydb-0-0`, since the move left slot `a`. If it isn't, delete it with `kubectl delete pvc -n <namespace> data-keydb-0-0`. Never delete the PVC of the slot that now serves. Deleting the PVC doesn't delete the volume when its StorageClass retains volumes, as in production: the PV stays `Released` and the EBS volume keeps costing. Find it with `kubectl get pv | grep <namespace>/data-keydb-0-0`, then `kubectl patch pv <name> -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'`, which makes Kubernetes delete the PV and the EBS volume, and check that the PV is gone.
 
-The next move of node 0 goes back to slot `a`: `{active: b, shadow: a, slots: {a: {diskSize: 15Gi}, b: {diskSize: 20Gi}}}`, then `{active: a, slots: {a: {diskSize: 15Gi}}}`. Slot `a` needs its size stated from then on.
+The next move of node 0 goes back to slot `a`: `{active: b, shadow: a, slots: {a: {diskSize: 15Gi}, b: {diskSize: 20Gi}}}`, then `{active: a, slots: {a: {diskSize: 15Gi}}}`. Slot `a` needs its size stated from then on. On that move the serving pod is `keydb-0-b-0`, and the PVC to delete afterwards is `data-keydb-0-b-0`.
 
-Before PR2, reverting PR1 removes the shadow and its disk. After PR2 the old disk is gone, and going back means another move.
+Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV as in step 4. After PR2 the old disk is gone, and going back means another move.
+
+**After a move, the node's state is permanent.** The node's `nodes."<i>"` entry and `nodeMoves: true` must stay in the customer object, and once any customer has a node on slot `b`, an operator image from before node moves must not be deployed. Either mistake recreates `keydb-<i>` on an empty disk and deletes `keydb-<i>-b`.
 
 **Leftover disk.** If `keydb_shadow_leftover_disk_total` grows, or `/replication/status` shows a `lastError` about a leftover disk, the shadow found data on its disk that it didn't receive from the serving node. Typically this is a disk Kubernetes didn't delete after an earlier move, and the shadow refuses it rather than merging stale data into the new disk. Revert PR1, delete the shadow's PVC (`data-keydb-<i>-0` for slot `a`, `data-keydb-<i>-b-0` for slot `b`), then apply PR1 again.
 
@@ -625,7 +639,7 @@ Before PR2, reverting PR1 removes the shadow and its disk. After PR2 the old dis
 | `advertisedAddress` | empty | no |
 | `shadowNodeAddresses` | empty | yes |
 | `adminPort` | `8080` | no |
-| `replication.maxBytesPerSecond` | 32 MiB | yes |
+| `replication.maxBytesPerSecond` | `33554432` (32 MiB) | yes |
 | `replication.paused` | `false` | yes |
 | `replication.pauseBetweenPasses` | `5s` | no |
 | `replication.gapThreshold` | `60s` | no |
@@ -635,12 +649,13 @@ Before PR2, reverting PR1 removes the shadow and its disk. After PR2 the old dis
 | `replication.brake.requestLatencyFloor` | `5ms` | no |
 | `replication.brake.throttledRatioThreshold` | `0.1` | no |
 
-`replication.maxBytesPerSecond` and `replication.paused` can be changed through the customer object's `configOverrides` while a copy runs, without restarting it. The brake always works below the configured ceiling.
+`replication.maxBytesPerSecond` and `replication.paused` can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. `maxBytesPerSecond` is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0, which pauses the copy, and the status then gives `maxBytesPerSecond is not positive` as the brake reason. The brake always works below the configured ceiling.
 
 ### Metrics
 
-- `keydb_replication_ready`, `keydb_replication_gap_seconds`
-- `keydb_replication_pass_duration_seconds`, `keydb_replication_bytes_total`, `keydb_replication_errors_total`
+- `keydb_replication_ready`, `keydb_replication_gap_seconds` (-1 while no pass is done)
+- `keydb_replication_pass_duration_seconds`, `keydb_replication_errors_total`
+- `keydb_replication_bytes_total`, counted as the copy goes, before compression, in the budget's unit
 - `keydb_replication_budget_bytes_per_second`, `keydb_replication_brake_events_total` (by `reason`)
 - `keydb_err_not_ready_count`, `keydb_shadow_leftover_disk_total`
 
