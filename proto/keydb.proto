@@ -71,7 +71,10 @@ enum ErrorCode {
   WRONG_NODE = 1; // Key should be handled by a different node
   SCALING = 2; // There is a scaling operation in progress, the client should retry with an exponential backoff
   INTERNAL_ERROR = 3;
-  NOT_READY = 4; // The node is a shadow that is still being filled, the client should retry with an exponential backoff
+  // The node can't serve yet: it is a shadow being filled, a shadow just promoted that is finishing its last load, or
+  // a pod whose index the config gave to another pod. The client should retry with an exponential backoff, using the
+  // addresses in the response.
+  NOT_READY = 4;
 }
 
 // NodeRole tells whether a node serves traffic or is a shadow being filled before replacing an active node

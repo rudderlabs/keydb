@@ -1225,7 +1225,11 @@ func (s *Service) GetSnapshotSince(
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	s.logger.Infon("GetSnapshotSince request received",
+	logn := s.logger.Infon
+	if s.role() == pb.NodeRole_SHADOW {
+		logn = s.logger.Debugn // replication asks for every range of every pass, for as long as a move lasts
+	}
+	logn("GetSnapshotSince request received",
 		logger.NewIntField("hashRange", req.HashRange),
 	)
 
@@ -1238,7 +1242,7 @@ func (s *Service) GetSnapshotSince(
 		return &pb.GetSnapshotSinceResponse{SinceTimestamp: 0}, nil
 	}
 
-	s.logger.Infon("Returning snapshot since timestamp",
+	logn("Returning snapshot since timestamp",
 		logger.NewIntField("hashRange", req.HashRange),
 		logger.NewIntField("sinceTimestamp", int64(timestamp)),
 	)
@@ -1253,8 +1257,6 @@ func (s *Service) ReceiveSnapshot(
 ) error {
 	defer s.metrics.receiveSnapshotDuration.RecordDuration()()
 
-	s.logger.Infon("ReceiveSnapshot stream started")
-
 	// the first chunk is read before taking any lock, so a refused stream never holds one
 	first, err := stream.Recv()
 	if errors.Is(err, io.EOF) {
@@ -1267,6 +1269,12 @@ func (s *Service) ReceiveSnapshot(
 			ErrorMessage: fmt.Sprintf("receiving chunk: %v", err),
 		})
 	}
+
+	logn := s.logger.Infon
+	if first.SourceAddress != "" {
+		logn = s.logger.Debugn // replication streams every range of every pass, for as long as a move lasts
+	}
+	logn("ReceiveSnapshot stream started", logger.NewIntField("hashRange", first.HashRange))
 
 	shadow := s.role() == pb.NodeRole_SHADOW
 	if !shadow && first.SourceAddress != "" {

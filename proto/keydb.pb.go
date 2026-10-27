@@ -28,7 +28,10 @@ const (
 	ErrorCode_WRONG_NODE     ErrorCode = 1 // Key should be handled by a different node
 	ErrorCode_SCALING        ErrorCode = 2 // There is a scaling operation in progress, the client should retry with an exponential backoff
 	ErrorCode_INTERNAL_ERROR ErrorCode = 3
-	ErrorCode_NOT_READY      ErrorCode = 4 // The node is a shadow that is still being filled, the client should retry with an exponential backoff
+	// The node can't serve yet: it is a shadow being filled, a shadow just promoted that is finishing its last load, or
+	// a pod whose index the config gave to another pod. The client should retry with an exponential backoff, using the
+	// addresses in the response.
+	ErrorCode_NOT_READY ErrorCode = 4
 )
 
 // Enum value maps for ErrorCode.

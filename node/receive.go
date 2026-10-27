@@ -57,11 +57,12 @@ func (s *Service) receiveBuffered(stream receiveStream, first *pb.SnapshotChunk)
 		}
 	}
 
-	return s.finishReceive(stream, hashRange, timestamp)
+	return s.finishReceive(stream, hashRange, timestamp, s.logger.Infon)
 }
 
 // receiveStreaming loads the chunks into the cache as they arrive, so a shadow never holds a whole range in memory.
-// The caller holds the write lock, which is fine because a shadow serves no traffic.
+// The caller holds the read lock, so that GetNodeInfo still answers, and loadMu, which keeps Get and Put off the
+// cache while it loads.
 func (s *Service) receiveStreaming(stream receiveStream, first *pb.SnapshotChunk) error {
 	s.receiving.Store(true)
 	defer s.receiving.Store(false)
@@ -135,17 +136,20 @@ func (s *Service) receiveStreaming(stream receiveStream, first *pb.SnapshotChunk
 		}
 	}
 
-	return s.finishReceive(stream, hashRange, timestamp)
+	// replication sends every range of every pass for as long as a move lasts, the active node logs each pass
+	return s.finishReceive(stream, hashRange, timestamp, s.logger.Debugn)
 }
 
-// finishReceive stores the marker for future incremental snapshots and closes the stream.
-func (s *Service) finishReceive(stream receiveStream, hashRange int64, timestamp uint64) error {
+// finishReceive stores the marker for future incremental snapshots and closes the stream, logging with logn.
+func (s *Service) finishReceive(
+	stream receiveStream, hashRange int64, timestamp uint64, logn func(string, ...logger.Field),
+) error {
 	if err := s.advanceSnapshotTimestamp(hashRange, timestamp); err != nil {
 		s.logger.Warnn("Setting snapshot timestamp", logger.NewIntField("hashRange", hashRange), obskit.Error(err))
 		// Continue anyway, the data was loaded successfully
 	}
 
-	s.logger.Infon("Successfully received and loaded snapshot",
+	logn("Successfully received and loaded snapshot",
 		logger.NewIntField("hashRange", hashRange),
 		logger.NewIntField("timestamp", int64(timestamp)),
 	)

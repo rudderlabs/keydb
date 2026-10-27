@@ -435,7 +435,7 @@ func getNodeID(podName string) (int64, error) {
 	if matches := slotBPodNameRegex.FindStringSubmatch(podName); matches != nil {
 		nodeID, err := strconv.ParseInt(matches[1], 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
+			return 0, fmt.Errorf("parsing node ID from %q: %w", podName, err)
 		}
 		return nodeID, nil
 	}
