@@ -351,3 +351,30 @@ func TestDiscoveryWaitersHonourContext(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Less(t, time.Since(start), 2*time.Second, "a waiter must give up when its own context ends")
 }
+
+func TestNotReadyRetryDelayIsCapped(t *testing.T) {
+	a0 := freeMockAddress(t)
+	node0 := newMockNode(t, a0)
+	node0.notReady.Store(true) // a shadow about to be promoted
+
+	// with rudder-server's 30s MaxInterval, a request that kept retrying sleeps for up to 45s before the next try
+	c := newTestClient(t, func(conf *Config) {
+		conf.RetryPolicy = RetryPolicy{
+			InitialInterval: 20 * time.Second, Multiplier: 1.5, MaxInterval: 30 * time.Second,
+		}
+	}, a0)
+	require.NoError(t, c.ensureDiscovered(context.Background()))
+
+	var readyAt atomic.Pointer[time.Time]
+	time.AfterFunc(1500*time.Millisecond, func() {
+		now := time.Now()
+		readyAt.Store(&now)
+		node0.notReady.Store(false)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, err := c.Get(ctx, []string{"k"})
+	require.NoError(t, err)
+	require.Less(t, time.Since(*readyAt.Load()), 3*time.Second,
+		"a request must be served within notReadyMaxRetryDelay of the node turning ready")
+}

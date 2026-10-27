@@ -21,8 +21,15 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
-// addressesTimeout bounds each call made to learn the cluster's addresses
-const addressesTimeout = 5 * time.Second
+const (
+	// addressesTimeout bounds each call made to learn the cluster's addresses
+	addressesTimeout = 5 * time.Second
+
+	// notReadyMaxRetryDelay caps the wait before retrying a node that answered NOT_READY. A shadow becomes ACTIVE
+	// as soon as its kubelet refreshes the config and a NOT_READY answer is cheap, so this bounds how long a request
+	// that kept retrying waits once the node is promoted, instead of a full backoff of up to 1.5×MaxInterval.
+	notReadyMaxRetryDelay = 2 * time.Second
+)
 
 // errClientClosed is returned by requests made or still retrying after Close
 var errClientClosed = errors.New("keydb client closed")
@@ -310,6 +317,7 @@ func (c *Client) clearFailure(nodeID int64) {
 //   - A failed response carries the node's address list: when it differs from the client's, the client adopts it.
 //   - When the node doesn't answer for DeadNodeLookupAfter, the client asks other nodes for the current list.
 //   - Every retry takes the next pooled connection and waits for the backoff, without holding the client's lock.
+//     After a NOT_READY answer the wait is capped at notReadyMaxRetryDelay.
 func callNode[R nodeResponse](
 	ctx context.Context, c *Client, nodeID, clusterSize int64, method string, retries stats.Counter,
 	call func(ctx context.Context, client pb.NodeServiceClient) (R, error),
@@ -380,6 +388,9 @@ func callNode[R nodeResponse](
 		}
 
 		retryDelay := nextBackoff()
+		if respErr == nil && resp.GetErrorCode() == pb.ErrorCode_NOT_READY {
+			retryDelay = min(retryDelay, notReadyMaxRetryDelay)
+		}
 		fields := []logger.Field{
 			logger.NewIntField("nodeId", nodeID),
 			logger.NewIntField("attempt", attempt),
