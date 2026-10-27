@@ -588,7 +588,8 @@ func TestMoveSeedThroughService(t *testing.T) {
 		require.True(t, e)
 	}
 	require.Equal(t, 2, cl.ClusterSize())
-	require.Positive(t, proxy.next.Load(), "discovery must have gone through the Service")
+	require.EqualValues(t, 1, proxy.next.Load(),
+		"discovery must have gone through the Service, and no data request after it")
 }
 
 // switchableSignals reports load when told to

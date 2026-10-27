@@ -169,10 +169,44 @@ func TestAdoptListFromFailedResponse(t *testing.T) {
 	newNode1.setList(a0, new1)
 
 	c := newDiscoveryClient(t, a0)
+	require.NoError(t, c.ensureDiscovered(context.Background()))
+	c.mu.RLock()
+	pool0, oldPool1 := c.pools[0], c.pools[1]
+	c.mu.RUnlock()
+
 	exists, err := c.Get(context.Background(), keysFor(1, 2, 3))
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, true, true}, exists)
 	require.Positive(t, newNode1.gets.Load(), "the client never moved to the new node")
+	c.mu.RLock()
+	newPool0, newPool1 := c.pools[0], c.pools[1]
+	c.mu.RUnlock()
+	require.Same(t, pool0, newPool0, "the connections to a node whose address didn't change must be kept")
+	require.NotSame(t, oldPool1, newPool1)
+}
+
+func TestDataNeverThroughSeed(t *testing.T) {
+	s, a0 := freeMockAddress(t), freeMockAddress(t)
+	node0 := newMockNode(t, a0) // a single node, whose list has the same size as the seeds
+	seed := newMockNode(t, s)   // the keydb Service
+	seed.setList(a0)
+
+	c := newDiscoveryClient(t, s)
+	keys := []string{"k1", "k2"}
+	_, err := c.Get(context.Background(), keys)
+	require.NoError(t, err)
+	require.NoError(t, c.Put(context.Background(), keys, time.Hour))
+	require.Zero(t, seed.gets.Load()+seed.puts.Load(), "data requests must never go through the seed")
+	require.Positive(t, node0.gets.Load())
+	require.Positive(t, node0.puts.Load())
+}
+
+func TestNewClientDefaults(t *testing.T) {
+	c, err := NewClient(Config{Addresses: []string{freeMockAddress(t)}}, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.Equal(t, 5*time.Second, c.config.DeadNodeLookupAfter, "the README documents a 5s default")
+	require.Equal(t, DefaultDeadNodeLookupAfter, c.config.DeadNodeLookupAfter)
 }
 
 func TestNotReadyRotatesConnection(t *testing.T) {
@@ -191,10 +225,16 @@ func TestNotReadyRotatesConnection(t *testing.T) {
 	_, err := c.Get(context.Background(), keysFor(1, 2, 1))
 	require.NoError(t, err)
 
-	c.mu.RLock()
-	next := c.pools[1].next.Load()
-	c.mu.RUnlock()
-	require.GreaterOrEqual(t, next, uint32(2), "every attempt must take the next pooled connection")
+	// every pooled connection is a TCP connection of its own, which the node sees from its own address
+	attempts := node1.gets.Load()
+	require.GreaterOrEqual(t, attempts, int64(2))
+	connections := 0
+	node1.peers.Range(func(any, any) bool {
+		connections++
+		return true
+	})
+	require.EqualValues(t, min(attempts, DefaultConnectionPoolSize), connections,
+		"every attempt must take the next pooled connection")
 }
 
 func TestDeadNodeLookup(t *testing.T) {
@@ -247,10 +287,14 @@ func TestNoLockAcrossBackoff(t *testing.T) {
 	node1 := newMockNode(t, a1)
 	node1.setList(x0, a1)
 
-	c := newDiscoveryClient(t, a1)
+	// with rudder-server's 30s MaxInterval, a lock held across the backoff would freeze other requests for longer
+	c := newTestClient(t, func(conf *Config) {
+		conf.RetryPolicy = RetryPolicy{InitialInterval: 4 * time.Second, Multiplier: 1.5, MaxInterval: 4 * time.Second}
+	}, a1)
 	require.NoError(t, c.ensureDiscovered(context.Background()))
 
-	// node 0 keeps refusing and swapping lists, which takes the client's write lock over and over
+	// node 0 keeps refusing and swapping lists, which takes the client's write lock over and over, and backs off
+	// for at least 2s (notReadyMaxRetryDelay) after each attempt
 	ctx := t.Context()
 	go func() { _, _ = c.Get(ctx, keysFor(0, 2, 1)) }()
 	time.Sleep(200 * time.Millisecond)
