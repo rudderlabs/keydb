@@ -610,7 +610,7 @@ func TestMoveCPUBounds(t *testing.T) {
 		c.setTopology([]string{node0.address, node1.address}, nil)
 		c.start(node0)
 		c.start(node1)
-		// about 3.5 MiB to send: well above the one second of budget the limiter starts with
+		// about 2.5 MiB to send: well above the one second of budget the limiter starts with
 		keysByHashRange, err := moveTestHash.GetKeysByHashRange(ownedBy(0, testKeys(240_000)), 0)
 		require.NoError(t, err)
 		require.NoError(t, node0.service.cache.Put(keysByHashRange, time.Hour))
@@ -622,8 +622,12 @@ func TestMoveCPUBounds(t *testing.T) {
 		status := node0.service.ReplicationStatus()
 		duration, err := time.ParseDuration(status.LastPassDuration)
 		require.NoError(t, err)
-		require.Greater(t, duration, 1500*time.Millisecond, "a budget of 1 MiB/s must slow the first pass down")
-		require.Greater(t, status.LastPassBytes, int64(0))
+		// the limiter starts with a second of budget, every byte past it waits for the budget
+		require.Greater(t, status.LastPassBytes, 2*bytesize.MB, "enough data to measure the budget")
+		minDuration := time.Duration(float64(status.LastPassBytes-bytesize.MB) / float64(bytesize.MB) *
+			float64(time.Second))
+		require.GreaterOrEqual(t, duration, minDuration-50*time.Millisecond,
+			"a budget of 1 MiB/s must slow the first pass down")
 	})
 
 	t.Run("brake engages and releases", func(t *testing.T) {

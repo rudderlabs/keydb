@@ -459,3 +459,20 @@ func TestReplicationProgressDuringPass(t *testing.T) {
 	require.False(t, status.CurrentPassStartedAt.IsZero())
 	require.Equal(t, "running", status.State)
 }
+
+func TestGCSkippedOnShadow(t *testing.T) {
+	store, err := memstats.New()
+	require.NoError(t, err)
+	address := freeAddress(t)
+	newTestServiceWithStats(context.Background(), t, Config{
+		NodeID:                    0,
+		Addresses:                 staticList("active:1"),
+		AdvertisedAddress:         address,
+		ShadowAddresses:           staticList(address),
+		GarbageCollectionInterval: 20 * time.Millisecond,
+	}, newTestConf(t), store)
+
+	require.Never(t, func() bool {
+		return len(store.Get("keydb_gc_duration_seconds", stats.Tags{"nodeID": "0"}).Values()) > 0
+	}, 300*time.Millisecond, 20*time.Millisecond, "a shadow must not run garbage collection, even between receives")
+}
