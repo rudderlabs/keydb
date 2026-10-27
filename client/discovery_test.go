@@ -223,8 +223,7 @@ func TestNoLockAcrossBackoff(t *testing.T) {
 	require.NoError(t, c.ensureDiscovered(context.Background()))
 
 	// node 0 keeps refusing and swapping lists, which takes the client's write lock over and over
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go func() { _, _ = c.Get(ctx, keysFor(0, 2, 1)) }()
 	time.Sleep(200 * time.Millisecond)
 

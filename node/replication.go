@@ -294,7 +294,7 @@ func (r *replicator) brakeLoop(ctx context.Context, shadow pb.NodeServiceClient,
 		case <-ticker.C:
 		}
 		if reason := r.budget.tick(r.signals.Sample()); reason != "" {
-			for _, single := range strings.Split(reason, ", ") {
+			for single := range strings.SplitSeq(reason, ", ") {
 				r.s.stats.NewTaggedStat("keydb_replication_brake_events_total", stats.CountType, stats.Tags{
 					"nodeID": strconv.FormatInt(r.s.config.NodeID, 10),
 					"reason": single,

@@ -66,7 +66,7 @@ func TestAllRangesSynced(t *testing.T) {
 	}
 
 	require.False(t, synced())
-	for hr := int64(0); hr < 3; hr++ {
+	for hr := range int64(3) {
 		resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: hr, IsLast: true, Timestamp: 1})
 		require.True(t, resp.Success, resp.ErrorMessage)
 	}
