@@ -77,6 +77,15 @@ func (s *Service) forgetShadowSource() {
 	if s.config.AdvertisedAddress == "" || s.config.Addresses == nil {
 		return
 	}
+	// a load must not run under a transaction: when one holds the locks, the next reconcile tick tries again
+	if !s.mu.TryRLock() {
+		return
+	}
+	defer s.mu.RUnlock()
+	if !s.loadMu.TryRLock() {
+		return
+	}
+	defer s.loadMu.RUnlock()
 	addresses := s.config.Addresses()
 	if s.config.NodeID < 0 || s.config.NodeID >= int64(len(addresses)) ||
 		addresses[s.config.NodeID] != s.config.AdvertisedAddress {

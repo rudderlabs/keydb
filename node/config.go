@@ -56,6 +56,9 @@ type Config struct {
 
 	// Replication configures how this node fills its shadow when it has one
 	Replication ReplicationConfig
+
+	// wrapCache lets tests observe the calls the service makes to its cache
+	wrapCache func(Cache) Cache
 }
 
 func (c *Config) getClusterSize() int64 {

@@ -1,8 +1,11 @@
 package node
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/stats/memstats"
 
 	"github.com/rudderlabs/keydb/client"
+	"github.com/rudderlabs/keydb/internal/cache/badger"
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
@@ -264,4 +268,124 @@ func TestShadowStreamEndingEarlyIsAFailure(t *testing.T) {
 	_, found, err := s.getSnapshotTimestamp(0)
 	require.NoError(t, err)
 	require.False(t, found, "no marker over a partial range")
+}
+
+// loadGuardCache records any GetValue made while a snapshot is being loaded: badger's Load moves the oracle
+// without synchronisation, so nothing else may open a transaction meanwhile
+type loadGuardCache struct {
+	Cache
+	inLoad     atomic.Bool
+	violations atomic.Int64
+}
+
+func (c *loadGuardCache) LoadSnapshot(ctx context.Context, r io.Reader) error {
+	c.inLoad.Store(true)
+	defer c.inLoad.Store(false)
+	return c.Cache.LoadSnapshot(ctx, r)
+}
+
+func (c *loadGuardCache) GetValue(key string, hashRange int64) ([]byte, bool, error) {
+	if c.inLoad.Load() {
+		c.violations.Add(1)
+	}
+	return c.Cache.GetValue(key, hashRange)
+}
+
+func TestShadowMetadataReadsDuringLoad(t *testing.T) {
+	ctx := context.Background()
+	source := newTestService(ctx, t, Config{NodeID: 0, Addresses: staticList("active:1")}, newTestConf(t))
+	keysByHashRange, err := source.GetKeysByHashRange(testKeys(5000))
+	require.NoError(t, err)
+	require.NoError(t, source.cache.Put(keysByHashRange, time.Hour))
+	var snapshot bytes.Buffer
+	_, _, err = source.cache.StreamSnapshot(ctx, 0, 0, &snapshot, badger.StreamOptions{})
+	require.NoError(t, err)
+	require.Greater(t, snapshot.Len(), 100)
+
+	address := freeAddress(t)
+	var guard *loadGuardCache
+	shadow := newTestService(ctx, t, Config{
+		NodeID: 0, Addresses: staticList("active:1"), AdvertisedAddress: address, ShadowAddresses: staticList(address),
+		wrapCache: func(c Cache) Cache {
+			guard = &loadGuardCache{Cache: c}
+			return guard
+		},
+	}, newTestConf(t))
+	serveTestService(t, shadow, address)
+	c := nodeClient(t, address)
+
+	stream, err := c.ReceiveSnapshot(ctx)
+	require.NoError(t, err)
+	data := snapshot.Bytes()
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{HashRange: 0, Data: data[:50], SourceAddress: "active:1"}))
+	require.Eventually(t, guard.inLoad.Load, 5*time.Second, 10*time.Millisecond, "the load never started")
+
+	_, err = c.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
+	require.NoError(t, err)
+	_, err = c.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{HashRange: 0})
+	require.NoError(t, err)
+	require.Zero(t, guard.violations.Load(), "metadata reads must not open transactions while a range loads")
+
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{HashRange: 0, Data: data[50:], IsLast: true, Timestamp: 7}))
+	resp, err := stream.CloseAndRecv()
+	require.NoError(t, err)
+	require.True(t, resp.Success, resp.ErrorMessage)
+	since, err := c.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{HashRange: 0})
+	require.NoError(t, err)
+	require.EqualValues(t, 7, since.SinceTimestamp)
+}
+
+func TestForgetShadowSourceSkipsWhileLocked(t *testing.T) {
+	ctx := context.Background()
+	address := "self:1"
+	s := newTestService(ctx, t, Config{
+		NodeID: 0, Addresses: staticList(address), AdvertisedAddress: address,
+		Replication: ReplicationConfig{ReconcileInterval: time.Hour},
+	}, newTestConf(t))
+	require.NoError(t, s.cache.PutValue(shadowSourceKey, internalKeysHashRange, []byte("old:1"), 0))
+
+	s.mu.Lock() // a load holds the write lock
+	done := make(chan struct{})
+	go func() {
+		s.forgetShadowSource()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		s.mu.Unlock()
+		t.Fatal("forgetShadowSource waited for the lock instead of trying again later")
+	}
+	s.mu.Unlock()
+	_, found, err := s.cache.GetValue(shadowSourceKey, internalKeysHashRange)
+	require.NoError(t, err)
+	require.True(t, found, "nothing may be deleted while a load holds the lock")
+
+	s.forgetShadowSource()
+	_, found, err = s.cache.GetValue(shadowSourceKey, internalKeysHashRange)
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestActiveNodeRefusesReplicationStream(t *testing.T) {
+	ctx := context.Background()
+	address := freeAddress(t)
+	s := newTestService(ctx, t, Config{NodeID: 0, Addresses: staticList(address), AdvertisedAddress: address},
+		newTestConf(t))
+	serveTestService(t, s, address)
+	c := nodeClient(t, address)
+
+	// a replication stream reaching a node that was just promoted, from a source that hasn't stopped yet
+	stream, err := c.ReceiveSnapshot(ctx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{HashRange: 0, Data: []byte("x"), SourceAddress: "old:1"}))
+
+	infoCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	_, err = c.GetNodeInfo(infoCtx, &pb.GetNodeInfoRequest{})
+	require.NoError(t, err, "the active node must keep serving while a replication stream is refused")
+	resp, err := stream.CloseAndRecv()
+	require.NoError(t, err)
+	require.False(t, resp.Success)
+	require.Contains(t, resp.ErrorMessage, "not a shadow")
 }
