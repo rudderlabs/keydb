@@ -1,6 +1,7 @@
 package node
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/rudderlabs/rudder-go-kit/logger"
@@ -42,10 +43,9 @@ func (s *Service) allRangesSynced() bool {
 // checkShadowSource makes sure a shadow only ever receives data from one source.
 // The first time it receives data it remembers the source. If it already holds data without remembering a source,
 // or remembers a different one, its disk is a leftover from an earlier move and it must not merge into it.
-// Senders that don't provide their address are not checked.
 func (s *Service) checkShadowSource(source string) error {
 	if source == "" {
-		return nil
+		return errors.New("no source address")
 	}
 	value, found, err := s.cache.GetValue(shadowSourceKey, internalKeysHashRange)
 	if err != nil {
@@ -63,6 +63,10 @@ func (s *Service) checkShadowSource(source string) error {
 	}
 	if hasData {
 		return fmt.Errorf("leftover disk: it holds data from an unknown source, refusing data from %q", source)
+	}
+	// markers left by an earlier source are versions of that node, which would make this one skip data
+	if err := s.forgetSnapshotTimestamps(); err != nil {
+		return err
 	}
 	if err := s.cache.PutValue(shadowSourceKey, internalKeysHashRange, []byte(source), 0); err != nil {
 		return fmt.Errorf("storing the shadow source: %w", err)
@@ -104,4 +108,17 @@ func (s *Service) forgetShadowSource() {
 		return
 	}
 	s.logger.Infon("Forgot the shadow source now that the node is active")
+}
+
+// forgetSnapshotTimestamps drops every since marker, from the cache and from the in-memory mirror.
+func (s *Service) forgetSnapshotTimestamps() error {
+	s.markers.Lock()
+	defer s.markers.Unlock()
+	for hashRange := range s.markers.byRange {
+		if err := s.cache.DeleteValue(getSnapshotTimestampKey(hashRange), internalKeysHashRange); err != nil {
+			return fmt.Errorf("deleting the snapshot timestamp of hash range %d: %w", hashRange, err)
+		}
+		delete(s.markers.byRange, hashRange)
+	}
+	return nil
 }

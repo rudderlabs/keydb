@@ -117,12 +117,38 @@ func TestLeftoverDiskGuard(t *testing.T) {
 		require.True(t, resp.Success, resp.ErrorMessage)
 	})
 
-	t.Run("senders without a source address are not checked", func(t *testing.T) {
+	t.Run("senders without a source address are refused", func(t *testing.T) {
 		s, c := newShadow(t, stats.NOP)
-		require.NoError(t, s.cache.Put(map[int64][]string{0: {"existing"}}, time.Hour))
 
-		resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: 0, IsLast: true, Timestamp: 5})
+		resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: 0, Data: []byte("x"), IsLast: true, Timestamp: 5})
+		require.False(t, resp.Success, "a shadow only takes replication streams, which name their source")
+		require.Contains(t, resp.ErrorMessage, "source address")
+		_, found, err := s.getSnapshotTimestamp(0)
+		require.NoError(t, err)
+		require.False(t, found)
+	})
+
+	t.Run("markers without a source are dropped with the first source", func(t *testing.T) {
+		s, c := newShadow(t, stats.NOP)
+		// a disk whose data expired keeps the markers of the node that filled it, in that node's versions
+		for hashRange := range s.config.TotalHashRanges {
+			require.NoError(t, s.setSnapshotTimestamp(hashRange, 1_000_000))
+		}
+		require.True(t, s.allRangesSynced())
+
+		resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: 0, IsLast: true, Timestamp: 5, SourceAddress: "active:1"})
 		require.True(t, resp.Success, resp.ErrorMessage)
+		ts, found, err := s.getSnapshotTimestamp(0)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.EqualValues(t, 5, ts, "the new source's marker replaces the old one")
+		_, found, err = s.getSnapshotTimestamp(1)
+		require.NoError(t, err)
+		require.False(t, found, "a marker from another source would skip data the shadow lacks")
+		require.False(t, s.allRangesSynced())
+		_, found, err = s.cache.GetValue(getSnapshotTimestampKey(1), internalKeysHashRange)
+		require.NoError(t, err)
+		require.False(t, found, "the marker is gone from the disk too, not only from memory")
 	})
 }
 
@@ -155,10 +181,21 @@ func TestShadowReceiveMultiChunk(t *testing.T) {
 	}
 	require.NoError(t, source.cache.Put(map[int64][]string{0: keys}, time.Hour))
 
-	resp, err := nodeClient(t, sourceAddress).SendSnapshot(ctx, &pb.SendSnapshotRequest{
-		HashRange: 0, DestinationAddress: shadowAddress,
-	})
+	// stream the range the way replication does, in 1 MiB chunks that name their source
+	var buf bytes.Buffer
+	maxVersion, _, err := source.cache.StreamSnapshot(ctx, 0, 0, &buf, badger.StreamOptions{})
 	require.NoError(t, err)
+	var chunks []*pb.SnapshotChunk
+	for data := buf.Bytes(); len(data) > 0; {
+		n := min(len(data), DefaultStreamingChunkSize)
+		chunks = append(chunks, &pb.SnapshotChunk{HashRange: 0, Data: data[:n], SourceAddress: sourceAddress})
+		data = data[n:]
+	}
+	require.Greater(t, len(chunks), 1, "the range must span several chunks")
+	chunks = append(chunks, &pb.SnapshotChunk{
+		HashRange: 0, IsLast: true, Timestamp: maxVersion, SourceAddress: sourceAddress,
+	})
+	resp := sendChunks(t, nodeClient(t, shadowAddress), chunks...)
 	require.True(t, resp.Success, resp.ErrorMessage)
 
 	keysByHashRange, indexes, err := shadow.GetKeysByHashRangeWithIndexes(keys)
@@ -370,11 +407,11 @@ func TestShadowPromotedMidRange(t *testing.T) {
 	}))
 	require.Eventually(t, func() bool { return s.receiving.Load() }, 5*time.Second, 10*time.Millisecond)
 
-	// the move completes while the range is half loaded, then the next chunk arrives
+	// the move completes while the range is half loaded, then the rest of the range arrives
 	actives.set(address)
 	shadows.set("")
 	_ = stream.Send(&pb.SnapshotChunk{
-		HashRange: 0, Timestamp: 1, SourceAddress: "active:1", Data: snapshot[len(snapshot)/2:],
+		HashRange: 0, Timestamp: 1, SourceAddress: "active:1", Data: snapshot[len(snapshot)/2:], IsLast: true,
 	})
 	resp, err := stream.CloseAndRecv()
 	require.NoError(t, err)
@@ -526,4 +563,50 @@ func TestActiveNodeRefusesReplicationStream(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, resp.Success)
 	require.Contains(t, resp.ErrorMessage, "not a shadow")
+}
+
+func TestCloseWaitsForReceive(t *testing.T) {
+	conf := newTestConf(t)
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	address := freeAddress(t)
+	s := newTestService(context.Background(), t, Config{
+		NodeID:            0,
+		TotalHashRanges:   1,
+		Addresses:         staticList("active:1"),
+		AdvertisedAddress: address,
+		ShadowAddresses:   staticList(address),
+	}, conf)
+	serveTestService(t, s, address)
+	snapshot, _ := rangeSnapshot(t)
+
+	streamCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := nodeClient(t, address).ReceiveSnapshot(streamCtx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{
+		HashRange: 0, Timestamp: 1, SourceAddress: "active:1", Data: snapshot[:len(snapshot)/2],
+	}))
+	require.Eventually(t, func() bool { return s.receiving.Load() }, 5*time.Second, 10*time.Millisecond)
+
+	closed := make(chan struct{})
+	go func() {
+		s.Close()
+		close(closed)
+	}()
+	require.Never(t, func() bool { return isClosed(closed) }, 300*time.Millisecond,
+		20*time.Millisecond, "the cache must not be closed under a receive in progress")
+
+	cancel() // the gRPC server cancels in-flight calls on shutdown
+	require.Eventually(t, func() bool { return isClosed(closed) }, 10*time.Second, 10*time.Millisecond,
+		"Close must return once the receive ends")
+}
+
+// isClosed returns true when c is closed.
+func isClosed(c chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
 }

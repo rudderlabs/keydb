@@ -1282,6 +1282,17 @@ func (s *Service) ReceiveSnapshot(
 		})
 	}
 
+	if shadow && first.SourceAddress == "" {
+		// only replication fills a shadow, and the leftover-disk check needs to know the source
+		s.logger.Warnn("Refusing a snapshot without a source address, this node is a shadow",
+			logger.NewIntField("hashRange", first.HashRange),
+		)
+		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
+			Success:      false,
+			ErrorMessage: "a shadow only receives replication streams, which carry their source address",
+		})
+	}
+
 	if shadow {
 		// a shadow serves no traffic, so its receive only needs to keep Get and Put off the cache (loadMu).
 		// The read lock lets GetNodeInfo answer during a receive that can last as long as the sender's budget.
