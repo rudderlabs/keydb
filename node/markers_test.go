@@ -246,11 +246,12 @@ func TestShadowSourceClearedOnActivation(t *testing.T) {
 func TestShadowGetNodeInfoDuringReceive(t *testing.T) {
 	ctx := context.Background()
 	address := freeAddress(t)
-	shadows := &shadowList{}
+	actives, shadows := &shadowList{}, &shadowList{}
+	actives.set("active:1")
 	shadows.set(address)
 	s := newTestService(ctx, t, Config{
 		NodeID:            0,
-		Addresses:         staticList("active:1"),
+		Addresses:         actives.load,
 		AdvertisedAddress: address,
 		ShadowAddresses:   shadows.load,
 	}, newTestConf(t))
@@ -270,6 +271,7 @@ func TestShadowGetNodeInfoDuringReceive(t *testing.T) {
 	require.Equal(t, pb.NodeRole_SHADOW, info.Role)
 
 	t.Run("a shadow that became active refuses writes until the receive ends", func(t *testing.T) {
+		actives.set(address)
 		shadows.set("")
 		resp, err := s.Put(ctx, &pb.PutRequest{Keys: []string{"k"}, TtlSeconds: 60})
 		require.NoError(t, err)

@@ -272,6 +272,8 @@ func (r *replicator) job(ctx context.Context, target string) {
 		return
 	}
 	r.budget.tick(r.signals.Sample())
+	bytesPerSecond, _, _ := r.budget.current()
+	r.metrics.budget.Gauge(bytesPerSecond)
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
