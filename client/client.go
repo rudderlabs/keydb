@@ -334,19 +334,56 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	results := make(map[string]bool)
 	resultsMu := sync.Mutex{}
 
-	res, err := c.get(ctx, keys, results, &resultsMu)
+	err := c.routeUntilStable(ctx, func() error { return c.get(ctx, keys, results, &resultsMu) })
 	if err != nil {
 		c.metrics.getReqFailures.Increment()
-		return res, err
+		return nil, err
 	}
-	return res, nil
+
+	// Convert results map to slice in the same order as input keys
+	exists := make([]bool, len(keys))
+	existsCount := 0
+	for i, key := range keys {
+		exists[i] = results[key]
+		if exists[i] {
+			existsCount++
+		}
+	}
+
+	c.metrics.getKeysQueried.Count(len(keys))
+	c.metrics.getKeysFound.Count(existsCount)
+	return exists, nil
 }
 
-func (c *Client) get(
-	ctx context.Context, keys []string, results map[string]bool, resultsMu *sync.Mutex,
-) (
-	[]bool, error,
-) {
+// routeUntilStable sends a request with the client's current routing until it no longer fails because the cluster
+// size changed. The first re-route goes at once, every later one waits for the request's backoff first, so that
+// nodes that disagree on the cluster size don't make the request spin.
+func (c *Client) routeUntilStable(ctx context.Context, send func() error) error {
+	var nextBackoff func() time.Duration
+	for {
+		err := send()
+		changed, ok := errors.AsType[*errClusterSizeChanged](err)
+		if !ok {
+			return err
+		}
+		if _, err := c.applyAddresses(changed.nodesAddresses); err != nil {
+			return fmt.Errorf("updating cluster size: %w", err)
+		}
+		if nextBackoff == nil {
+			nextBackoff = c.getNextBackoffFunc()
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(nextBackoff()):
+		}
+	}
+}
+
+// get sends the keys that have no result yet to their nodes, routed with the client's current hash.
+// It returns errClusterSizeChanged when a node reports another cluster size.
+func (c *Client) get(ctx context.Context, keys []string, results map[string]bool, resultsMu *sync.Mutex) error {
 	h, clusterSize := c.routing()
 
 	// Group keys by node
@@ -395,29 +432,12 @@ func (c *Client) get(
 	}
 
 	if err := group.Wait(); err != nil {
-		nodesAddresses, ok := hasClusterSizeChanged.Load().([]string)
-		if ok && len(nodesAddresses) > 0 {
-			if _, err = c.applyAddresses(nodesAddresses); err != nil {
-				return nil, fmt.Errorf("failed to update cluster size: %w", err)
-			}
-			return c.get(ctx, keys, results, resultsMu)
+		if nodesAddresses, ok := hasClusterSizeChanged.Load().([]string); ok && len(nodesAddresses) > 0 {
+			return &errClusterSizeChanged{nodesAddresses: nodesAddresses}
 		}
-		return nil, err
+		return err
 	}
-
-	// Convert results map to slice in the same order as input keys
-	exists := make([]bool, len(keys))
-	existsCount := 0
-	for i, key := range keys {
-		exists[i] = results[key]
-		if exists[i] {
-			existsCount++
-		}
-	}
-
-	c.metrics.getKeysQueried.Count(len(keys))
-	c.metrics.getKeysFound.Count(existsCount)
-	return exists, nil
+	return nil
 }
 
 // Put stores multiple key-value pairs with TTL
@@ -430,7 +450,7 @@ func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) erro
 		return err
 	}
 
-	err := c.put(ctx, keys, ttl)
+	err := c.routeUntilStable(ctx, func() error { return c.put(ctx, keys, ttl) })
 	if err != nil {
 		c.metrics.putReqFailures.Increment()
 		return err
@@ -438,6 +458,8 @@ func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) erro
 	return nil
 }
 
+// put sends the keys to their nodes, routed with the client's current hash.
+// It returns errClusterSizeChanged when a node reports another cluster size.
 func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) error {
 	h, clusterSize := c.routing()
 
@@ -475,16 +497,11 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 	}
 
 	if err := group.Wait(); err != nil {
-		nodesAddresses, ok := hasClusterSizeChanged.Load().([]string)
-		if ok && len(nodesAddresses) > 0 {
-			if _, err = c.applyAddresses(nodesAddresses); err != nil {
-				return fmt.Errorf("failed to update cluster size: %w", err)
-			}
-			return c.put(ctx, keys, ttl)
+		if nodesAddresses, ok := hasClusterSizeChanged.Load().([]string); ok && len(nodesAddresses) > 0 {
+			return &errClusterSizeChanged{nodesAddresses: nodesAddresses}
 		}
 		return err
 	}
-
 	return nil
 }
 

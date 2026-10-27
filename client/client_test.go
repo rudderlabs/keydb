@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
 
+	"github.com/rudderlabs/keydb/internal/hash"
 	"github.com/rudderlabs/keydb/proto"
 )
 
@@ -337,5 +341,70 @@ func createTestClient(t *testing.T, clusterSize int64) (*Client, func()) {
 	return client, func() {
 		_ = client.Close()
 		closer()
+	}
+}
+
+// sizeFlipKeys returns keys that a 2-node cluster sends to node 1 and a 3-node cluster sends to node 2
+func sizeFlipKeys(n int) []string {
+	h2, h3 := hash.New(2, discoveryTestHashRanges), hash.New(3, discoveryTestHashRanges)
+	var keys []string
+	for i := 0; len(keys) < n; i++ {
+		key := "flip-" + strconv.Itoa(i)
+		if h2.GetNodeNumber(key) == 1 && h3.GetNodeNumber(key) == 2 {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func TestClusterSizeDisagreement(t *testing.T) {
+	requests := map[string]func(ctx context.Context, c *Client, keys []string) error{
+		"get": func(ctx context.Context, c *Client, keys []string) error {
+			_, err := c.Get(ctx, keys)
+			return err
+		},
+		"put": func(ctx context.Context, c *Client, keys []string) error {
+			return c.Put(ctx, keys, time.Hour)
+		},
+	}
+	for method, request := range requests {
+		t.Run(method, func(t *testing.T) {
+			a0, a1, a2 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
+			node0 := newMockNode(t, a0)
+			node0.setList(a0, a1)
+			node1 := newMockNode(t, a1)
+			node1.setList(a0, a1, a2) // node 1 already sees a third node, as during a scale
+			node2 := newMockNode(t, a2)
+			node2.setList(a0, a1) // node 2 doesn't yet
+			calls := func() int64 {
+				return node1.gets.Load() + node1.puts.Load() + node2.gets.Load() + node2.puts.Load()
+			}
+
+			c := newDiscoveryClient(t, a0)
+			require.NoError(t, c.ensureDiscovered(context.Background()))
+
+			// the keys go to node 1 with 2 nodes and to node 2 with 3 nodes, so the request flips between the two
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- request(ctx, c, sizeFlipKeys(3)) }()
+
+			time.Sleep(2 * time.Second)
+			flips := calls()
+			stack := make([]byte, 1<<20)
+			stack = stack[:runtime.Stack(stack, true)]
+			depth := strings.Count(string(stack), "client.(*Client)."+method+"(")
+
+			node1.setList(a0, a1) // the nodes agree again
+			select {
+			case err := <-done:
+				require.NoError(t, err, "the request must complete once the nodes agree")
+			case <-time.After(10 * time.Second):
+				t.Fatal("the request never completed after the nodes agreed")
+			}
+			// with a 20ms initial backoff growing to 200ms, 2s leave room for about 25 re-routes
+			require.Less(t, flips, int64(60), "every re-route after the first must wait for the backoff")
+			require.LessOrEqual(t, depth, 1, "a re-route must not add stack frames")
+		})
 	}
 }

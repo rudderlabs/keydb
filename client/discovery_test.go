@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/peer"
 
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
@@ -24,10 +26,15 @@ const discoveryTestHashRanges = 128
 type mockNode struct {
 	address string
 	gets    atomic.Int64
+	puts    atomic.Int64
+	// peers records the client side address of every connection that sent a Get
+	peers sync.Map
 	// list is the address list the node answers with, cluster size included
 	list atomic.Pointer[[]string]
-	// notReady makes Get answer NOT_READY with the node's list
+	// notReady makes Get and Put answer NOT_READY with the node's list
 	notReady atomic.Bool
+	// stop shuts the node down, after which its address refuses connections
+	stop func()
 }
 
 func (n *mockNode) setList(list ...string) { n.list.Store(&list) }
@@ -41,14 +48,18 @@ func freeMockAddress(t *testing.T) string {
 	return fmt.Sprintf("localhost:%d", port)
 }
 
-// newMockNode starts a mock node that answers Get with all keys existing, and GetNodeInfo with its list
+// newMockNode starts a mock node that answers Get with all keys existing, Put with success, and GetNodeInfo with
+// its list
 func newMockNode(t *testing.T, address string) *mockNode {
 	t.Helper()
 	n := &mockNode{address: address}
 	n.setList(address)
 	server := &mockNodeServiceServer{
-		getFunc: func(_ context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
+		getFunc: func(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
 			n.gets.Add(1)
+			if p, ok := peer.FromContext(ctx); ok {
+				n.peers.Store(p.Addr.String(), struct{}{})
+			}
 			list := n.currentList()
 			resp := &proto.GetResponse{ClusterSize: int64(len(list)), NodesAddresses: list}
 			if n.notReady.Load() {
@@ -61,18 +72,36 @@ func newMockNode(t *testing.T, address string) *mockNode {
 			}
 			return resp, nil
 		},
+		putFunc: func(_ context.Context, _ *proto.PutRequest) (*proto.PutResponse, error) {
+			n.puts.Add(1)
+			list := n.currentList()
+			resp := &proto.PutResponse{ClusterSize: int64(len(list)), NodesAddresses: list}
+			if n.notReady.Load() {
+				resp.ErrorCode = proto.ErrorCode_NOT_READY
+				return resp, nil
+			}
+			resp.Success = true
+			return resp, nil
+		},
 		getNodeInfoFunc: func(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
 			list := n.currentList()
 			return &proto.GetNodeInfoResponse{ClusterSize: int64(len(list)), NodesAddresses: list}, nil
 		},
 	}
-	t.Cleanup(startMockServer(t, server, address))
+	n.stop = sync.OnceFunc(startMockServer(t, server, address))
+	t.Cleanup(n.stop)
 	return n
 }
 
 func newDiscoveryClient(t *testing.T, seeds ...string) *Client {
 	t.Helper()
-	c, err := NewClient(Config{
+	return newTestClient(t, nil, seeds...)
+}
+
+// newTestClient creates a client with short timings, which adjust can change before the client is created
+func newTestClient(t *testing.T, adjust func(*Config), seeds ...string) *Client {
+	t.Helper()
+	conf := Config{
 		Addresses:           seeds,
 		TotalHashRanges:     discoveryTestHashRanges,
 		DeadNodeLookupAfter: 200 * time.Millisecond,
@@ -81,7 +110,11 @@ func newDiscoveryClient(t *testing.T, seeds ...string) *Client {
 			Multiplier:      1.5,
 			MaxInterval:     200 * time.Millisecond,
 		},
-	}, logger.NOP, WithStats(stats.NOP))
+	}
+	if adjust != nil {
+		adjust(&conf)
+	}
+	c, err := NewClient(conf, logger.NOP, WithStats(stats.NOP))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
