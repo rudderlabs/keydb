@@ -57,7 +57,8 @@ type httpServer struct {
 
 // newHTTPServer creates a new HTTP server
 func newHTTPServer(
-	clientConfig client.Config, scaler *scaler.Client, addr string, stat stats.Stats, log logger.Logger,
+	ctx context.Context, clientConfig client.Config, scaler *scaler.Client, addr string, stat stats.Stats,
+	log logger.Logger,
 ) (*httpServer, error) {
 	s := &httpServer{
 		clientConfig: clientConfig,
@@ -66,7 +67,7 @@ func newHTTPServer(
 		logger:       log,
 	}
 	var err error
-	s.client, err = client.NewClient(clientConfig, log.Child("client"), client.WithStats(stat))
+	s.client, err = client.NewClient(ctx, clientConfig, log.Child("client"), client.WithStats(stat))
 	if err != nil {
 		return nil, err
 	}
@@ -308,16 +309,18 @@ func (s *httpServer) handleUpdateClusterData(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Recreate client
-	err := s.client.Close()
-	if err != nil {
-		s.logger.Warnn("Cannot close client", obskit.Error(err))
-	}
-	s.clientConfig.Addresses = req.Addresses
-	s.client, err = client.NewClient(s.clientConfig, s.logger.Child("client"), client.WithStats(s.stat))
+	// Recreate client, keeping the current one if the nodes can't be reached
+	clientConfig := s.clientConfig
+	clientConfig.Addresses = req.Addresses
+	newClient, err := client.NewClient(r.Context(), clientConfig, s.logger.Child("client"), client.WithStats(s.stat))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error creating client: %v", err), http.StatusInternalServerError)
+		return
 	}
+	if err := s.client.Close(); err != nil {
+		s.logger.Warnn("Cannot close client", obskit.Error(err))
+	}
+	s.client, s.clientConfig = newClient, clientConfig
 	s.logger.Infon("Client successfully recreated")
 
 	// Write response

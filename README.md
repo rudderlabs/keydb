@@ -111,18 +111,18 @@ for i, key := range keys {
 - **Cluster Awareness**: Automatically adapts to cluster size changes (including degraded mode)
   - The cluster size is dynamically calculated based on active (non-degraded) nodes
   - When a node is marked as degraded, it's excluded from the effective cluster size
-- **Discovery**: `Addresses` are where the client learns the cluster, such as the keydb headless Kubernetes Service (`keydb-headless.<namespace>.svc.cluster.local:50051`), whose name resolves to every ready pod. On first use the client resolves them and asks the nodes behind them for the cluster's addresses (`GetNodeInfo`), one after the other until one answers, then talks to every node directly at the addresses in that list; data requests never go to `Addresses`
-  - Every failed discovery attempt that the client retries is counted in `keydb_client_discovery_retries_total`
-- **Moved nodes**: Every node response carries the cluster's address list
-  - The client adopts the list from failed responses when it differs from its own: a same-size list is retried after the usual backoff, a size change re-routes the keys at once, and later size changes within the same request wait for the backoff
-  - When a node doesn't answer, the client resolves `Addresses` again and asks the nodes behind them for the current list, starting one node further each time, so that a node that hasn't reloaded its config yet doesn't answer every time. Requests that fail together share one refresh, and refreshes are at least a second apart. A node that hasn't reloaded may hand out an old list for a while; the next refresh corrects it once every pod has the new config
+- **Discovery**: `Addresses` are where the client finds the nodes, such as the keydb headless Kubernetes Service (`keydb-headless.<namespace>.svc.cluster.local:50051`), whose name resolves to every ready pod. `NewClient` only resolves them, retrying until they resolve to at least one address or its context ends (once with `RetryPolicy.Disabled`), and uses what they resolve to as its first node list. That list may be in the wrong order or include shadows: the first answers then correct it, as below
+  - Every failed resolution that `NewClient` retries is counted in `keydb_client_discovery_retries_total`
+- **Moved nodes**: The client acts only when an answer shows that its node list is wrong: `WRONG_NODE`, `NOT_READY`, another cluster size, or a node that can't be reached (gRPC `Unavailable`). It then resolves `Addresses` again, asks every node behind them for the cluster's addresses at once (`GetNodeInfo`) and adopts the first list that comes back
+  - A changed list re-routes the request's keys at once; later changes within the same request wait for the backoff, so nodes that hand out different lists don't make it spin
+  - Any other error, such as `SCALING` or `INTERNAL_ERROR`, is retried with the backoff and no discovery
+  - A node that hasn't reloaded its config yet may answer first with an old list: the request then fails again and discovers again, until every pod has the new config
   - After a `NOT_READY` answer, such as a shadow's, the retry waits for the backoff capped at 2s, so a request retrying on a shadow is served within about 2s of its promotion
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
-- **Automatic retries**: Automatically retries failed requests until they succeed or their context ends. With `RetryPolicy.Disabled` a request returns after its first failed attempt, though it still re-routes after a cluster size change
-  - The client tries again if the cluster size changed and it hit a node that doesn't manage a requested key; before trying again it adopts the new cluster node addresses
-    - There is no limit on these retries, so a request doesn't fail because the nodes disagree on the cluster size for a while
-    - The first retry after a size change goes at once, every later one within the same request waits for the backoff
+- **Automatic retries**: Automatically retries failed requests until they succeed or their context ends. With `RetryPolicy.Disabled` a request returns after its first failed attempt, though it still re-routes after adopting another node list
+  - There is no limit on re-routes, so a request doesn't fail because the nodes disagree on the node list for a while
+  - The first re-route goes at once, every later one within the same request waits for the backoff
   - Normal errors trigger retries with an exponential backoff configured with a `RetryPolicy`; after a `NOT_READY` answer the wait is capped at 2s
   - For the retries client configuration please refer to the client [Config](./client/client.go) `struct`
 

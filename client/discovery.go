@@ -30,158 +30,78 @@ const (
 	// as soon as its kubelet refreshes the config and a NOT_READY answer is cheap, so this bounds how long a request
 	// that kept retrying waits once the node is promoted, instead of a full backoff of up to 1.5×MaxInterval.
 	notReadyMaxRetryDelay = 2 * time.Second
-
-	// refreshInterval is the least time between two refreshes of the node list after a node didn't answer. A node
-	// that is down fails every request at once, and they don't all need to ask.
-	refreshInterval = time.Second
 )
 
-// errClientClosed is returned by requests made or still retrying after Close
-var errClientClosed = errors.New("keydb client closed")
+var (
+	// errClientClosed is returned by requests made or still retrying after Close
+	errClientClosed = errors.New("keydb client closed")
+	// errClusterChanged is returned by a call to a node after the client adopted another node list: the request's
+	// keys must be routed again
+	errClusterChanged = errors.New("cluster changed")
+)
 
 // nodeResponse is what Get and Put responses have in common
 type nodeResponse interface {
 	GetClusterSize() int64
-	GetNodesAddresses() []string
 	GetErrorCode() pb.ErrorCode
 }
 
-// ensureDiscovered learns the cluster's addresses from the nodes behind the discovery addresses the first time it is
-// called. Data requests never go to a discovery address: a headless Service's name resolves to every pod, while each
-// key must reach the node that owns it.
-// One caller discovers while the others wait for it, each giving up when its own context ends.
-func (c *Client) ensureDiscovered(ctx context.Context) error {
-	for {
-		if c.closed.Load() {
-			return errClientClosed
-		}
-		if c.discovered.Load() {
-			return nil
-		}
-		c.discoverMu.Lock()
-		if c.discovered.Load() {
-			c.discoverMu.Unlock()
-			return nil
-		}
-		if running := c.discovering; running != nil {
-			c.discoverMu.Unlock()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-running:
-				continue // it either succeeded, or failed and this caller tries in turn
-			}
-		}
-		running := make(chan struct{})
-		c.discovering = running
-		c.discoverMu.Unlock()
-
-		err := c.discoverAndApply(ctx)
-
-		c.discoverMu.Lock()
-		c.discovering = nil
-		c.discoverMu.Unlock()
-		close(running)
-		return err
-	}
-}
-
-func (c *Client) discoverAndApply(ctx context.Context) error {
-	addresses, err := c.discover(ctx)
-	if err != nil {
-		return err
-	}
-	if _, err := c.applyAddresses(addresses); err != nil {
-		return fmt.Errorf("applying discovered addresses: %w", err)
-	}
-	c.discovered.Store(true)
-	return nil
-}
-
-// discover asks the nodes behind the discovery addresses for the cluster's addresses (see askAnyNode). It retries with
-// backoff unless retries are disabled, counting every failed attempt it retries in
-// keydb_client_discovery_retries_total. When the nodes answer without a list, as nodes that predate discovery may,
-// the discovery addresses are the list.
-func (c *Client) discover(ctx context.Context) ([]string, error) {
+// waitForAddresses resolves the discovery addresses, retrying with backoff until they resolve to at least one address
+// or ctx ends, unless retries are disabled. Every failed attempt it retries counts in
+// keydb_client_discovery_retries_total.
+func (c *Client) waitForAddresses(ctx context.Context) ([]string, error) {
 	nextBackoff := c.getNextBackoffFunc()
 	for {
-		addresses, answered, err := c.askAnyNode(ctx)
-		if err == nil {
+		addresses := c.resolveDiscoveryAddresses(ctx)
+		if len(addresses) > 0 {
 			return addresses, nil
 		}
-		if answered {
-			// A node also answers an empty list when every node of the cluster is marked degraded. Using the
-			// discovery addresses as the list is then harmless: the first data response carries the cluster's size
-			// and addresses, and the client adopts them before it routes the keys again.
-			return slices.Clone(c.discoveryAddresses), nil
-		}
+		err := fmt.Errorf("no node behind %s", strings.Join(c.discoveryAddresses, ","))
 		if c.config.RetryPolicy.Disabled {
-			return nil, fmt.Errorf("discovering the cluster through %s: %w",
-				strings.Join(c.discoveryAddresses, ","), err)
-		}
-		if c.closed.Load() {
-			return nil, errClientClosed
+			return nil, err
 		}
 		c.metrics.discoveryRetries.Increment()
 		delay := nextBackoff()
-		c.logger.Warnn("Discovering the cluster",
-			logger.NewStringField("addresses", strings.Join(c.discoveryAddresses, ",")),
-			logger.NewDurationField("retryDelay", delay),
-			obskit.Error(err),
-		)
+		c.logger.Warnn("Resolving the node addresses", logger.NewDurationField("retryDelay", delay), obskit.Error(err))
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("resolving %s: %w", strings.Join(c.discoveryAddresses, ","), ctx.Err())
 		case <-time.After(delay):
 		}
 	}
 }
 
-// refreshAddresses asks the nodes behind the discovery addresses for the cluster's addresses after a node didn't
-// answer. Requests that fail at the same time share one refresh, and refreshes are at least refreshInterval apart.
-// It returns nil when it didn't refresh or no node answered with a list.
-func (c *Client) refreshAddresses(ctx context.Context) []string {
-	if !c.refreshMu.TryLock() {
-		return nil // another request is refreshing, this one retries with what it finds
-	}
-	defer c.refreshMu.Unlock()
-	if time.Since(c.lastRefresh) < refreshInterval {
-		return nil
-	}
-	c.lastRefresh = time.Now()
-	addresses, _, err := c.askAnyNode(ctx)
-	if err != nil {
-		c.logger.Warnn("Refreshing the node addresses", obskit.Error(err))
-		return nil
-	}
-	return addresses
-}
-
-// askAnyNode resolves the discovery addresses and asks the nodes behind them for the cluster's addresses, one after
-// the other, starting one node further than the previous call. It returns the first list a node answers with. A
-// node that hasn't reloaded its config yet may answer with an old list: the next refresh starts from another node.
-// answered is true when a node answered without a list.
-func (c *Client) askAnyNode(ctx context.Context) (addresses []string, answered bool, err error) {
+// discover resolves the discovery addresses and asks every node behind them for the cluster's addresses at once. It
+// returns the first list a node answers with. A node that hasn't reloaded its config yet may answer first with an
+// old list: requests then fail again, and the next discovery may hear from another node first.
+func (c *Client) discover(ctx context.Context) ([]string, error) {
 	nodes := c.resolveDiscoveryAddresses(ctx)
 	if len(nodes) == 0 {
-		return nil, false, fmt.Errorf("no node behind %s", strings.Join(c.discoveryAddresses, ","))
+		return nil, fmt.Errorf("no node behind %s", strings.Join(c.discoveryAddresses, ","))
 	}
-	start := int(c.nextNode.Add(1) % uint64(len(nodes)))
-	for i := range nodes {
-		addresses, askErr := c.askForAddresses(ctx, nodes[(start+i)%len(nodes)])
-		switch {
-		case askErr == nil && len(addresses) > 0:
-			return addresses, false, nil
-		case askErr == nil || status.Code(askErr) == codes.Unimplemented:
-			answered = true
-		default:
-			err = askErr
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // stops the calls still running once a node answered
+
+	type answer struct {
+		addresses []string
+		err       error
+	}
+	answers := make(chan answer, len(nodes))
+	for _, node := range nodes {
+		go func() {
+			addresses, err := c.askForAddresses(ctx, node)
+			answers <- answer{addresses, err}
+		}()
+	}
+	errs := make([]error, 0, len(nodes))
+	for range nodes {
+		a := <-answers
+		if a.err == nil {
+			return a.addresses, nil
 		}
+		errs = append(errs, a.err)
 	}
-	if err == nil {
-		err = errors.New("no node answered with a list")
-	}
-	return nil, answered, err
+	return nil, errors.Join(errs...)
 }
 
 // resolveDiscoveryAddresses returns the addresses of the nodes behind the discovery addresses, skipping the ones
@@ -231,21 +151,20 @@ func (c *Client) askForAddresses(ctx context.Context, address string) ([]string,
 		return nil, fmt.Errorf("creating gRPC client for %s: %w", address, err)
 	}
 	defer func() { _ = conn.Close() }()
-	return askNodeForAddresses(ctx, pb.NewNodeServiceClient(conn))
-}
-
-func askNodeForAddresses(ctx context.Context, client pb.NodeServiceClient) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, addressesTimeout)
 	defer cancel()
-	info, err := client.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
+	info, err := pb.NewNodeServiceClient(conn).GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("asking %s for the node addresses: %w", address, err)
+	}
+	if len(info.NodesAddresses) == 0 {
+		return nil, fmt.Errorf("%s answered with no node address", address)
 	}
 	return info.NodesAddresses, nil
 }
 
 // applyAddresses adopts a new list of node addresses. Only the connection pools whose address changed are
-// replaced. It returns true when the cluster size changed, in which case keys must be hashed again.
+// replaced. It returns true when the list changed.
 func (c *Client) applyAddresses(addresses []string) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -305,44 +224,76 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 		logger.NewIntField("newClusterSize", newClusterSize),
 		logger.NewStringField("nodesAddresses", strings.Join(addresses, ",")),
 	)
-	return newClusterSize != oldClusterSize, nil
+	return true, nil
 }
 
-// routing returns the hash and cluster size requests must use.
-func (c *Client) routing() (*hash.Hash, int64) {
+// routingInfo returns the hash and cluster size requests must use.
+func (c *Client) routingInfo() (*hash.Hash, int64) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.hash, c.clusterSize
 }
 
-// nodeClient returns the next pooled connection to a node, counting the operation.
-func (c *Client) nodeClient(nodeID int64) (pb.NodeServiceClient, *grpc.ClientConn, bool) {
+// nodeClient returns the next pooled connection to a node, counting the operation. It returns errClusterChanged when
+// the client adopted a list of another size since the request was routed with clusterSize.
+func (c *Client) nodeClient(nodeID, clusterSize int64) (pb.NodeServiceClient, *grpc.ClientConn, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.clusterSize != clusterSize {
+		return nil, nil, errClusterChanged
+	}
 	pool, ok := c.pools[int(nodeID)]
 	if !ok {
-		return nil, nil, false
+		// this should never happen unless clusterSize is updated and the pools map isn't
+		// or if there is a bug in the hashing function
+		return nil, nil, fmt.Errorf("no connection pool for node %d", nodeID)
 	}
 	client, conn, connID := pool.getClient()
 	if counter, ok := c.metrics.connectionOps[int(nodeID)][connID]; ok {
 		counter.Increment()
 	}
-	return client, conn, true
+	return client, conn, nil
 }
 
-// addressesIfShrunk returns the current addresses when the cluster no longer has the given node, nil otherwise.
-func (c *Client) addressesIfShrunk(nodeID int64) []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if nodeID < c.clusterSize {
-		return nil
+// routeUntilStable sends a request with the client's current routing until it no longer fails because the client
+// adopted another node list. The first re-route goes at once, every later one waits for the request's backoff first,
+// so that nodes that hand out different lists don't make the request spin.
+func (c *Client) routeUntilStable(ctx context.Context, send func() error) error {
+	var nextBackoff func() time.Duration
+	for {
+		err := send()
+		if !errors.Is(err, errClusterChanged) {
+			return err
+		}
+		if nextBackoff == nil {
+			nextBackoff = c.getNextBackoffFunc()
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(nextBackoff()):
+		}
 	}
-	return slices.Clone(c.config.Addresses)
 }
 
-// callNode sends a request to a node until it succeeds, the context is done, or the cluster size changes.
-//   - A failed response carries the node's address list: when it differs from the client's, the client adopts it.
-//   - When the node doesn't answer, the client refreshes the list from the nodes behind the discovery addresses.
+// listIsWrong tells whether a node's answer shows that the client's node list is wrong: the node can't be reached,
+// doesn't own the keys, isn't ready to serve them, or sees a cluster of another size.
+func listIsWrong[R nodeResponse](resp R, err error, clusterSize int64) bool {
+	if err != nil {
+		return status.Code(err) == codes.Unavailable
+	}
+	switch resp.GetErrorCode() {
+	case pb.ErrorCode_WRONG_NODE, pb.ErrorCode_NOT_READY:
+		return true
+	default:
+		return resp.GetClusterSize() != clusterSize
+	}
+}
+
+// callNode sends a request to a node until it succeeds, the context is done, or the client adopts another node list.
+//   - When the answer shows that the client's node list is wrong (see listIsWrong), the client asks every node behind
+//     the discovery addresses for the list and adopts the first answer. A changed list re-routes the keys at once.
 //   - Every retry takes the next pooled connection and waits for the backoff, without holding the client's lock.
 //     After a NOT_READY answer the wait is capped at notReadyMaxRetryDelay.
 func callNode[R nodeResponse](
@@ -361,45 +312,23 @@ func callNode[R nodeResponse](
 		if attempt > 1 {
 			retries.Increment()
 		}
-		client, conn, ok := c.nodeClient(nodeID)
-		if !ok {
-			if addresses := c.addressesIfShrunk(nodeID); addresses != nil {
-				// another request learnt that the cluster shrank: route the keys again
-				return zero, &errClusterSizeChanged{nodesAddresses: addresses}
-			}
-			// this should never happen unless clusterSize is updated and the pools map isn't
-			// or if there is a bug in the hashing function
-			return zero, fmt.Errorf("no connection pool for node %d", nodeID)
+		client, conn, err := c.nodeClient(nodeID, clusterSize)
+		if err != nil {
+			return zero, err
 		}
 
 		resp, respErr := call(ctx, client)
-		if respErr == nil {
-			addresses := resp.GetNodesAddresses()
-			if resp.GetClusterSize() != clusterSize && len(addresses) > 0 {
-				return zero, &errClusterSizeChanged{nodesAddresses: addresses}
-			}
-			if succeeded(resp) {
-				return resp, nil
-			}
-			if len(addresses) > 0 {
-				sizeChanged, err := c.applyAddresses(addresses)
-				if err != nil {
-					return zero, err
-				}
-				if sizeChanged {
-					return zero, &errClusterSizeChanged{nodesAddresses: addresses}
-				}
-			}
-		} else if ctx.Err() == nil {
-			// the node may be gone, for example replaced by another pod
-			if addresses := c.refreshAddresses(ctx); addresses != nil {
-				sizeChanged, err := c.applyAddresses(addresses)
-				if err != nil {
-					return zero, err
-				}
-				if sizeChanged {
-					return zero, &errClusterSizeChanged{nodesAddresses: addresses}
-				}
+		if respErr == nil && resp.GetClusterSize() == clusterSize && succeeded(resp) {
+			return resp, nil
+		}
+		if listIsWrong(resp, respErr, clusterSize) {
+			addresses, err := c.discover(ctx)
+			if err != nil {
+				c.logger.Warnn("Discovering the node addresses", obskit.Error(err))
+			} else if changed, err := c.applyAddresses(addresses); err != nil {
+				return zero, err
+			} else if changed {
+				return zero, errClusterChanged
 			}
 		}
 

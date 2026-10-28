@@ -239,7 +239,7 @@ func (m *mockNodeServiceServer) GetNodeInfo(ctx context.Context, req *proto.GetN
 	if m.getNodeInfoFunc != nil {
 		return m.getNodeInfoFunc(ctx, req)
 	}
-	return &proto.GetNodeInfoResponse{}, nil
+	return &proto.GetNodeInfoResponse{ClusterSize: m.clusterSize, NodesAddresses: m.nodesAddresses}, nil
 }
 
 func (m *mockNodeServiceServer) CreateSnapshots(ctx context.Context, req *proto.CreateSnapshotsRequest) (
@@ -280,7 +280,7 @@ func createTestClientWithServers(t *testing.T, addresses []string) (*Client, fun
 	t.Helper()
 
 	// Create client with custom dialer for bufconn
-	client, err := NewClient(Config{
+	client, err := NewClient(t.Context(), Config{
 		Addresses:       addresses,
 		TotalHashRanges: 128,
 		RetryPolicy:     RetryPolicy{Disabled: true},
@@ -380,8 +380,7 @@ func TestClusterSizeDisagreement(t *testing.T) {
 				return node1.gets.Load() + node1.puts.Load() + node2.gets.Load() + node2.puts.Load()
 			}
 
-			c := newDiscoveryClient(t, a0)
-			require.NoError(t, c.ensureDiscovered(context.Background()))
+			c := newDiscoveryClient(t, a0, a1) // discovery hears from either node first
 
 			// the keys go to node 1 with 2 nodes and to node 2 with 3 nodes, so the request flips between the two
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

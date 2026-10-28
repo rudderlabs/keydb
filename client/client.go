@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"slices"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,12 +42,6 @@ const (
 	DefaultConnectionPoolSize = 10
 )
 
-type errClusterSizeChanged struct {
-	nodesAddresses []string
-}
-
-func (e *errClusterSizeChanged) Error() string { return "cluster size changed" }
-
 // RetryPolicy defines the retry policy configuration
 type RetryPolicy struct {
 	Disabled        bool
@@ -80,10 +73,10 @@ type GrpcConfig struct {
 
 // Config holds the configuration for a client
 type Config struct {
-	// Addresses are where the client learns the cluster's node addresses (host:port), at first use and whenever a
-	// node doesn't answer: it resolves them and asks the nodes behind them for the list. They can be a headless
-	// Service, whose name resolves to every ready pod, or the nodes' own addresses. Requests go to the addresses in
-	// the nodes' list, never to these.
+	// Addresses are the names behind which the client finds the cluster's nodes (host:port): a headless Service, whose
+	// name resolves to every ready pod, or the nodes' own addresses. NewClient resolves them and sends the first
+	// requests to what they resolve to. When an answer shows that the client's node list is wrong, or a node can't be
+	// reached, the client resolves them again and adopts the node list of the first node behind them to answer.
 	Addresses []string
 
 	// TotalHashRanges is the total number of hash ranges
@@ -119,16 +112,6 @@ type Client struct {
 	discoveryAddresses []string
 	// resolve turns a discovery address into the addresses of the nodes behind it
 	resolve func(ctx context.Context, address string) ([]string, error)
-	// nextNode rotates the node a refresh asks first, so that a node with an old list doesn't answer every time
-	nextNode atomic.Uint64
-	// refreshMu is held by the refresh in progress, which lastRefresh spaces out from the previous one
-	refreshMu   sync.Mutex
-	lastRefresh time.Time
-	// discovered is true once the client learnt the cluster's addresses
-	discovered atomic.Bool
-	// discoverMu protects discovering, which is closed when the discovery in progress ends
-	discoverMu  sync.Mutex
-	discovering chan struct{}
 	// closed is true once Close was called, requests still retrying then stop
 	closed atomic.Bool
 
@@ -170,8 +153,9 @@ func WithAddressResolver(resolve func(ctx context.Context, address string) ([]st
 	}
 }
 
-// NewClient creates a new KeyDB client
-func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) {
+// NewClient creates a new KeyDB client. It resolves config.Addresses and uses what they resolve to as the node list,
+// retrying until they resolve to at least one address or ctx ends, or only once when retries are disabled.
+func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Opts) (*Client, error) {
 	if len(config.Addresses) == 0 {
 		return nil, fmt.Errorf("no addresses provided")
 	}
@@ -218,16 +202,14 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		config.ConnectionPoolSize = DefaultConnectionPoolSize
 	}
 
-	config.Addresses = slices.Clone(config.Addresses)
+	discoveryAddresses := slices.Clone(config.Addresses)
+	config.Addresses = nil // the nodes' list, once discovered
 
-	clusterSize := int64(len(config.Addresses))
 	client := &Client{
-		discoveryAddresses: slices.Clone(config.Addresses),
+		discoveryAddresses: discoveryAddresses,
 		resolve:            resolveAddress,
 		config:             config,
 		pools:              make(map[int]*connectionPool),
-		clusterSize:        clusterSize,
-		hash:               hash.New(clusterSize, config.TotalHashRanges),
 		logger:             log,
 	}
 
@@ -240,21 +222,15 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 	}
 
 	client.initMetrics()
-	client.initConnectionMetrics(config)
 
-	// Create connection pools for all nodes
-	dialOpts := client.getGrpcDialOptions()
-	for i, addr := range config.Addresses {
-		pool, err := newConnectionPool(addr, config.ConnectionPoolSize, dialOpts...)
-		if err != nil {
-			// Close all pools on error
-			_ = client.Close()
-			return nil, fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
-		}
-
-		client.pools[i] = pool
+	addresses, err := client.waitForAddresses(ctx)
+	if err != nil {
+		return nil, err
 	}
-
+	if _, err := client.applyAddresses(addresses); err != nil {
+		_ = client.Close()
+		return nil, err
+	}
 	return client, nil
 }
 
@@ -288,21 +264,7 @@ func (c *Client) initMetrics() {
 	})
 
 	c.metrics.discoveryRetries = c.stats.NewStat("keydb_client_discovery_retries_total", stats.CountType)
-}
-
-func (c *Client) initConnectionMetrics(config Config) {
-	c.metrics.connectionOps = make(map[int]map[int]stats.Counter)
-	for i := range config.Addresses {
-		c.metrics.connectionOps[i] = make(map[int]stats.Counter)
-		for j := range config.ConnectionPoolSize {
-			c.metrics.connectionOps[i][j] = c.stats.NewTaggedStat(
-				"keydb_client_connection_ops_total", stats.CountType, stats.Tags{
-					"node": strconv.Itoa(i),
-					"conn": strconv.Itoa(j),
-				},
-			)
-		}
-	}
+	c.metrics.connectionOps = make(map[int]map[int]stats.Counter) // filled by applyAddresses
 }
 
 // Close will terminate all connection pools
@@ -335,11 +297,6 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	defer c.metrics.getReqLatency.RecordDuration()()
 	c.metrics.getReqCount.Increment()
 
-	if err := c.ensureDiscovered(ctx); err != nil {
-		c.metrics.getReqFailures.Increment()
-		return nil, err
-	}
-
 	// Create a map to store results
 	results := make(map[string]bool)
 	resultsMu := sync.Mutex{}
@@ -365,36 +322,10 @@ func (c *Client) Get(ctx context.Context, keys []string) ([]bool, error) {
 	return exists, nil
 }
 
-// routeUntilStable sends a request with the client's current routing until it no longer fails because the cluster
-// size changed. The first re-route goes at once, every later one waits for the request's backoff first, so that
-// nodes that disagree on the cluster size don't make the request spin.
-func (c *Client) routeUntilStable(ctx context.Context, send func() error) error {
-	var nextBackoff func() time.Duration
-	for {
-		err := send()
-		changed, ok := errors.AsType[*errClusterSizeChanged](err)
-		if !ok {
-			return err
-		}
-		if _, err := c.applyAddresses(changed.nodesAddresses); err != nil {
-			return fmt.Errorf("updating cluster size: %w", err)
-		}
-		if nextBackoff == nil {
-			nextBackoff = c.getNextBackoffFunc()
-			continue
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(nextBackoff()):
-		}
-	}
-}
-
 // get sends the keys that have no result yet to their nodes, routed with the client's current hash.
-// It returns errClusterSizeChanged when a node reports another cluster size.
+// It returns errClusterChanged when the client adopted another node list, and the keys must be routed again.
 func (c *Client) get(ctx context.Context, keys []string, results map[string]bool, resultsMu *sync.Mutex) error {
-	h, clusterSize := c.routing()
+	h, clusterSize := c.routingInfo()
 
 	// Group keys by node
 	keysByNode := make(map[int64][]string)
@@ -406,7 +337,7 @@ func (c *Client) get(ctx context.Context, keys []string, results map[string]bool
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
-	hasClusterSizeChanged := atomic.Value{}
+	var clusterChanged atomic.Bool
 
 	cancellableCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -423,8 +354,8 @@ func (c *Client) get(ctx context.Context, keys []string, results map[string]bool
 				func(resp *pb.GetResponse) bool { return resp.ErrorCode == pb.ErrorCode_NO_ERROR },
 			)
 			if err != nil {
-				if changed, ok := errors.AsType[*errClusterSizeChanged](err); ok {
-					hasClusterSizeChanged.Store(changed.nodesAddresses)
+				if errors.Is(err, errClusterChanged) {
+					clusterChanged.Store(true)
 					cancel()
 				}
 				return err
@@ -442,8 +373,8 @@ func (c *Client) get(ctx context.Context, keys []string, results map[string]bool
 	}
 
 	if err := group.Wait(); err != nil {
-		if nodesAddresses, ok := hasClusterSizeChanged.Load().([]string); ok && len(nodesAddresses) > 0 {
-			return &errClusterSizeChanged{nodesAddresses: nodesAddresses}
+		if clusterChanged.Load() {
+			return errClusterChanged
 		}
 		return err
 	}
@@ -455,11 +386,6 @@ func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) erro
 	defer c.metrics.putReqLatency.RecordDuration()()
 	c.metrics.putReqCount.Increment()
 
-	if err := c.ensureDiscovered(ctx); err != nil {
-		c.metrics.putReqFailures.Increment()
-		return err
-	}
-
 	err := c.routeUntilStable(ctx, func() error { return c.put(ctx, keys, ttl) })
 	if err != nil {
 		c.metrics.putReqFailures.Increment()
@@ -469,9 +395,9 @@ func (c *Client) Put(ctx context.Context, keys []string, ttl time.Duration) erro
 }
 
 // put sends the keys to their nodes, routed with the client's current hash.
-// It returns errClusterSizeChanged when a node reports another cluster size.
+// It returns errClusterChanged when the client adopted another node list, and the keys must be routed again.
 func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) error {
-	h, clusterSize := c.routing()
+	h, clusterSize := c.routingInfo()
 
 	// Group keys by node
 	keysByNode := make(map[int64][]string)
@@ -480,7 +406,7 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 		keysByNode[nodeID] = append(keysByNode[nodeID], key)
 	}
 
-	hasClusterSizeChanged := atomic.Value{}
+	var clusterChanged atomic.Bool
 
 	cancellableCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -496,8 +422,8 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 				func(resp *pb.PutResponse) bool { return resp.Success && resp.ErrorCode == pb.ErrorCode_NO_ERROR },
 			)
 			if err != nil {
-				if changed, ok := errors.AsType[*errClusterSizeChanged](err); ok {
-					hasClusterSizeChanged.Store(changed.nodesAddresses)
+				if errors.Is(err, errClusterChanged) {
+					clusterChanged.Store(true)
 					cancel()
 				}
 				return err
@@ -507,8 +433,8 @@ func (c *Client) put(ctx context.Context, keys []string, ttl time.Duration) erro
 	}
 
 	if err := group.Wait(); err != nil {
-		if nodesAddresses, ok := hasClusterSizeChanged.Load().([]string); ok && len(nodesAddresses) > 0 {
-			return &errClusterSizeChanged{nodesAddresses: nodesAddresses}
+		if clusterChanged.Load() {
+			return errClusterChanged
 		}
 		return err
 	}

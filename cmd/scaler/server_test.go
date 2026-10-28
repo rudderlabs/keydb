@@ -411,7 +411,7 @@ func TestScaleTransientNetworkFailure(t *testing.T) {
 	proxyPort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
 	proxy := &tcpproxy.Proxy{
-		LocalAddr: "localhost:" + strconv.Itoa(proxyPort),
+		LocalAddr: "127.0.0.1:" + strconv.Itoa(proxyPort), // see getService about 127.0.0.1
 	}
 
 	// Create the node service
@@ -1870,7 +1870,8 @@ func getService(
 
 	freePort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
-	listenAddr := "localhost:" + strconv.Itoa(freePort)
+	// an IP rather than localhost: the client resolves the node addresses, and localhost resolves to ::1 too
+	listenAddr := "127.0.0.1:" + strconv.Itoa(freePort)
 
 	// Determine the address clients will use
 	var address string
@@ -1986,7 +1987,7 @@ func startScalerHTTPServer(
 		Addresses:       o.addresses,
 		TotalHashRanges: totalHashRanges,
 	}
-	opServer, err := newHTTPServer(clientConfig, op, addr, stats.NOP, log)
+	opServer, err := newHTTPServer(ctx, clientConfig, op, addr, stats.NOP, log)
 	require.NoError(t, err)
 	go func() {
 		err := opServer.Start(ctx)
@@ -2099,7 +2100,7 @@ func startMockNodeService(t testing.TB, identifier string) *mockNodeServiceServe
 	freePort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
 
-	address := "localhost:" + strconv.Itoa(freePort)
+	address := "127.0.0.1:" + strconv.Itoa(freePort) // see getService about 127.0.0.1
 	lis, err := net.Listen("tcp", address)
 	require.NoError(t, err)
 

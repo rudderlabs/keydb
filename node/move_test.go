@@ -168,7 +168,7 @@ func (c *moveCluster) resolveHeadless(_ context.Context, address string) ([]stri
 // newClient returns a client configured like the processors: with the headless Service as its only address
 func (c *moveCluster) newClient() *client.Client {
 	c.t.Helper()
-	cl, err := client.NewClient(client.Config{
+	cl, err := client.NewClient(c.t.Context(), client.Config{
 		Addresses:       []string{moveTestHeadless},
 		TotalHashRanges: moveTestHashRanges,
 		RetryPolicy: client.RetryPolicy{

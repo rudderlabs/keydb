@@ -151,7 +151,7 @@ func TestDeadNodeBehindResolver(t *testing.T) {
 				conf.GrpcConfig.MinConnectTimeout = 2 * time.Second
 				conf.GrpcConfig.BackoffBaseDelay = 100 * time.Millisecond
 			},
-			// the first attempt blocks for MinConnectTimeout: its failure must be enough to refresh the list
+			// the first attempt blocks for MinConnectTimeout: its failure must be enough to discover the cluster again
 			within: 3 * time.Second,
 		},
 		{
@@ -186,7 +186,7 @@ func TestDeadNodeBehindResolver(t *testing.T) {
 			exists, err := c.Get(ctx, keys)
 			require.NoError(t, err)
 			require.Equal(t, []bool{true, true}, exists)
-			require.Less(t, time.Since(start), tc.within, "the first failure must make the client refresh the list")
+			require.Less(t, time.Since(start), tc.within, "the first failure must make the client discover again")
 			require.Positive(t, newNode1.gets.Load())
 		})
 	}
