@@ -111,13 +111,12 @@ for i, key := range keys {
 - **Cluster Awareness**: Automatically adapts to cluster size changes (including degraded mode)
   - The cluster size is dynamically calculated based on active (non-degraded) nodes
   - When a node is marked as degraded, it's excluded from the effective cluster size
-- **Discovery**: `Addresses` can be a single seed, such as the `keydb` Kubernetes Service. On first use the client asks the seed for the cluster's addresses (`GetNodeInfo`), then talks to every node directly; data requests never go through the seed
+- **Discovery**: `Addresses` are where the client learns the cluster, such as the keydb headless Kubernetes Service (`keydb-headless.<namespace>.svc.cluster.local:50051`), whose name resolves to every ready pod. On first use the client resolves them and asks the nodes behind them for the cluster's addresses (`GetNodeInfo`), one after the other until one answers, then talks to every node directly at the addresses in that list; data requests never go to `Addresses`
   - Every failed discovery attempt that the client retries is counted in `keydb_client_discovery_retries_total`
 - **Moved nodes**: Every node response carries the cluster's address list
   - The client adopts the list from failed responses when it differs from its own: a same-size list is retried after the usual backoff, a size change re-routes the keys at once, and later size changes within the same request wait for the backoff
-  - When a node stops answering for `DeadNodeLookupAfter` (default 5s), counted from the start of the first failing attempt, the client asks the seeds, then the other nodes, for the current list. An answer equal to the client's own list doesn't end the lookup. Against an address that drops packets each attempt blocks for `MinConnectTimeout` (default 20s) before it fails, so with the defaults the lookup comes as soon as the first attempt fails, after 20s
-  - When a lookup moves a node away from an address, the client keeps the node off that address for 3 minutes, which covers the kubelet's configmap refresh: a same-size list that puts the node back there, as a promoted shadow that hasn't reloaded its config still hands out, keeps the node on its new address and adopts the other entries. A list of another size is adopted as is
-  - After a `NOT_READY` answer, such as a shadow's, the retry waits for the backoff capped at 2s, so a request is served within about 2s of the shadow's promotion
+  - When a node doesn't answer, the client resolves `Addresses` again and asks the nodes behind them for the current list, starting one node further each time, so that a node that hasn't reloaded its config yet doesn't answer every time. Requests that fail together share one refresh, and refreshes are at least a second apart. A node that hasn't reloaded may hand out an old list for a while; the next refresh corrects it once every pod has the new config
+  - After a `NOT_READY` answer, such as a shadow's, the retry waits for the backoff capped at 2s, so a request retrying on a shadow is served within about 2s of its promotion
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
 - **Automatic retries**: Automatically retries failed requests until they succeed or their context ends. With `RetryPolicy.Disabled` a request returns after its first failed attempt, though it still re-routes after a cluster size change
@@ -576,7 +575,7 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
 ### Prerequisites
 
 - A keydb image with node moves, and `global.keydb.nodeMoves: true` in the customer object, which restarts the keydb pods once.
-- Every processor of the customer running a rudder-server with this client, which it needs before the operator release that makes the `keydb` Service their URL. An older client given the Service URL hangs on node 0's keys whenever more than one keydb pod is behind the Service: with several nodes, or with a shadow.
+- Every processor of the customer running a rudder-server with this client, which it needs before the operator release that makes the keydb headless Service their URL. An older client treats that name as node 0's address, and hangs on node 0's keys whenever it resolves to more than one keydb pod: with several nodes, or with a shadow.
 - No `/hashRangeMovements` or `/backup` while a move is in progress: they compete with replication for the snapshot slot.
 - **Disk size:** the new disk holds the live data, without what expired. Give it at least 25% headroom, so that it stays under the volume usage alerts (80% and 90%). The old disk's usage overstates the live data when it holds expired keys, so watch the shadow's disk usage during the first pass, and revert PR1 if it would fill up.
 
@@ -622,7 +621,7 @@ Rules for the whole move:
          "0": {active: b, slots: {b: {diskSize: 20Gi}}}
    ```
 
-   `keydb-0` is deleted, cancels its in-flight calls and exits, and Kubernetes deletes its PVC. `keydb-0-b` starts serving as soon as its configmap refreshes. Clients see node 0 fail, ask another node for the list and move to `keydb-0-b`. Every request that includes node 0's keys waits meanwhile, for about a minute or two. A processor batch holds keys of every node, so in practice every batch waits.
+   `keydb-0` is deleted, cancels its in-flight calls and exits, and Kubernetes deletes its PVC. `keydb-0-b` starts serving as soon as its configmap refreshes. Clients see node 0 fail, resolve the headless Service again, get the new list from the pods behind it and move to `keydb-0-b`. Until every pod has reloaded its config, some still hand out the old list and clients may go back and forth; they settle once all of them have. Every request that includes node 0's keys waits meanwhile, for about a minute or two. A processor batch holds keys of every node, so in practice every batch waits.
 
 4. **Afterwards, delete the old volume.** Check that the old slot's PVC is gone: here `data-keydb-0-0`, since the move left slot `a`. If it isn't, delete it with `kubectl delete pvc -n <namespace> data-keydb-0-0`. Never delete the PVC of the slot that now serves. Deleting the PVC doesn't delete the volume when its StorageClass retains volumes, as in production: the PV stays `Released` and the EBS volume keeps costing. Find it with `kubectl get pv | grep <namespace>/data-keydb-0-0`, then `kubectl patch pv <name> -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'`, which makes Kubernetes delete the PV and the EBS volume, and check that the PV is gone.
 
