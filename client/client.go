@@ -41,8 +41,6 @@ const (
 	DefaultGrpcMinConnectTimeout = 20 * time.Second
 
 	DefaultConnectionPoolSize = 10
-
-	DefaultDeadNodeLookupAfter = 5 * time.Second
 )
 
 type errClusterSizeChanged struct {
@@ -82,7 +80,10 @@ type GrpcConfig struct {
 
 // Config holds the configuration for a client
 type Config struct {
-	// Addresses is a list of node addresses (host:port)
+	// Addresses are where the client learns the cluster's node addresses (host:port), at first use and whenever a
+	// node doesn't answer: it resolves them and asks the nodes behind them for the list. They can be a headless
+	// Service, whose name resolves to every ready pod, or the nodes' own addresses. Requests go to the addresses in
+	// the nodes' list, never to these.
 	Addresses []string
 
 	// TotalHashRanges is the total number of hash ranges
@@ -96,10 +97,6 @@ type Config struct {
 
 	// GrpcConfig defines the gRPC connection configuration
 	GrpcConfig GrpcConfig
-
-	// DeadNodeLookupAfter is how long a node may fail without answering before the client asks another node for
-	// the current list of addresses (0 means use default)
-	DeadNodeLookupAfter time.Duration
 }
 
 // Client is a client for the KeyDB service
@@ -118,8 +115,15 @@ type Client struct {
 	// mu protects pools, clusterSize, hash, config.Addresses and metrics.connectionOps
 	mu sync.RWMutex
 
-	// seeds are the configured addresses, used to discover the cluster and to look it up again
-	seeds []string
+	// discoveryAddresses are the configured addresses, which resolve to the nodes to ask for the cluster's list
+	discoveryAddresses []string
+	// resolve turns a discovery address into the addresses of the nodes behind it
+	resolve func(ctx context.Context, address string) ([]string, error)
+	// nextNode rotates the node a refresh asks first, so that a node with an old list doesn't answer every time
+	nextNode atomic.Uint64
+	// refreshMu is held by the refresh in progress, which lastRefresh spaces out from the previous one
+	refreshMu   sync.Mutex
+	lastRefresh time.Time
 	// discovered is true once the client learnt the cluster's addresses
 	discovered atomic.Bool
 	// discoverMu protects discovering, which is closed when the discovery in progress ends
@@ -127,15 +131,6 @@ type Client struct {
 	discovering chan struct{}
 	// closed is true once Close was called, requests still retrying then stop
 	closed atomic.Bool
-
-	// abandoned is, for each node a dead-node lookup moved, the address it was moved away from. It is protected by mu.
-	abandoned map[int]abandonedAddress
-
-	// failMu protects failingSince, when each node started failing without answering, across requests, and
-	// clearedAt, when each node last answered or got a new address
-	failMu       sync.Mutex
-	failingSince map[int64]time.Time
-	clearedAt    map[int64]time.Time
 
 	logger logger.Logger
 
@@ -159,19 +154,19 @@ type Client struct {
 	}
 }
 
-// abandonedAddress is an address a dead-node lookup moved a node away from
-type abandonedAddress struct {
-	// address is the address the node was moved away from, movedTo the one it was moved to
-	address, movedTo string
-	// until is when the client forgets it
-	until time.Time
-}
-
 type Opts func(*Client)
 
 func WithStats(stats stats.Stats) Opts {
 	return func(client *Client) {
 		client.stats = stats
+	}
+}
+
+// WithAddressResolver sets how the client turns one of its configured addresses into the addresses of the nodes
+// behind it. The default looks the host up in DNS, so that a headless Service's name gives every ready pod.
+func WithAddressResolver(resolve func(ctx context.Context, address string) ([]string, error)) Opts {
+	return func(client *Client) {
+		client.resolve = resolve
 	}
 }
 
@@ -223,20 +218,17 @@ func NewClient(config Config, log logger.Logger, opts ...Opts) (*Client, error) 
 		config.ConnectionPoolSize = DefaultConnectionPoolSize
 	}
 
-	if config.DeadNodeLookupAfter == 0 {
-		config.DeadNodeLookupAfter = DefaultDeadNodeLookupAfter
-	}
 	config.Addresses = slices.Clone(config.Addresses)
 
 	clusterSize := int64(len(config.Addresses))
 	client := &Client{
-		seeds:       slices.Clone(config.Addresses),
-		config:      config,
-		pools:       make(map[int]*connectionPool),
-		abandoned:   make(map[int]abandonedAddress),
-		clusterSize: clusterSize,
-		hash:        hash.New(clusterSize, config.TotalHashRanges),
-		logger:      log,
+		discoveryAddresses: slices.Clone(config.Addresses),
+		resolve:            resolveAddress,
+		config:             config,
+		pools:              make(map[int]*connectionPool),
+		clusterSize:        clusterSize,
+		hash:               hash.New(clusterSize, config.TotalHashRanges),
+		logger:             log,
 	}
 
 	for _, opt := range opts {

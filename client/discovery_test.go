@@ -95,18 +95,28 @@ func newMockNode(t *testing.T, address string) *mockNode {
 	return n
 }
 
-func newDiscoveryClient(t *testing.T, seeds ...string) *Client {
+func newDiscoveryClient(t *testing.T, addresses ...string) *Client {
 	t.Helper()
-	return newTestClient(t, nil, seeds...)
+	return newTestClient(t, nil, addresses...)
 }
 
 // newTestClient creates a client with short timings, which adjust can change before the client is created
-func newTestClient(t *testing.T, adjust func(*Config), seeds ...string) *Client {
+func newTestClient(t *testing.T, adjust func(*Config), addresses ...string) *Client {
+	t.Helper()
+	return newTestClientWith(t, adjust, addresses)
+}
+
+// newHeadlessClient creates a client with short timings that discovers the cluster through h
+func newHeadlessClient(t *testing.T, h *headless) *Client {
+	t.Helper()
+	return newTestClientWith(t, nil, []string{headlessName}, WithAddressResolver(h.resolve))
+}
+
+func newTestClientWith(t *testing.T, adjust func(*Config), addresses []string, opts ...Opts) *Client {
 	t.Helper()
 	conf := Config{
-		Addresses:           seeds,
-		TotalHashRanges:     discoveryTestHashRanges,
-		DeadNodeLookupAfter: 200 * time.Millisecond,
+		Addresses:       addresses,
+		TotalHashRanges: discoveryTestHashRanges,
 		RetryPolicy: RetryPolicy{
 			InitialInterval: 20 * time.Millisecond,
 			Multiplier:      1.5,
@@ -116,10 +126,39 @@ func newTestClient(t *testing.T, adjust func(*Config), seeds ...string) *Client 
 	if adjust != nil {
 		adjust(&conf)
 	}
-	c, err := NewClient(conf, logger.NOP, WithStats(stats.NOP))
+	c, err := NewClient(conf, logger.NOP, append([]Opts{WithStats(stats.NOP)}, opts...)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	return c
+}
+
+// headlessName is the address of the headless Service that headless stands in for. Nothing can dial it, so a data
+// request sent to it would fail.
+const headlessName = "keydb-headless.test.invalid:50051"
+
+// headless stands in for a headless Service: its name resolves to the pods the test sets
+type headless struct {
+	mu      sync.Mutex
+	pods    []string
+	lookups atomic.Int64
+}
+
+func newHeadless(pods ...string) *headless { return &headless{pods: pods} }
+
+func (h *headless) set(pods ...string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pods = pods
+}
+
+func (h *headless) resolve(_ context.Context, address string) ([]string, error) {
+	h.lookups.Add(1)
+	if address != headlessName {
+		return nil, fmt.Errorf("unknown name %q", address)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.pods), nil
 }
 
 // keysFor returns n keys that the hash sends to the given node
@@ -135,7 +174,7 @@ func keysFor(nodeID, clusterSize int64, n int) []string {
 	return keys
 }
 
-func TestDiscoveryFromSeed(t *testing.T) {
+func TestDiscoveryFromOneNode(t *testing.T) {
 	addresses := []string{freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)}
 	nodes := make([]*mockNode, len(addresses))
 	for i, address := range addresses {
@@ -143,7 +182,7 @@ func TestDiscoveryFromSeed(t *testing.T) {
 		nodes[i].setList(addresses...)
 	}
 
-	c := newDiscoveryClient(t, addresses[1]) // only one seed, which is not node 0
+	c := newDiscoveryClient(t, addresses[1]) // only one address, which is not node 0
 	var keys []string
 	for nodeID := range int64(3) {
 		keys = append(keys, keysFor(nodeID, 3, 5)...)
@@ -186,28 +225,21 @@ func TestAdoptListFromFailedResponse(t *testing.T) {
 	require.NotSame(t, oldPool1, newPool1)
 }
 
-func TestDataNeverThroughSeed(t *testing.T) {
+func TestDataNeverThroughTheDiscoveryAddress(t *testing.T) {
 	s, a0 := freeMockAddress(t), freeMockAddress(t)
-	node0 := newMockNode(t, a0) // a single node, whose list has the same size as the seeds
-	seed := newMockNode(t, s)   // the keydb Service
-	seed.setList(a0)
+	node0 := newMockNode(t, a0)    // a single node, whose list has as many entries as the configured addresses
+	discovery := newMockNode(t, s) // answers with the cluster's list, without being one of its nodes
+	discovery.setList(a0)
 
 	c := newDiscoveryClient(t, s)
 	keys := []string{"k1", "k2"}
 	_, err := c.Get(context.Background(), keys)
 	require.NoError(t, err)
 	require.NoError(t, c.Put(context.Background(), keys, time.Hour))
-	require.Zero(t, seed.gets.Load()+seed.puts.Load(), "data requests must never go through the seed")
+	require.Zero(t, discovery.gets.Load()+discovery.puts.Load(),
+		"data requests must go to the nodes the list names, never to the configured address")
 	require.Positive(t, node0.gets.Load())
 	require.Positive(t, node0.puts.Load())
-}
-
-func TestNewClientDefaults(t *testing.T) {
-	c, err := NewClient(Config{Addresses: []string{freeMockAddress(t)}}, logger.NOP)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-	require.Equal(t, 5*time.Second, c.config.DeadNodeLookupAfter, "the README documents a 5s default")
-	require.Equal(t, DefaultDeadNodeLookupAfter, c.config.DeadNodeLookupAfter)
 }
 
 func TestNotReadyRotatesConnection(t *testing.T) {
@@ -361,18 +393,18 @@ func TestCloseStopsInFlightRetries(t *testing.T) {
 	require.Zero(t, pools, "a request must not reopen connections after Close")
 }
 
-func TestDeadNodeLookupAcrossShortRequests(t *testing.T) {
+func TestShortRequestsMoveOffADeadNode(t *testing.T) {
 	a0, dead1, new1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
 	node0 := newMockNode(t, a0)
 	node0.setList(a0, dead1)
 	newNode1 := newMockNode(t, new1)
 	newNode1.setList(a0, new1)
 
-	c := newDiscoveryClient(t, a0) // DeadNodeLookupAfter is 200ms
+	c := newDiscoveryClient(t, a0)
 	require.NoError(t, c.ensureDiscovered(context.Background()))
 	node0.setList(a0, new1)
 
-	// every request gives up well before DeadNodeLookupAfter, the failures must add up across requests
+	// every request gives up well before the refresh interval
 	require.Eventually(t, func() bool {
 		ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 		defer cancel()
@@ -425,183 +457,6 @@ func TestNotReadyRetryDelayIsCapped(t *testing.T) {
 		"a request must be served within notReadyMaxRetryDelay of the node turning ready")
 }
 
-func TestDeadNodeLookupSources(t *testing.T) {
-	cases := []struct {
-		name string
-		// moved changes what the seed and node 0 answer once node 1 moved
-		moved func(seed, node0 *mockNode, newList []string)
-	}{
-		{
-			name: "only the seed knows",
-			moved: func(seed, _ *mockNode, newList []string) {
-				seed.setList(newList...)
-			},
-		},
-		{
-			name: "the seed is gone and another node knows",
-			moved: func(seed, node0 *mockNode, newList []string) {
-				seed.stop()
-				node0.setList(newList...)
-			},
-		},
-		{
-			name: "the seed still hands out the client's list and another node knows",
-			moved: func(_, node0 *mockNode, newList []string) {
-				node0.setList(newList...)
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			a0, dead1, new1, s := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
-			node0 := newMockNode(t, a0)
-			node0.setList(a0, dead1)
-			newNode1 := newMockNode(t, new1)
-			newNode1.setList(a0, new1)
-			seed := newMockNode(t, s) // a seed that isn't one of the nodes, like the keydb Service
-			seed.setList(a0, dead1)
-
-			c := newDiscoveryClient(t, s)
-			require.NoError(t, c.ensureDiscovered(context.Background()))
-			tc.moved(seed, node0, []string{a0, new1})
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_, err := c.Get(ctx, keysFor(1, 2, 2))
-			require.NoError(t, err, "the lookup must find the node's new address")
-			require.Positive(t, newNode1.gets.Load())
-		})
-	}
-}
-
-// TestNoReturnToAbandonedAddress moves node 0 the way PR2 does when node 1 reloads its config before the promoted
-// shadow: the old pod is gone, the lookup finds the shadow's address, and the shadow still answers NOT_READY with
-// the old list until its own config refreshes.
-func TestNoReturnToAbandonedAddress(t *testing.T) {
-	old0, new0, a1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t) // nothing listens on old0
-	node1 := newMockNode(t, a1)
-	node1.setList(old0, a1)
-	c := newDiscoveryClient(t, a1)
-	require.NoError(t, c.ensureDiscovered(context.Background()))
-
-	shadow := newMockNode(t, new0)
-	shadow.setList(old0, a1)
-	shadow.notReady.Store(true)
-	node1.setList(new0, a1)
-
-	// every address the client puts node 0 on
-	var (
-		addressesMu sync.Mutex
-		addresses   = []string{old0}
-	)
-	stopWatching := make(chan struct{})
-	watched := make(chan struct{})
-	go func() {
-		defer close(watched)
-		for {
-			select {
-			case <-stopWatching:
-				return
-			case <-time.After(time.Millisecond):
-			}
-			c.mu.RLock()
-			current := c.config.Addresses[0]
-			c.mu.RUnlock()
-			addressesMu.Lock()
-			if addresses[len(addresses)-1] != current {
-				addresses = append(addresses, current)
-			}
-			addressesMu.Unlock()
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := c.Get(ctx, keysFor(0, 2, 2))
-		done <- err
-	}()
-	require.Eventually(t, func() bool { return shadow.gets.Load() > 0 }, 10*time.Second, time.Millisecond,
-		"the lookup never found the shadow")
-	time.Sleep(time.Second) // the shadow keeps answering with the old list
-
-	promoted := time.Now()
-	shadow.setList(new0, a1)
-	shadow.notReady.Store(false)
-	select {
-	case err := <-done:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("the request never completed after the shadow was promoted")
-	}
-	served := time.Since(promoted)
-	close(stopWatching)
-	<-watched
-
-	addressesMu.Lock()
-	defer addressesMu.Unlock()
-	require.Equal(t, []string{old0, new0}, addresses, "after the lookup, the client must stay off the old address")
-	require.Less(t, served, time.Second, "the request must be served as soon as the shadow is promoted")
-}
-
-func TestAbandonedAddressMemory(t *testing.T) {
-	const x, y, z, a1, b1, c2 = "x:1", "y:1", "z:1", "a1:1", "b1:1", "c2:1" // never dialled
-	address0 := func(c *Client) []string {
-		c.mu.RLock()
-		defer c.mu.RUnlock()
-		return slices.Clone(c.config.Addresses)
-	}
-	movedByLookup := func(t *testing.T) *Client {
-		t.Helper()
-		c := newDiscoveryClient(t, x, a1)
-		_, err := c.applyLookedUpAddresses([]string{y, a1}, 0) // node 0 was dead on x
-		require.NoError(t, err)
-		return c
-	}
-
-	t.Run("a list of the same size keeps the node off the abandoned address and adopts the rest", func(t *testing.T) {
-		c := movedByLookup(t)
-		_, err := c.applyAddresses([]string{x, b1})
-		require.NoError(t, err)
-		require.Equal(t, []string{y, b1}, address0(c))
-	})
-	t.Run("a list of another size is adopted as is", func(t *testing.T) {
-		c := movedByLookup(t)
-		sizeChanged, err := c.applyAddresses([]string{x, a1, c2})
-		require.NoError(t, err)
-		require.True(t, sizeChanged)
-		require.Equal(t, []string{x, a1, c2}, address0(c))
-	})
-	t.Run("the memory expires", func(t *testing.T) {
-		c := movedByLookup(t)
-		c.mu.Lock()
-		memory := c.abandoned[0]
-		memory.until = time.Now().Add(-time.Second)
-		c.abandoned[0] = memory
-		c.mu.Unlock()
-		_, err := c.applyAddresses([]string{x, a1})
-		require.NoError(t, err)
-		require.Equal(t, []string{x, a1}, address0(c))
-	})
-	t.Run("the memory is dropped once the node moves on", func(t *testing.T) {
-		c := movedByLookup(t)
-		_, err := c.applyAddresses([]string{z, a1})
-		require.NoError(t, err)
-		_, err = c.applyAddresses([]string{x, a1})
-		require.NoError(t, err)
-		require.Equal(t, []string{x, a1}, address0(c))
-	})
-	t.Run("a list from a failed response leaves no memory", func(t *testing.T) {
-		c := newDiscoveryClient(t, x, a1)
-		_, err := c.applyAddresses([]string{y, a1})
-		require.NoError(t, err)
-		_, err = c.applyAddresses([]string{x, a1})
-		require.NoError(t, err)
-		require.Equal(t, []string{x, a1}, address0(c))
-	})
-}
-
 func TestDiscoveryRetriesAreCounted(t *testing.T) {
 	statsStore, err := memstats.New()
 	require.NoError(t, err)
@@ -618,4 +473,131 @@ func TestDiscoveryRetriesAreCounted(t *testing.T) {
 	retries := statsStore.Get("keydb_client_discovery_retries_total", nil)
 	require.NotNil(t, retries, "a stuck discovery must show in the client's metrics")
 	require.Greater(t, retries.LastValue(), float64(1))
+}
+
+func TestDiscoveryThroughHeadlessService(t *testing.T) {
+	a0, a1 := freeMockAddress(t), freeMockAddress(t)
+	nodes := []*mockNode{newMockNode(t, a0), newMockNode(t, a1)}
+	for _, n := range nodes {
+		n.setList(a0, a1)
+	}
+
+	c := newHeadlessClient(t, newHeadless(a1, a0))
+	keys := append(keysFor(0, 2, 3), keysFor(1, 2, 3)...)
+	exists, err := c.Get(context.Background(), keys)
+	require.NoError(t, err)
+	require.NotContains(t, exists, false)
+	require.NoError(t, c.Put(context.Background(), keys, time.Hour))
+	require.Equal(t, 2, c.ClusterSize())
+	for i, n := range nodes {
+		require.Positive(t, n.gets.Load(), "node %d got no request", i)
+		require.Positive(t, n.puts.Load(), "node %d got no request", i)
+	}
+}
+
+// TestRefreshResolvesAndAsksTheNextPod moves node 1 while node 0 hasn't reloaded its config: only the new pod knows
+// the new list. The client has to resolve the name again to find the new pod, and take turns across refreshes so
+// that the stale pod doesn't answer every time.
+func TestRefreshResolvesAndAsksTheNextPod(t *testing.T) {
+	a0, old1, new1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t) // nothing listens on old1
+	node0 := newMockNode(t, a0)
+	node0.setList(a0, old1)
+	h := newHeadless(a0)
+	c := newHeadlessClient(t, h)
+	require.NoError(t, c.ensureDiscovered(context.Background()))
+
+	newNode1 := newMockNode(t, new1)
+	newNode1.setList(a0, new1)
+	h.set(a0, new1) // the old pod is gone, the new one is ready
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	exists, err := c.Get(ctx, keysFor(1, 2, 2))
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true}, exists)
+	require.Positive(t, newNode1.gets.Load())
+}
+
+func TestRefreshesAreSpacedOut(t *testing.T) {
+	a0, dead1 := freeMockAddress(t), freeMockAddress(t) // nothing listens on dead1, and nobody knows a replacement
+	node0 := newMockNode(t, a0)
+	node0.setList(a0, dead1)
+	h := newHeadless(a0)
+	c := newHeadlessClient(t, h)
+	require.NoError(t, c.ensureDiscovered(context.Background()))
+	before := h.lookups.Load()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+	var wg sync.WaitGroup
+	for range 20 { // every request fails on the dead node over and over
+		wg.Go(func() { _, _ = c.Get(ctx, keysFor(1, 2, 1)) })
+	}
+	wg.Wait()
+	refreshes := h.lookups.Load() - before
+	require.Positive(t, refreshes, "a node that doesn't answer must make the client ask for the list")
+	require.LessOrEqual(t, refreshes, int64(3), "requests failing together must share refreshes, a second apart")
+}
+
+// TestMoveSelfHeals moves node 0 the way PR2 does when node 1 reloads its config before the promoted shadow: the
+// old pod is gone, and the shadow answers NOT_READY with the old list until its own config refreshes. The client
+// may go back and forth meanwhile, and is served shortly after the shadow is promoted.
+func TestMoveSelfHeals(t *testing.T) {
+	old0, new0, a1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t) // nothing listens on old0
+	node1 := newMockNode(t, a1)
+	node1.setList(old0, a1)
+	h := newHeadless(a1)
+	c := newHeadlessClient(t, h)
+	require.NoError(t, c.ensureDiscovered(context.Background()))
+
+	shadow := newMockNode(t, new0)
+	shadow.setList(old0, a1)
+	shadow.notReady.Store(true)
+	node1.setList(new0, a1)
+	h.set(new0, a1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Get(ctx, keysFor(0, 2, 2))
+		done <- err
+	}()
+	require.Eventually(t, func() bool { return shadow.gets.Load() > 0 }, 10*time.Second, time.Millisecond,
+		"the client never reached the shadow")
+	time.Sleep(time.Second) // the shadow keeps answering with the old list
+
+	promoted := time.Now()
+	shadow.setList(new0, a1)
+	shadow.notReady.Store(false)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request never completed after the shadow was promoted")
+	}
+	require.Less(t, time.Since(promoted), 3*time.Second,
+		"once every pod has the new config, a refresh and a retry are all it takes")
+}
+
+func TestResolveAddress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resolved, err := resolveAddress(ctx, "127.0.0.1:1234")
+	require.NoError(t, err)
+	require.Equal(t, []string{"127.0.0.1:1234"}, resolved, "an IP address is used as it is")
+
+	resolved, err = resolveAddress(ctx, ":1234")
+	require.NoError(t, err)
+	require.Equal(t, []string{":1234"}, resolved, "gRPC dials an empty host as the local machine")
+
+	resolved, err = resolveAddress(ctx, "localhost:1234")
+	require.NoError(t, err)
+	require.Contains(t, resolved, "127.0.0.1:1234", "a name gives every address it resolves to, with the port")
+
+	_, err = resolveAddress(ctx, "keydb.test.invalid:1234")
+	require.Error(t, err)
+	_, err = resolveAddress(ctx, "no-port")
+	require.Error(t, err)
 }

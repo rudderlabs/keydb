@@ -2,7 +2,7 @@ package node
 
 import (
 	"context"
-	"io"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -47,7 +47,7 @@ type moveNode struct {
 	service *Service
 	server  *grpc.Server
 	cancel  context.CancelFunc
-	running bool
+	running atomic.Bool
 }
 
 type moveCluster struct {
@@ -116,17 +116,17 @@ func (c *moveCluster) start(n *moveNode) {
 	lis, err := net.Listen("tcp", n.address)
 	require.NoError(c.t, err)
 	go func() { _ = server.Serve(lis) }()
-	n.service, n.server, n.cancel, n.running = service, server, cancel, true
+	n.service, n.server, n.cancel = service, server, cancel
+	n.running.Store(true)
 	c.t.Cleanup(func() { c.stop(n) })
 }
 
 // stop shuts the node down the way the node's main does on SIGTERM: in-flight calls are cancelled, then the
 // service and its disk are closed
 func (c *moveCluster) stop(n *moveNode) {
-	if !n.running {
+	if !n.running.CompareAndSwap(true, false) {
 		return
 	}
-	n.running = false
 	n.server.Stop()
 	n.cancel()
 	n.service.Close()
@@ -144,18 +144,39 @@ func (c *moveCluster) setTopology(active, shadows []string, nodes ...*moveNode) 
 	}
 }
 
-func (c *moveCluster) newClient(seeds ...string) *client.Client {
+// moveTestHeadless is the name of the headless Service the clients are given. Nothing can dial it, so a data request
+// sent to it would fail.
+const moveTestHeadless = "keydb-headless.move.invalid:50051"
+
+// resolveHeadless stands in for the DNS of the headless Service: its name resolves to every running node, the
+// shadows included, the way it resolves to every ready pod
+func (c *moveCluster) resolveHeadless(_ context.Context, address string) ([]string, error) {
+	if address != moveTestHeadless {
+		return nil, fmt.Errorf("unknown name %q", address)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var running []string
+	for _, n := range c.nodes {
+		if n.running.Load() {
+			running = append(running, n.address)
+		}
+	}
+	return running, nil
+}
+
+// newClient returns a client configured like the processors: with the headless Service as its only address
+func (c *moveCluster) newClient() *client.Client {
 	c.t.Helper()
 	cl, err := client.NewClient(client.Config{
-		Addresses:           seeds,
-		TotalHashRanges:     moveTestHashRanges,
-		DeadNodeLookupAfter: 200 * time.Millisecond,
+		Addresses:       []string{moveTestHeadless},
+		TotalHashRanges: moveTestHashRanges,
 		RetryPolicy: client.RetryPolicy{
 			InitialInterval: 20 * time.Millisecond,
 			Multiplier:      1.5,
 			MaxInterval:     300 * time.Millisecond,
 		},
-	}, logger.NOP)
+	}, logger.NOP, client.WithAddressResolver(c.resolveHeadless))
 	require.NoError(c.t, err)
 	c.t.Cleanup(func() { _ = cl.Close() })
 	return cl
@@ -377,7 +398,7 @@ func TestMoveHappyPath(t *testing.T) {
 			c.start(node0)
 			c.start(node1)
 
-			cl := c.newClient(node1.address)
+			cl := c.newClient()
 			l := startLoad(t, cl, "load")
 			require.Eventually(t, func() bool { return l.ackedCount() > 20 }, 10*time.Second, 10*time.Millisecond)
 
@@ -408,7 +429,7 @@ func TestMoveTwiceBackAndForth(t *testing.T) {
 	c.start(slotA)
 	c.start(node1)
 
-	cl := c.newClient(node1.address)
+	cl := c.newClient()
 	l := startLoad(t, cl, "load")
 	require.Eventually(t, func() bool { return l.ackedCount() > 20 }, 10*time.Second, 10*time.Millisecond)
 
@@ -451,7 +472,7 @@ func TestMoveRestartMidReplication(t *testing.T) {
 	c.setTopology([]string{node0.address, node1.address}, nil)
 	c.start(node0)
 	c.start(node1)
-	cl := c.newClient(node0.address)
+	cl := c.newClient()
 	keys := testKeys(2000)
 	require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
 
@@ -479,8 +500,8 @@ func TestMoveIdleClient(t *testing.T) {
 	c.start(node0)
 	c.start(node1)
 
-	active := c.newClient(node1.address)
-	idle := c.newClient(node1.address)
+	active := c.newClient()
+	idle := c.newClient()
 	keys := testKeys(200)
 	require.NoError(t, idle.Put(context.Background(), keys, time.Hour)) // discovers, then goes quiet
 
@@ -501,7 +522,7 @@ func TestMoveStaleListsDuringRefresh(t *testing.T) {
 	c.setTopology([]string{node0.address, node1.address}, nil)
 	c.start(node0)
 	c.start(node1)
-	cl := c.newClient(node1.address)
+	cl := c.newClient()
 	keys := testKeys(200)
 	require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
 
@@ -532,64 +553,6 @@ func TestMoveStaleListsDuringRefresh(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the client never converged")
 	}
-}
-
-// roundRobinProxy stands in for the keydb Service: every connection goes to the next backend
-type roundRobinProxy struct {
-	address  string
-	backends []string
-	next     atomic.Int64
-}
-
-func startRoundRobinProxy(t *testing.T, backends ...string) *roundRobinProxy {
-	t.Helper()
-	p := &roundRobinProxy{address: freeAddress(t), backends: backends}
-	lis, err := net.Listen("tcp", p.address)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = lis.Close() })
-	go func() {
-		for {
-			conn, err := lis.Accept()
-			if err != nil {
-				return
-			}
-			backend := p.backends[int(p.next.Add(1)-1)%len(p.backends)]
-			go func() {
-				defer func() { _ = conn.Close() }()
-				upstream, err := net.Dial("tcp", backend)
-				if err != nil {
-					return
-				}
-				defer func() { _ = upstream.Close() }()
-				go func() { _, _ = io.Copy(upstream, conn) }()
-				_, _ = io.Copy(conn, upstream)
-			}()
-		}
-	}()
-	return p
-}
-
-func TestMoveSeedThroughService(t *testing.T) {
-	c := newMoveCluster(t, fastMoveReplication())
-	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
-	c.start(node0)
-	c.start(node1)
-	c.start(node0b)
-
-	// the Service routes the first connection to the shadow
-	proxy := startRoundRobinProxy(t, node0b.address, node0.address, node1.address)
-	cl := c.newClient(proxy.address)
-	keys := testKeys(100)
-	require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
-	exists, err := cl.Get(context.Background(), keys)
-	require.NoError(t, err)
-	for _, e := range exists {
-		require.True(t, e)
-	}
-	require.Equal(t, 2, cl.ClusterSize())
-	require.EqualValues(t, 1, proxy.next.Load(),
-		"discovery must have gone through the Service, and no data request after it")
 }
 
 // switchableSignals reports load when told to
@@ -664,7 +627,7 @@ func TestMoveCPUBounds(t *testing.T) {
 		c.setTopology([]string{node0.address, node1.address}, nil)
 		c.start(node0)
 		c.start(node1)
-		cl := c.newClient(node0.address)
+		cl := c.newClient()
 		keys := testKeys(500)
 		require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
 
@@ -689,7 +652,7 @@ func TestMoveLeftoverDisk(t *testing.T) {
 	c.setTopology([]string{slotA.address, node1.address}, nil)
 	c.start(slotA)
 	c.start(node1)
-	cl := c.newClient(node1.address)
+	cl := c.newClient()
 	require.NoError(t, cl.Put(context.Background(), testKeys(200), time.Hour))
 
 	slotB := c.addNode(0)
@@ -712,7 +675,7 @@ func TestMoveLeftoverDiskReusedSlot(t *testing.T) {
 	c.setTopology([]string{slotA.address, node1.address}, nil)
 	c.start(slotA)
 	c.start(node1)
-	cl := c.newClient(node1.address)
+	cl := c.newClient()
 	require.NoError(t, cl.Put(context.Background(), testKeys(200), time.Hour))
 
 	// a → b, then b → a: slot b's pod goes away, but suppose Kubernetes didn't delete its disk

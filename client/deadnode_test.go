@@ -148,20 +148,16 @@ func TestDeadNodeBehindResolver(t *testing.T) {
 			name: "blackholed",
 			kill: func(t *testing.T, name string) { testResolvers.set(name, startSilentListener(t)) },
 			adjust: func(conf *Config) {
-				conf.DeadNodeLookupAfter = time.Second
 				conf.GrpcConfig.MinConnectTimeout = 2 * time.Second
 				conf.GrpcConfig.BackoffBaseDelay = 100 * time.Millisecond
 			},
-			// the first attempt blocks for MinConnectTimeout, which is already longer than DeadNodeLookupAfter:
-			// the lookup must not wait for a second blocked attempt
+			// the first attempt blocks for MinConnectTimeout: its failure must be enough to refresh the list
 			within: 3 * time.Second,
 		},
 		{
-			name: "nxdomain",
-			kill: func(_ *testing.T, name string) { testResolvers.set(name) },
-			// DeadNodeLookupAfter is left to its default
-			adjust: func(conf *Config) { conf.DeadNodeLookupAfter = 0 },
-			within: DefaultDeadNodeLookupAfter + 3*time.Second,
+			name:   "nxdomain",
+			kill:   func(_ *testing.T, name string) { testResolvers.set(name) },
+			within: 3 * time.Second,
 		},
 	}
 	for _, tc := range cases {
@@ -190,19 +186,8 @@ func TestDeadNodeBehindResolver(t *testing.T) {
 			exists, err := c.Get(ctx, keys)
 			require.NoError(t, err)
 			require.Equal(t, []bool{true, true}, exists)
-			require.Less(t, time.Since(start), tc.within, "the client must look the node up after DeadNodeLookupAfter")
+			require.Less(t, time.Since(start), tc.within, "the first failure must make the client refresh the list")
 			require.Positive(t, newNode1.gets.Load())
 		})
 	}
-}
-
-func TestNoteFailureCountsFromTheAttemptStart(t *testing.T) {
-	c := newDiscoveryClient(t, freeMockAddress(t)) // DeadNodeLookupAfter is 200ms
-	longAgo := time.Now().Add(-time.Second)
-
-	require.True(t, c.noteFailure(0, longAgo), "one attempt that blocked for longer than DeadNodeLookupAfter is enough")
-	require.False(t, c.noteFailure(0, longAgo), "the next lookup waits for another DeadNodeLookupAfter")
-
-	c.clearFailure(1) // node 1 got a new address, while an attempt on its old one was still blocked
-	require.False(t, c.noteFailure(1, longAgo), "an attempt on a replaced address must not count against the new one")
 }
