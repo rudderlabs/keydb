@@ -14,7 +14,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/prometheus/client_golang v1.25.0
-	github.com/rudderlabs/rudder-go-kit v0.84.2
+	github.com/rudderlabs/rudder-go-kit v0.84.3
 	github.com/rudderlabs/rudder-observability-kit v0.0.8
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/sync v0.24.0
