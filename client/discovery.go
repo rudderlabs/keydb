@@ -46,26 +46,32 @@ type nodeResponse interface {
 	GetErrorCode() pb.ErrorCode
 }
 
-// waitForAddresses resolves the discovery addresses, retrying with backoff until they resolve to at least one address
+// waitForNodes finds the nodes for a request made while the client has no node list, because its addresses resolved
+// to no node when it was created. It asks the nodes behind them for the list, retrying with backoff until one answers
 // or ctx ends, unless retries are disabled. Every failed attempt it retries counts in
 // keydb_client_discovery_retries_total.
-func (c *Client) waitForAddresses(ctx context.Context) ([]string, error) {
+func (c *Client) waitForNodes(ctx context.Context) error {
 	nextBackoff := c.getNextBackoffFunc()
 	for {
-		addresses := c.resolveDiscoveryAddresses(ctx)
-		if len(addresses) > 0 {
-			return addresses, nil
+		if c.closed.Load() {
+			return errClientClosed
 		}
-		err := fmt.Errorf("no node behind %s", strings.Join(c.discoveryAddresses, ","))
+		addresses, err := c.discover(ctx)
+		if err == nil {
+			_, err = c.applyAddresses(addresses)
+			return err
+		}
 		if c.config.RetryPolicy.Disabled {
-			return nil, err
+			return err
 		}
 		c.metrics.discoveryRetries.Increment()
 		delay := nextBackoff()
-		c.logger.Warnn("Resolving the node addresses", logger.NewDurationField("retryDelay", delay), obskit.Error(err))
+		c.logger.Warnn("Discovering the node addresses",
+			logger.NewDurationField("retryDelay", delay), obskit.Error(err),
+		)
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("resolving %s: %w", strings.Join(c.discoveryAddresses, ","), ctx.Err())
+			return ctx.Err()
 		case <-time.After(delay):
 		}
 	}
@@ -256,9 +262,15 @@ func (c *Client) nodeClient(nodeID, clusterSize int64) (pb.NodeServiceClient, *g
 }
 
 // routeUntilStable sends a request with the client's current routing until it no longer fails because the client
-// adopted another node list. The first re-route goes at once, every later one waits for the request's backoff first,
-// so that nodes that hand out different lists don't make the request spin.
+// adopted another node list. A client without a node list waits for the nodes first (see waitForNodes). The first
+// re-route goes at once, every later one waits for the request's backoff first, so that nodes that hand out different
+// lists don't make the request spin.
 func (c *Client) routeUntilStable(ctx context.Context, send func() error) error {
+	if c.ClusterSize() == 0 {
+		if err := c.waitForNodes(ctx); err != nil {
+			return err
+		}
+	}
 	var nextBackoff func() time.Duration
 	for {
 		err := send()

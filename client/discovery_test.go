@@ -445,32 +445,34 @@ func TestShortRequestsMoveOffADeadNode(t *testing.T) {
 	require.Positive(t, newNode1.gets.Load())
 }
 
-func TestNewClientWaitsForTheNameToResolve(t *testing.T) {
+// TestNewClientDoesNotWaitForTheNodes has the name resolve to no pod when the client is created, as a headless Service
+// does while no keydb pod is ready: NewClient returns at once, and the first request waits for a pod instead.
+func TestNewClientDoesNotWaitForTheNodes(t *testing.T) {
 	h := newHeadless() // no pod is ready yet
-	type result struct {
-		c   *Client
-		err error
-	}
-	done := make(chan result, 1)
+	c := newHeadlessClient(t, h)
+	require.Zero(t, c.ClusterSize(), "the client must start without a node list")
+
+	done := make(chan error, 1)
 	go func() {
-		c, err := NewClient(t.Context(), testConfig(headlessName), logger.NOP, WithAddressResolver(h.resolve))
-		done <- result{c, err}
+		_, err := c.Get(t.Context(), []string{"k"})
+		done <- err
 	}()
 	time.Sleep(300 * time.Millisecond)
 	select {
-	case r := <-done:
-		t.Fatalf("NewClient returned before the name resolved to a pod: %v", r.err)
+	case err := <-done:
+		t.Fatalf("the request returned before a pod was ready: %v", err)
 	default:
 	}
 
-	h.set(freeMockAddress(t)) // NewClient doesn't call the pod
+	a0 := freeMockAddress(t)
+	newMockNode(t, a0)
+	h.set(a0)
 	select {
-	case r := <-done:
-		require.NoError(t, r.err)
-		t.Cleanup(func() { _ = r.c.Close() })
-		require.Equal(t, 1, r.c.ClusterSize())
+	case err := <-done:
+		require.NoError(t, err)
+		require.Equal(t, 1, c.ClusterSize())
 	case <-time.After(5 * time.Second):
-		t.Fatal("NewClient kept waiting after the name resolved")
+		t.Fatal("the request kept waiting after a pod was ready")
 	}
 }
 
@@ -500,20 +502,40 @@ func TestNotReadyRetryDelayIsCapped(t *testing.T) {
 		"a request must be served within notReadyMaxRetryDelay of the node turning ready")
 }
 
-func TestNewClientGivesUpWithTheContext(t *testing.T) {
-	statsStore, err := memstats.New()
-	require.NoError(t, err)
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_, err = NewClient(ctx, testConfig(headlessName), logger.NOP,
-		WithStats(statsStore), WithAddressResolver(newHeadless().resolve), // the name never resolves to a pod
-	)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Less(t, time.Since(start), 2*time.Second, "NewClient must give up when its context ends")
-	retries := statsStore.Get("keydb_client_discovery_retries_total", nil)
-	require.NotNil(t, retries, "a name that doesn't resolve must show in the client's metrics")
-	require.Greater(t, retries.LastValue(), float64(1))
+func TestRequestWithoutNodes(t *testing.T) {
+	t.Run("gives up with the context", func(t *testing.T) {
+		statsStore, err := memstats.New()
+		require.NoError(t, err)
+		c := newTestClientWith(t, nil, []string{headlessName},
+			WithStats(statsStore), WithAddressResolver(newHeadless().resolve), // the name never resolves to a pod
+		)
+		ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, err = c.Get(ctx, []string{"k"})
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Less(t, time.Since(start), 2*time.Second, "the request must give up when its context ends")
+		retries := statsStore.Get("keydb_client_discovery_retries_total", nil)
+		require.NotNil(t, retries, "a name that doesn't resolve must show in the client's metrics")
+		require.Greater(t, retries.LastValue(), float64(1))
+	})
+
+	t.Run("fails at once without retries", func(t *testing.T) {
+		c := newTestClientWith(t, func(conf *Config) { conf.RetryPolicy.Disabled = true }, []string{headlessName},
+			WithAddressResolver(newHeadless().resolve),
+		)
+		err := c.Put(t.Context(), []string{"k"}, time.Minute)
+		require.ErrorContains(t, err, "no node behind")
+	})
+
+	t.Run("stops after Close", func(t *testing.T) {
+		c := newHeadlessClient(t, newHeadless())
+		require.NoError(t, c.Close())
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		_, err := c.Get(ctx, []string{"k"})
+		require.ErrorIs(t, err, errClientClosed)
+	})
 }
 
 // TestDiscoveryThroughHeadlessService has the name resolve to the pods in no particular order, a shadow included: the

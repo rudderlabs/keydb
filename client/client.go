@@ -75,8 +75,9 @@ type GrpcConfig struct {
 type Config struct {
 	// Addresses are the names behind which the client finds the cluster's nodes (host:port): a headless Service, whose
 	// name resolves to every ready pod, or the nodes' own addresses. NewClient resolves them and sends the first
-	// requests to what they resolve to. When an answer shows that the client's node list is wrong, or a node can't be
-	// reached, the client resolves them again and adopts the node list of the first node behind them to answer.
+	// requests to what they resolve to; when they resolve to no node, the first request waits for one to answer with
+	// the node list. When an answer shows that the client's node list is wrong, or a node can't be reached, the client
+	// resolves them again and adopts the node list of the first node behind them to answer.
 	Addresses []string
 
 	// TotalHashRanges is the total number of hash ranges
@@ -153,8 +154,9 @@ func WithAddressResolver(resolve func(ctx context.Context, address string) ([]st
 	}
 }
 
-// NewClient creates a new KeyDB client. It resolves config.Addresses and uses what they resolve to as the node list,
-// retrying until they resolve to at least one address or ctx ends, or only once when retries are disabled.
+// NewClient creates a new KeyDB client. It resolves config.Addresses and uses what they resolve to as the node list.
+// It doesn't wait for a node: when they resolve to none, as a headless Service with no ready pod does, the client
+// starts without a node list and its first request waits for the nodes instead (see waitForNodes).
 func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Opts) (*Client, error) {
 	if len(config.Addresses) == 0 {
 		return nil, fmt.Errorf("no addresses provided")
@@ -223,13 +225,11 @@ func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Op
 
 	client.initMetrics()
 
-	addresses, err := client.waitForAddresses(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := client.applyAddresses(addresses); err != nil {
-		_ = client.Close()
-		return nil, err
+	if addresses := client.resolveDiscoveryAddresses(ctx); len(addresses) > 0 {
+		if _, err := client.applyAddresses(addresses); err != nil {
+			_ = client.Close()
+			return nil, err
+		}
 	}
 	return client, nil
 }

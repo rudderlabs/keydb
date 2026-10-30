@@ -111,8 +111,9 @@ for i, key := range keys {
 - **Cluster Awareness**: Automatically adapts to cluster size changes (including degraded mode)
   - The cluster size is dynamically calculated based on active (non-degraded) nodes
   - When a node is marked as degraded, it's excluded from the effective cluster size
-- **Discovery**: `Addresses` are where the client finds the nodes, such as the keydb headless Kubernetes Service (`keydb-headless.<namespace>.svc.cluster.local:50051`), whose name resolves to every ready pod. `NewClient` only resolves them, retrying until they resolve to at least one address or its context ends (once with `RetryPolicy.Disabled`), and uses what they resolve to as its first node list. That list may be in the wrong order or include shadows: the first answers then correct it, as below
-  - Every failed resolution that `NewClient` retries is counted in `keydb_client_discovery_retries_total`
+- **Discovery**: `Addresses` are where the client finds the nodes, such as the keydb headless Kubernetes Service (`keydb-headless.<namespace>.svc.cluster.local:50051`), whose name resolves to every ready pod. `NewClient` only resolves them and uses what they resolve to as its first node list. That list may be in the wrong order or include shadows: the first answers then correct it, as below
+  - `NewClient` never waits for a node. When `Addresses` resolve to none, as the headless Service does while no keydb pod is ready, the client starts without a node list, and its first requests ask the nodes behind `Addresses` for the list until one answers or their context ends (once with `RetryPolicy.Disabled`)
+  - Every failed attempt they retry is counted in `keydb_client_discovery_retries_total`
 - **Moved nodes**: The client acts only when an answer shows that its node list is wrong: `WRONG_NODE`, `NOT_READY`, another cluster size, or a node that can't be reached (gRPC `Unavailable`). It then resolves `Addresses` again, asks every node behind them for the cluster's addresses at once (`GetNodeInfo`) and adopts the first list that comes back
   - A changed list re-routes the request's keys at once; later changes within the same request wait for the backoff, so nodes that hand out different lists don't make it spin
   - Any other error, such as `SCALING` or `INTERNAL_ERROR`, is retried with the backoff and no discovery
