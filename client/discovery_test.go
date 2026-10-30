@@ -281,6 +281,54 @@ func TestWrongNodeMakesTheClientDiscover(t *testing.T) {
 	require.Equal(t, []bool{true, true, true, true}, exists)
 }
 
+// startStuckNode starts a pod that accepts calls but never answers them, like a node whose handlers wait behind a lock
+func startStuckNode(t *testing.T) string {
+	t.Helper()
+	address := freeMockAddress(t)
+	t.Cleanup(startMockServer(t, &mockNodeServiceServer{
+		getFunc: func(ctx context.Context, _ *proto.GetRequest) (*proto.GetResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		getNodeInfoFunc: func(ctx context.Context, _ *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}, address))
+	return address
+}
+
+func TestCallTimeout(t *testing.T) {
+	t.Run("makes the client discover", func(t *testing.T) {
+		stuck, a0 := startStuckNode(t), freeMockAddress(t)
+		newMockNode(t, a0)
+		h := newHeadless(stuck) // the client's first list is the stuck pod
+		c := newTestClientWith(t, func(conf *Config) { conf.CallTimeout = 200 * time.Millisecond },
+			[]string{headlessName}, WithAddressResolver(h.resolve),
+		)
+		h.set(stuck, a0)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		exists, err := c.Get(ctx, []string{"k"})
+		require.NoError(t, err)
+		require.Equal(t, []bool{true}, exists)
+		require.Equal(t, 1, c.ClusterSize())
+	})
+
+	t.Run("the request's own deadline doesn't make the client discover", func(t *testing.T) {
+		h := newHeadless(startStuckNode(t))
+		c := newHeadlessClient(t, h) // the default CallTimeout outlasts the request
+		lookups := h.lookups.Load()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_, err := c.Get(ctx, []string{"k"})
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Equal(t, lookups, h.lookups.Load(), "a request that ran out of time must not discover")
+	})
+}
+
 func TestNotReadyRotatesConnection(t *testing.T) {
 	a0, a1 := freeMockAddress(t), freeMockAddress(t)
 	node0 := newMockNode(t, a0)

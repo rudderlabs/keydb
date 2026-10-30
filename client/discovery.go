@@ -289,11 +289,12 @@ func (c *Client) routeUntilStable(ctx context.Context, send func() error) error 
 	}
 }
 
-// listIsWrong tells whether a node's answer shows that the client's node list is wrong: the node can't be reached,
-// doesn't own the keys, isn't ready to serve them, or sees a cluster of another size.
+// listIsWrong tells whether a node's answer shows that the client's node list is wrong: the node can't be reached or
+// doesn't answer in time, doesn't own the keys, isn't ready to serve them, or sees a cluster of another size.
 func listIsWrong[R nodeResponse](resp R, err error, clusterSize int64) bool {
 	if err != nil {
-		return status.Code(err) == codes.Unavailable
+		code := status.Code(err)
+		return code == codes.Unavailable || code == codes.DeadlineExceeded
 	}
 	switch resp.GetErrorCode() {
 	case pb.ErrorCode_WRONG_NODE, pb.ErrorCode_NOT_READY:
@@ -306,6 +307,8 @@ func listIsWrong[R nodeResponse](resp R, err error, clusterSize int64) bool {
 // callNode sends a request to a node until it succeeds, the context is done, or the client adopts another node list.
 //   - When the answer shows that the client's node list is wrong (see listIsWrong), the client asks every node behind
 //     config.Addresses for the list and adopts the first answer. A changed list re-routes the keys at once.
+//   - Every attempt is bounded by config.CallTimeout, so that a node that accepts the call but never answers doesn't
+//     hold the request until its context ends.
 //   - Every retry takes the next pooled connection and waits for the backoff, without holding the client's lock.
 //     After a NOT_READY answer the wait is capped at notReadyMaxRetryDelay.
 func callNode[R nodeResponse](
@@ -329,7 +332,12 @@ func callNode[R nodeResponse](
 			return zero, err
 		}
 
-		resp, respErr := call(ctx, client)
+		callCtx, cancel := context.WithTimeout(ctx, c.config.CallTimeout)
+		resp, respErr := call(callCtx, client)
+		cancel()
+		if ctx.Err() != nil {
+			return zero, ctx.Err()
+		}
 		if respErr == nil && resp.GetClusterSize() == clusterSize && succeeded(resp) {
 			return resp, nil
 		}

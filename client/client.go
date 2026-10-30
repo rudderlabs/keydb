@@ -40,6 +40,8 @@ const (
 	DefaultGrpcMinConnectTimeout = 20 * time.Second
 
 	DefaultConnectionPoolSize = 10
+
+	DefaultCallTimeout = 10 * time.Second
 )
 
 // RetryPolicy defines the retry policy configuration
@@ -81,6 +83,10 @@ type Config struct {
 
 	// ConnectionPoolSize is the number of connections per node (0 means use default)
 	ConnectionPoolSize int
+
+	// CallTimeout bounds each attempt to send a request to a node (0 means use default). An attempt that runs out of
+	// time is retried like a call to a node that can't be reached: the client asks the nodes for the node list first.
+	CallTimeout time.Duration
 
 	// RetryPolicy defines the retry behavior for failed requests
 	RetryPolicy RetryPolicy
@@ -197,6 +203,10 @@ func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Op
 	// Set connection pool size default
 	if config.ConnectionPoolSize == 0 {
 		config.ConnectionPoolSize = DefaultConnectionPoolSize
+	}
+
+	if config.CallTimeout == 0 {
+		config.CallTimeout = DefaultCallTimeout
 	}
 
 	// read without the lock, so a caller's later edits to its slice mustn't reach it
