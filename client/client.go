@@ -532,6 +532,5 @@ func (p *connectionPool) close() error {
 			lastErr = fmt.Errorf("closing connection %d/%d: %w", i+1, len(p.connections), err)
 		}
 	}
-	// the slices are kept: a request that picked this pool before it was replaced fails and retries on the new one
 	return lastErr
 }
