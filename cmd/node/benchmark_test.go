@@ -77,7 +77,7 @@ func BenchmarkSingleNode(b *testing.B) {
 		TotalHashRanges: totalHashRanges,
 	}
 
-	c, err := client.NewClient(clientConfig, logger.NOP)
+	c, err := client.NewClient(b.Context(), clientConfig, logger.NOP)
 	require.NoError(b, err)
 	b.Cleanup(func() { _ = c.Close() })
 

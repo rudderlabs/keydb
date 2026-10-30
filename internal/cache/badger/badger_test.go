@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -353,19 +354,6 @@ func TestSnapshotContextCancellationResourceCleanup(t *testing.T) {
 	require.NoError(t, err, "Cache should be in a good state after context cancellation")
 }
 
-// fastForwardCommitTs commits a single entry at timestamp 1e9 so that the commit timestamps of a
-// database opened later in dir have at least 10 decimal digits.
-func fastForwardCommitTs(t *testing.T, dir string) {
-	t.Helper()
-	const commitTs = 1_000_000_000
-	db, err := badger.OpenManaged(badger.DefaultOptions(dir).WithLogger(nil))
-	require.NoError(t, err)
-	txn := db.NewTransactionAt(commitTs, true)
-	require.NoError(t, txn.SetEntry(badger.NewEntry([]byte("seed"), nil)))
-	require.NoError(t, txn.CommitAt(commitTs, nil))
-	require.NoError(t, db.Close())
-}
-
 func TestPurgeValueLog(t *testing.T) {
 	// leakValueLog writes keys with a threshold that sends the transaction finish markers to the value log,
 	// reopening the database a few times so that the markers span several value log files.
@@ -441,3 +429,228 @@ func TestPurgeValueLog(t *testing.T) {
 		require.Len(t, remaining, len(leaked)+1, "the leaked value log files and the one badger creates on open")
 	})
 }
+
+func TestHasData(t *testing.T) {
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	bdb, err := New(conf, logger.NOP)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, bdb.Close()) }()
+
+	hasData, err := bdb.HasData()
+	require.NoError(t, err)
+	require.False(t, hasData, "an empty cache has no data")
+
+	require.NoError(t, bdb.PutValue("_marker", internalHashRange, []byte("x"), 0))
+	hasData, err = bdb.HasData()
+	require.NoError(t, err)
+	require.False(t, hasData, "internal keys are not data")
+
+	require.NoError(t, bdb.Put(map[int64][]string{3: {"key1"}}, time.Hour))
+	hasData, err = bdb.HasData()
+	require.NoError(t, err)
+	require.True(t, hasData)
+}
+
+func TestStreamSnapshotRoundTrip(t *testing.T) {
+	for _, compress := range []bool{false, true} {
+		t.Run("compress="+strconv.FormatBool(compress), func(t *testing.T) {
+			source := newStreamTestCache(t, compress)
+			require.NoError(t, source.Put(map[int64][]string{0: {"k1", "k2"}, 1: {"other"}}, time.Hour))
+			require.NoError(t, source.Put(map[int64][]string{0: {"expired"}}, time.Second))
+			time.Sleep(2 * time.Second) // let "expired" expire
+
+			var buf bytes.Buffer
+			maxVersion, hasData, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
+				CompressionLevel: 1, BatchSize: 1 << 20,
+			})
+			require.NoError(t, err)
+			require.True(t, hasData)
+			require.Positive(t, maxVersion)
+
+			destination := newStreamTestCache(t, compress)
+			require.NoError(t, destination.LoadSnapshot(context.Background(), &buf))
+			require.Equal(t, []bool{true, true, false}, existsIn(t, destination, 0, "k1", "k2", "expired"))
+			require.Equal(t, []bool{false}, existsIn(t, destination, 1, "other"), "other ranges are not streamed")
+		})
+	}
+}
+
+func TestInterruptedLoadSnapshot(t *testing.T) {
+	for _, compress := range []bool{false, true} {
+		t.Run("compress="+strconv.FormatBool(compress), func(t *testing.T) {
+			source := newStreamTestCache(t, compress)
+			for i := range 50 { // raise the source's versions above the destination's
+				require.NoError(t, source.Put(map[int64][]string{0: {"k" + strconv.Itoa(i)}}, time.Hour))
+			}
+			var buf bytes.Buffer
+			_, _, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{})
+			require.NoError(t, err)
+			snapshot := buf.Bytes()
+
+			destination := newStreamTestCache(t, compress)
+			cut := erroringReader{err: errors.New("stream cancelled")}
+			err = destination.LoadSnapshot(context.Background(), io.MultiReader(bytes.NewReader(snapshot), cut))
+			require.Error(t, err)
+
+			read := make(chan error, 1)
+			go func() {
+				_, err := destination.Get(map[int64][]string{0: {"k0"}}, map[string]int{"k0": 0})
+				read <- err
+			}()
+			require.Eventually(t, func() bool { return len(read) == 1 }, 5*time.Second, 10*time.Millisecond,
+				"a read after an interrupted load must not block")
+			require.NoError(t, <-read)
+			require.NoError(t, destination.PutValue("after", internalHashRange, []byte("x"), 0),
+				"writes must not block either")
+
+			require.NoError(t, destination.LoadSnapshot(context.Background(), bytes.NewReader(snapshot)),
+				"the range can be loaded again")
+			require.Equal(t, []bool{true, true}, existsIn(t, destination, 0, "k0", "k49"))
+		})
+	}
+}
+
+func TestStreamSnapshotWaitCalled(t *testing.T) {
+	source := newStreamTestCache(t, false)
+	keys := make([]string, 1000)
+	for i := range keys {
+		keys[i] = "key-" + strconv.Itoa(i)
+	}
+	require.NoError(t, source.Put(map[int64][]string{0: keys}, time.Hour))
+
+	var buf bytes.Buffer
+	var waited int
+	_, _, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
+		Wait: func(_ context.Context, n int) error {
+			waited += n
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Positive(t, waited)
+	require.Equal(t, buf.Len(), waited, "every byte written must go through the budget")
+
+	t.Run("a wait error stops the stream", func(t *testing.T) {
+		waitErr := errors.New("paused for good")
+		_, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
+			Wait: func(context.Context, int) error { return waitErr },
+		})
+		require.ErrorIs(t, err, waitErr)
+	})
+}
+
+func TestStreamSnapshotSince(t *testing.T) {
+	source := newStreamTestCache(t, true)
+	require.NoError(t, source.Put(map[int64][]string{0: {"old"}}, time.Hour))
+	since, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{})
+	require.NoError(t, err)
+
+	require.NoError(t, source.Put(map[int64][]string{0: {"new"}}, time.Hour))
+	var buf bytes.Buffer
+	maxVersion, hasData, err := source.StreamSnapshot(context.Background(), 0, since, &buf, StreamOptions{})
+	require.NoError(t, err)
+	require.True(t, hasData)
+	require.Greater(t, maxVersion, since)
+
+	destination := newStreamTestCache(t, true)
+	require.NoError(t, destination.LoadSnapshot(context.Background(), &buf))
+	require.Equal(t, []bool{false, true}, existsIn(t, destination, 0, "old", "new"))
+
+	t.Run("nothing new", func(t *testing.T) {
+		var buf bytes.Buffer
+		_, hasData, err := source.StreamSnapshot(context.Background(), 0, maxVersion, &buf, StreamOptions{})
+		require.NoError(t, err)
+		require.False(t, hasData)
+	})
+}
+
+func TestStreamSnapshotBatchesBounded(t *testing.T) {
+	// a range much bigger than a batch
+	source := newStreamTestCache(t, false)
+	keys := make([]string, 50_000)
+	for b := range 12 {
+		for i := range keys {
+			keys[i] = "a-reasonably-long-key-" + strconv.Itoa(b) + "-" + strconv.Itoa(i)
+		}
+		require.NoError(t, source.Put(map[int64][]string{0: keys}, time.Hour))
+	}
+
+	var largest, total int
+	_, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
+		BatchSize: 64 << 10,
+		Wait: func(_ context.Context, n int) error {
+			largest = max(largest, n)
+			total += n
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Logf("streamed %d bytes, largest batch %d bytes", total, largest)
+	require.Greater(t, total, 20<<20)
+	require.Less(t, largest, total/2, "the range must be streamed in batches, never held whole in memory")
+	require.LessOrEqual(t, largest, 128<<10, "a batch is bounded by the batch size, not by the range size")
+}
+
+func TestStreamSnapshotIncrementalAllocations(t *testing.T) {
+	source := newStreamTestCache(t, true)
+	keys := make([]string, 50_000)
+	for b := range 4 {
+		for i := range keys {
+			keys[i] = "a-reasonably-long-key-" + strconv.Itoa(b) + "-" + strconv.Itoa(i)
+		}
+		require.NoError(t, source.Put(map[int64][]string{0: keys}, time.Hour))
+	}
+	since, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{})
+	require.NoError(t, err)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, hasData, err := source.StreamSnapshot(context.Background(), 0, since, io.Discard, StreamOptions{})
+	require.NoError(t, err)
+	runtime.ReadMemStats(&after)
+	require.False(t, hasData)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	t.Logf("an incremental pass with nothing new allocated %d bytes", allocated)
+	require.Less(t, allocated, uint64(8<<20), "an incremental pass over unchanged data must stay cheap")
+}
+
+// fastForwardCommitTs commits a single entry at timestamp 1e9 so that the commit timestamps of a
+// database opened later in dir have at least 10 decimal digits.
+func fastForwardCommitTs(t *testing.T, dir string) {
+	t.Helper()
+	const commitTs = 1_000_000_000
+	db, err := badger.OpenManaged(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	txn := db.NewTransactionAt(commitTs, true)
+	require.NoError(t, txn.SetEntry(badger.NewEntry([]byte("seed"), nil)))
+	require.NoError(t, txn.CommitAt(commitTs, nil))
+	require.NoError(t, db.Close())
+}
+
+func newStreamTestCache(t *testing.T, compress bool) *Cache {
+	t.Helper()
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	conf.Set("BadgerDB.Dedup.Compress", compress)
+	bdb, err := New(conf, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, bdb.Close()) })
+	return bdb
+}
+
+func existsIn(t *testing.T, c *Cache, hashRange int64, keys ...string) []bool {
+	t.Helper()
+	indexes := make(map[string]int, len(keys))
+	for i, k := range keys {
+		indexes[k] = i
+	}
+	exists, err := c.Get(map[int64][]string{hashRange: keys}, indexes)
+	require.NoError(t, err)
+	return exists
+}
+
+// erroringReader fails every read, like a snapshot stream cut short.
+type erroringReader struct{ err error }
+
+func (r erroringReader) Read([]byte) (int, error) { return 0, r.err }

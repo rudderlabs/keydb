@@ -28,12 +28,6 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
-const (
-	testTTL                 = 5 * time.Minute
-	defaultBackupFolderName = "default"
-	nodeAddressesConfKey    = "nodeAddresses"
-)
-
 func TestSimple(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
@@ -1526,6 +1520,12 @@ func TestStreamingFailureScenarios(t *testing.T) {
 	node0.Close()
 }
 
+const (
+	testTTL                 = 5 * time.Minute
+	defaultBackupFolderName = "default"
+	nodeAddressesConfKey    = "nodeAddresses"
+)
+
 func getService(
 	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf ...*config.Config,
 ) (*Service, string) {
@@ -1536,7 +1536,8 @@ func getService(
 
 	freePort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
-	address := "localhost:" + strconv.Itoa(freePort)
+	// an IP rather than localhost: the client resolves the node addresses, and localhost resolves to ::1 too
+	address := "127.0.0.1:" + strconv.Itoa(freePort)
 
 	// Simulating reloadable addresses for all configs
 	nodeAddresses := conf[0].GetReloadableStringVar("", nodeAddressesConfKey)
@@ -1592,7 +1593,7 @@ func getClient(t testing.TB, totalHashRanges int64, addresses ...string) *client
 		RetryPolicy:     client.RetryPolicy{Disabled: true},
 	}
 
-	c, err := client.NewClient(clientConfig, logger.NOP)
+	c, err := client.NewClient(t.Context(), clientConfig, logger.NOP)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 

@@ -25,6 +25,7 @@ import (
 
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
+	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	_ "github.com/rudderlabs/rudder-go-kit/maxprocs"
 	"github.com/rudderlabs/rudder-go-kit/profiler"
@@ -44,11 +45,15 @@ var (
 
 	// podNameRegex matches multi-statefulset pod names with fixed -0 suffix like keydb-0-0, keydb-1-0, etc.
 	podNameRegex = regexp.MustCompile(`^keydb-(\d+)-0$`)
+
+	// slotBPodNameRegex matches the pod names of a node's second slot like keydb-0-b-0, used by node moves.
+	slotBPodNameRegex = regexp.MustCompile(`^keydb-(\d+)-b-0$`)
 )
 
 const (
-	nodeAddressesConfKey = "nodeAddresses"
-	degradedNodesConfKey = "degradedNodes"
+	nodeAddressesConfKey       = "nodeAddresses"
+	degradedNodesConfKey       = "degradedNodes"
+	shadowNodeAddressesConfKey = "shadowNodeAddresses"
 )
 
 type keyDBResponse interface {
@@ -139,6 +144,13 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return fmt.Errorf("no node addresses provided")
 	}
 	degradedNodes := conf.GetReloadableStringVar("", degradedNodesConfKey)
+	// shadowNodeAddresses is reloadable so that a shadow becomes active without a restart when a move is completed
+	shadowNodeAddresses := conf.GetReloadableStringVar("", shadowNodeAddressesConfKey)
+	// the replication budget can be capped or paused at runtime, without restarting the copy
+	replicationMaxBytesPerSecond := conf.GetReloadableInt64Var(
+		node.DefaultReplicationMaxBytesPerSecond, 1, "replication.maxBytesPerSecond",
+	)
+	replicationPaused := conf.GetReloadableBoolVar(false, "replication.paused")
 
 	nodeConfig := node.Config{
 		NodeID:          nodeID,
@@ -176,13 +188,42 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		CheckL0StallInterval:      conf.GetDurationVar(5, time.Second, "checkL0StallInterval"),
 		LogTableStructureDuration: conf.GetDurationVar(10, time.Minute, "logTableStructureDuration"),
 		BackupFolderName:          conf.GetStringVar("", "KUBE_NAMESPACE"),
+		AdvertisedAddress:         strings.TrimSpace(conf.GetStringVar("", "advertisedAddress")),
+		ShadowAddresses: func() []string {
+			raw := strings.TrimSpace(shadowNodeAddresses.Load())
+			if raw == "" {
+				return nil
+			}
+			shadows := strings.Split(raw, ",")
+			for i := range shadows {
+				shadows[i] = strings.TrimSpace(shadows[i])
+			}
+			return shadows
+		},
+		Replication: node.ReplicationConfig{
+			MaxBytesPerSecond:  replicationMaxBytesPerSecond.Load,
+			Paused:             replicationPaused.Load,
+			PauseBetweenPasses: conf.GetDurationVar(5, time.Second, "replication.pauseBetweenPasses"),
+			GapThreshold:       conf.GetDurationVar(60, time.Second, "replication.gapThreshold"),
+			BrakeInterval:      conf.GetDurationVar(5, time.Second, "replication.brakeInterval"),
+			BrakeSchedLatencyThreshold: conf.GetDurationVar(
+				10, time.Millisecond, "replication.brake.schedLatencyThreshold",
+			),
+			BrakeRequestLatencyFactor: conf.GetFloat64Var(2, "replication.brake.requestLatencyFactor"),
+			BrakeRequestLatencyFloor: conf.GetDurationVar(
+				5, time.Millisecond, "replication.brake.requestLatencyFloor",
+			),
+			BrakeThrottledRatioThreshold: conf.GetFloat64Var(0.1, "replication.brake.throttledRatioThreshold"),
+		},
 	}
 
 	port := conf.GetIntVar(50051, 1, "port")
 	healthPort := conf.GetIntVar(50052, 1, "healthPort")
+	adminPort := conf.GetIntVar(8080, 1, "adminPort")
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
 		logger.NewIntField("healthPort", int64(healthPort)),
+		logger.NewIntField("adminPort", int64(adminPort)),
 		logger.NewIntField("nodeId", nodeConfig.NodeID),
 		logger.NewIntField("totalHashRanges", nodeConfig.TotalHashRanges),
 	)
@@ -317,6 +358,18 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewStringField("degradedNodes", degradedNodes.Load()),
 	)
 
+	adminServer := &http.Server{
+		Addr:              fmt.Sprintf(":%d", adminPort),
+		Handler:           service.AdminHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	wg.Go(func() {
+		defer log.Infon("Admin server terminated")
+		if err := httputil.ListenAndServe(ctx, adminServer); err != nil {
+			log.Warnn("Admin server failed", obskit.Error(err))
+		}
+	})
+
 	wg.Go(func() {
 		defer log.Infon("Profiler server terminated")
 		if err := profiler.StartServer(ctx, conf.GetIntVar(7777, 1, "Profiler.Port")); err != nil {
@@ -338,9 +391,11 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		// Flip health status to NOT_SERVING first so readiness probes fail and
 		// Kubernetes removes this pod from Service endpoints before we stop serving.
 		healthServer.Shutdown()
-		service.Close()
-		server.GracefulStop()
+		// Stop cancels in-flight calls instead of waiting for them: clients retry them, and after a node move the
+		// retries land on the node that replaced this one. Badger is closed only once no handler is running.
+		server.Stop()
 		_ = lis.Close()
+		service.Close()
 		// Stop the dedicated health server last so probes can still be answered
 		// (with NOT_SERVING) while the main server is draining.
 		healthGrpcServer.GracefulStop()
@@ -363,7 +418,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 }
 
 // getNodeID extracts the node ID from a pod name.
-// Supports both multi-statefulset format (keydb-{nodeId}-0) and legacy format (keydb-{nodeId}).
+// Supports the multi-statefulset format (keydb-{nodeId}-0), the second slot used by node moves
+// (keydb-{nodeId}-b-0) and the legacy format (keydb-{nodeId}).
 func getNodeID(podName string) (int64, error) {
 	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
 	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
@@ -371,6 +427,15 @@ func getNodeID(podName string) (int64, error) {
 		nodeID, err := strconv.ParseInt(matches[1], 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("failed to parse node ID from %q: %w", podName, err)
+		}
+		return nodeID, nil
+	}
+
+	// Second slot of a node, used by node moves (keydb-0-b-0, keydb-1-b-0, etc.)
+	if matches := slotBPodNameRegex.FindStringSubmatch(podName); matches != nil {
+		nodeID, err := strconv.ParseInt(matches[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parsing node ID from %q: %w", podName, err)
 		}
 		return nodeID, nil
 	}
@@ -384,7 +449,9 @@ func getNodeID(podName string) (int64, error) {
 		return nodeID, nil
 	}
 
-	return 0, fmt.Errorf("invalid pod name %q, expected format: keydb-<nodeId>-0 or keydb-<nodeId>", podName)
+	return 0, fmt.Errorf(
+		"invalid pod name %q, expected format: keydb-<nodeId>-0, keydb-<nodeId>-b-0 or keydb-<nodeId>", podName,
+	)
 }
 
 type configObserver struct {

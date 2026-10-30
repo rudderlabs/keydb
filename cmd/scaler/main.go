@@ -134,7 +134,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 
 	// Create and start HTTP server
 	serverAddr := conf.GetStringVar(":8080", "serverAddr")
-	server, err := newHTTPServer(clientConfig, scClient, serverAddr, stat, log)
+	server, err := newHTTPServer(ctx, clientConfig, scClient, serverAddr, stat, log)
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}

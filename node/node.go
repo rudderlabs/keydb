@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
@@ -75,6 +76,9 @@ type Service struct {
 
 	config Config
 
+	// cancel stops the service's background jobs
+	cancel context.CancelFunc
+
 	// mu protects cache, lastSnapshotTime and hasher
 	mu               sync.RWMutex
 	cache            Cache
@@ -88,7 +92,30 @@ type Service struct {
 	stats          stats.Stats
 	logger         logger.Logger
 
+	// markers mirrors the since markers kept in the cache, so that GetNodeInfo and GetSnapshotSince never open a
+	// transaction while a shadow loads a range (badger's Load moves the oracle without synchronisation)
+	markers struct {
+		sync.Mutex
+		byRange map[int64]uint64
+	}
+
+	// replication fills this node's shadow when it has one
+	replication *replicator
+	// replicating is true while a replication pass is in progress, garbage collection skips its ticks meanwhile
+	replicating atomic.Bool
+	// receiving is true while a shadow loads a range as it arrives
+	receiving atomic.Bool
+	// loadMu keeps Get and Put off the cache while a shadow loads a range: badger's Load moves the oracle without
+	// synchronisation. A shadow's receive takes it exclusively, Get and Put try to take it shared.
+	loadMu sync.RWMutex
+	// latency tracks the Get and Put latency the replication brake compares against its baseline
+	latency latencyTracker
+
+	closeOnce sync.Once
+
 	metrics struct {
+		shadowLeftoverDisk          stats.Counter
+		errNotReadyCounter          stats.Counter
 		getKeysCounters             map[int64]stats.Counter
 		putKeysCounter              map[int64]stats.Counter
 		errScalingCounter           stats.Counter
@@ -127,6 +154,9 @@ type Cache interface {
 	// PutValue stores a key-value pair with the specified TTL.
 	PutValue(key string, hashRange int64, value []byte, ttl time.Duration) error
 
+	// DeleteValue removes a key, it is not an error if the key doesn't exist.
+	DeleteValue(key string, hashRange int64) error
+
 	// CreateSnapshots writes the cache contents to the provided writers
 	// it returns a timestamp (version) indicating the version of last entry that is dumped
 	CreateSnapshots(
@@ -137,6 +167,15 @@ type Cache interface {
 
 	// LoadSnapshot reads the cache contents from the provided reader
 	LoadSnapshot(ctx context.Context, r io.Reader) error
+
+	// HasData returns true when the cache holds at least one key outside the internal keys
+	HasData() (bool, error)
+
+	// StreamSnapshot writes the entries of one hash range with a version above since to w without building the
+	// range in memory, and returns the highest version written and whether anything was written
+	StreamSnapshot(
+		ctx context.Context, hashRange int64, since uint64, w io.Writer, opts badger.StreamOptions,
+	) (uint64, bool, error)
 
 	// RunGarbageCollection is designed to do GC while the cache is online
 	RunGarbageCollection()
@@ -189,7 +228,10 @@ func NewService(
 		config.LoadedSnapshotTTL = DefaultLoadedSnapshotTTL
 	}
 
+	// the service owns its context so that Close stops the background jobs even if the caller's context is alive
+	ctx, cancel := context.WithCancel(ctx)
 	service := &Service{
+		cancel:         cancel,
 		now:            time.Now,
 		config:         config,
 		storage:        storage,
@@ -208,13 +250,21 @@ func NewService(
 	var err error
 	service.cache, err = badger.New(kitConf, log.Child("badger"))
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to create cache: %w", err)
+	}
+	if config.wrapCache != nil {
+		service.cache = config.wrapCache(service.cache)
 	}
 
 	statsTags := stats.Tags{"nodeID": strconv.FormatInt(config.NodeID, 10)}
 	service.metrics.errScalingCounter = stat.NewTaggedStat("keydb_err_scaling_count", stats.CountType, statsTags)
 	service.metrics.errWrongNodeCounter = stat.NewTaggedStat("keydb_err_wrong_node_count", stats.CountType, statsTags)
 	service.metrics.errInternalCounter = stat.NewTaggedStat("keydb_err_internal_count", stats.CountType, statsTags)
+	service.metrics.errNotReadyCounter = stat.NewTaggedStat("keydb_err_not_ready_count", stats.CountType, statsTags)
+	service.metrics.shadowLeftoverDisk = stat.NewTaggedStat(
+		"keydb_shadow_leftover_disk_total", stats.CountType, statsTags,
+	)
 	service.metrics.getKeysCounters = make(map[int64]stats.Counter)
 	service.metrics.putKeysCounter = make(map[int64]stats.Counter)
 	service.metrics.gcDuration = stat.NewTaggedStat("keydb_gc_duration_seconds", stats.HistogramType, statsTags)
@@ -246,6 +296,11 @@ func NewService(
 
 	// Initialize caches for all hash ranges this node handles
 	if err := service.initCaches(ctx, false, 0); err != nil {
+		cancel()
+		return nil, err
+	}
+	if err := service.loadMarkers(); err != nil {
+		cancel()
 		return nil, err
 	}
 
@@ -263,14 +318,23 @@ func NewService(
 	service.waitGroup.Add(1)
 	go service.recordLevelMetrics(ctx)
 
+	service.replication = newReplicator(service)
+	service.waitGroup.Go(func() { service.replication.run(ctx) })
+
 	return service, nil
 }
 
 func (s *Service) Close() {
-	s.waitGroup.Wait()
-	if err := s.cache.Close(); err != nil {
-		s.logger.Errorn("Error closing cache", obskit.Error(err))
-	}
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.waitGroup.Wait()
+		// wait for the handlers still running before closing the cache under them
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.cache.Close(); err != nil {
+			s.logger.Errorn("Error closing cache", obskit.Error(err))
+		}
+	})
 }
 
 func (s *Service) garbageCollection(ctx context.Context) {
@@ -284,6 +348,12 @@ func (s *Service) garbageCollection(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if s.replicating.Load() || s.receiving.Load() || s.role() == pb.NodeRole_SHADOW {
+				// value log GC competes with a move for disk and CPU, and on a shadow its write lock would queue
+				// behind the receive's read lock and stall GetNodeInfo meanwhile
+				s.logger.Debugn("Skipping garbage collection while a node move is in progress")
+				continue
+			}
 			func() {
 				s.mu.Lock() // TODO this might affect scaling operations
 				defer s.mu.Unlock()
@@ -644,6 +714,7 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...int64
 
 // Get implements the Get RPC method
 func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
+	defer func(start time.Time) { s.latency.observe(time.Since(start)) }(time.Now())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -651,6 +722,15 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 		ClusterSize:    s.config.getClusterSize(),
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
+
+	if s.role() == pb.NodeRole_SHADOW || s.replaced() || !s.loadMu.TryRLock() {
+		// a shadow that just became active may still be loading the last range it received, and a replaced pod
+		// must leave its index to the pod that took it over
+		s.metrics.errNotReadyCounter.Increment()
+		response.ErrorCode = pb.ErrorCode_NOT_READY
+		return response, nil
+	}
+	defer s.loadMu.RUnlock()
 
 	if isDegraded, _ := s.isDegraded(); isDegraded {
 		s.metrics.errScalingCounter.Increment()
@@ -695,6 +775,7 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 
 // Put implements the Put RPC method
 func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
+	defer func(start time.Time) { s.latency.observe(time.Since(start)) }(time.Now())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -703,6 +784,15 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 		ClusterSize:    s.config.getClusterSize(),
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
+
+	if s.role() == pb.NodeRole_SHADOW || s.replaced() || !s.loadMu.TryRLock() {
+		// a shadow that just became active may still be loading the last range it received, and a replaced pod
+		// must leave its index to the pod that took it over
+		s.metrics.errNotReadyCounter.Increment()
+		resp.ErrorCode = pb.ErrorCode_NOT_READY
+		return resp, nil
+	}
+	defer s.loadMu.RUnlock()
 
 	if isDegraded, _ := s.isDegraded(); isDegraded {
 		s.metrics.errScalingCounter.Increment()
@@ -773,6 +863,8 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 		NodesAddresses:        s.getNonDegradedAddresses(),
 		HashRanges:            hashRanges,
 		LastSnapshotTimestamp: s.lastSnapshotTime.Unix(),
+		Role:                  s.role(),
+		AllRangesSynced:       s.allRangesSynced(),
 	}, nil
 }
 
@@ -1047,7 +1139,7 @@ func (s *Service) isDegraded() (bool, int64) {
 	if len(degradedNodes) == 0 {
 		return false, 0
 	}
-	if int(s.config.NodeID) >= len(degradedNodes) {
+	if s.config.NodeID >= int64(len(degradedNodes)) {
 		s.logger.Warnn("Node ID out of range for degraded nodes list",
 			logger.NewIntField("nodeId", s.config.NodeID),
 			logger.NewIntField("degradedNodes", int64(len(degradedNodes))),
@@ -1133,11 +1225,15 @@ func (s *Service) GetSnapshotSince(
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	s.logger.Infon("GetSnapshotSince request received",
+	logn := s.logger.Infon
+	if s.role() == pb.NodeRole_SHADOW {
+		logn = s.logger.Debugn // replication asks for every range of every pass, for as long as a move lasts
+	}
+	logn("GetSnapshotSince request received",
 		logger.NewIntField("hashRange", req.HashRange),
 	)
 
-	timestamp, err := s.getSnapshotTimestamp(req.HashRange)
+	timestamp, _, err := s.getSnapshotTimestamp(req.HashRange)
 	if err != nil {
 		s.logger.Warnn("Getting snapshot timestamp",
 			logger.NewIntField("hashRange", req.HashRange), obskit.Error(err),
@@ -1146,7 +1242,7 @@ func (s *Service) GetSnapshotSince(
 		return &pb.GetSnapshotSinceResponse{SinceTimestamp: 0}, nil
 	}
 
-	s.logger.Infon("Returning snapshot since timestamp",
+	logn("Returning snapshot since timestamp",
 		logger.NewIntField("hashRange", req.HashRange),
 		logger.NewIntField("sinceTimestamp", int64(timestamp)),
 	)
@@ -1155,93 +1251,82 @@ func (s *Service) GetSnapshotSince(
 }
 
 // ReceiveSnapshot handles streaming snapshot data from another node.
+// A shadow loads the chunks as they arrive, other nodes buffer the whole range before loading it.
 func (s *Service) ReceiveSnapshot(
 	stream grpc.ClientStreamingServer[pb.SnapshotChunk, pb.ReceiveSnapshotResponse],
 ) error {
 	defer s.metrics.receiveSnapshotDuration.RecordDuration()()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var (
-		hashRange int64
-		timestamp uint64
-		buf       bytes.Buffer
-	)
-
-	s.logger.Infon("ReceiveSnapshot stream started")
-
-	for {
-		chunk, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			s.logger.Errorn("Receiving snapshot chunk", obskit.Error(err))
-			return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("receiving chunk: %v", err),
-			})
-		}
-
-		hashRange = chunk.HashRange
-		timestamp = chunk.Timestamp
-
-		if _, writeErr := buf.Write(chunk.Data); writeErr != nil {
-			s.logger.Errorn("Writing snapshot chunk to buffer", obskit.Error(writeErr))
-			return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
-				Success:      false,
-				ErrorMessage: fmt.Sprintf("writing chunk to buffer: %v", writeErr),
-			})
-		}
-
-		if chunk.IsLast {
-			s.logger.Infon("Received last chunk",
-				logger.NewIntField("hashRange", hashRange),
-				logger.NewIntField("timestamp", int64(timestamp)),
-				logger.NewIntField("totalBytes", int64(buf.Len())),
-			)
-			break
-		}
-	}
-
-	if buf.Len() == 0 {
-		s.logger.Infon("Received empty snapshot, nothing to load",
-			logger.NewIntField("hashRange", hashRange),
-		)
+	// the first chunk is read before taking any lock, so a refused stream never holds one
+	first, err := stream.Recv()
+	if errors.Is(err, io.EOF) {
 		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{Success: true})
 	}
-
-	// Load the snapshot data into the cache
-	// Note: LoadSnapshots handles decompression internally if compression is enabled
-	s.logger.Infon("Loading received snapshot",
-		logger.NewIntField("hashRange", hashRange),
-		logger.NewIntField("bufferSize", int64(buf.Len())),
-	)
-
-	if err := s.cache.LoadSnapshot(stream.Context(), &buf); err != nil {
-		s.logger.Errorn("Loading snapshot", obskit.Error(err))
+	if err != nil {
+		s.logger.Errorn("Receiving snapshot chunk", obskit.Error(err))
 		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
 			Success:      false,
-			ErrorMessage: fmt.Sprintf("loading snapshot: %v", err),
+			ErrorMessage: fmt.Sprintf("receiving chunk: %v", err),
 		})
 	}
 
-	// Store the timestamp for future incremental snapshots
-	if err := s.setSnapshotTimestamp(hashRange, timestamp); err != nil {
-		s.logger.Warnn("Setting snapshot timestamp",
-			logger.NewIntField("hashRange", hashRange),
-			obskit.Error(err),
+	logn := s.logger.Infon
+	if first.SourceAddress != "" {
+		logn = s.logger.Debugn // replication streams every range of every pass, for as long as a move lasts
+	}
+	logn("ReceiveSnapshot stream started", logger.NewIntField("hashRange", first.HashRange))
+
+	shadow := s.role() == pb.NodeRole_SHADOW
+	if !shadow && first.SourceAddress != "" {
+		// replication only ever fills a shadow: a promoted node would otherwise hold the write lock, and stop
+		// serving, for as long as the old node's throttled stream lasts
+		s.logger.Warnn("Refusing a replication stream, this node is not a shadow",
+			logger.NewIntField("hashRange", first.HashRange),
+			logger.NewStringField("sourceAddress", first.SourceAddress),
 		)
-		// Continue anyway, the data was loaded successfully
+		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
+			Success:      false,
+			ErrorMessage: "the destination is not a shadow",
+		})
 	}
 
-	s.logger.Infon("Successfully received and loaded snapshot",
-		logger.NewIntField("hashRange", hashRange),
-		logger.NewIntField("timestamp", int64(timestamp)),
-	)
+	if shadow && first.SourceAddress == "" {
+		// only replication fills a shadow, and the leftover-disk check needs to know the source
+		s.logger.Warnn("Refusing a snapshot without a source address, this node is a shadow",
+			logger.NewIntField("hashRange", first.HashRange),
+		)
+		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
+			Success:      false,
+			ErrorMessage: "a shadow only receives replication streams, which carry their source address",
+		})
+	}
 
-	return stream.SendAndClose(&pb.ReceiveSnapshotResponse{Success: true})
+	if shadow {
+		// a shadow serves no traffic, so its receive only needs to keep Get and Put off the cache (loadMu).
+		// The read lock lets GetNodeInfo answer during a receive that can last as long as the sender's budget.
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		s.loadMu.Lock()
+		defer s.loadMu.Unlock()
+	} else {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
+
+	if !shadow {
+		return s.receiveBuffered(stream, first)
+	}
+
+	if err := s.checkShadowSource(first.SourceAddress); err != nil {
+		s.metrics.shadowLeftoverDisk.Increment()
+		s.logger.Errorn("Refusing snapshot on a shadow",
+			logger.NewIntField("hashRange", first.HashRange),
+			logger.NewStringField("sourceAddress", first.SourceAddress),
+			obskit.Error(err),
+		)
+		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{Success: false, ErrorMessage: err.Error()})
+	}
+	return s.receiveStreaming(stream, first)
 }
 
 // SendSnapshot streams a hash range snapshot to a destination node.
@@ -1524,23 +1609,33 @@ func (s *Service) closeNodeConnection(conn *grpc.ClientConn) {
 	}
 }
 
-// getSnapshotTimestamp retrieves the stored timestamp for a hash range.
-func (s *Service) getSnapshotTimestamp(hashRange int64) (uint64, error) {
-	key := getSnapshotTimestampKey(hashRange)
-	value, found, err := s.cache.GetValue(key, internalKeysHashRange)
-	if err != nil {
-		return 0, fmt.Errorf("getting snapshot timestamp: %w", err)
-	}
-
-	// If the key doesn't exist, return 0 (full sync needed)
-	if !found || len(value) < 8 {
-		return 0, nil
-	}
-
-	return binary.BigEndian.Uint64(value), nil
+// getSnapshotTimestamp returns the stored timestamp for a hash range, from the in-memory mirror.
+// found is false when the range never received a snapshot, in which case the timestamp is 0 (full sync needed).
+func (s *Service) getSnapshotTimestamp(hashRange int64) (timestamp uint64, found bool, err error) {
+	s.markers.Lock()
+	defer s.markers.Unlock()
+	timestamp, found = s.markers.byRange[hashRange]
+	return timestamp, found, nil
 }
 
-// setSnapshotTimestamp stores the timestamp for a hash range.
+// loadMarkers fills the in-memory mirror with the markers stored in the cache, before the node serves anything.
+func (s *Service) loadMarkers() error {
+	s.markers.Lock()
+	defer s.markers.Unlock()
+	s.markers.byRange = make(map[int64]uint64)
+	for hashRange := range s.config.TotalHashRanges {
+		value, found, err := s.cache.GetValue(getSnapshotTimestampKey(hashRange), internalKeysHashRange)
+		if err != nil {
+			return fmt.Errorf("loading the snapshot timestamp of hash range %d: %w", hashRange, err)
+		}
+		if found && len(value) >= 8 {
+			s.markers.byRange[hashRange] = binary.BigEndian.Uint64(value)
+		}
+	}
+	return nil
+}
+
+// setSnapshotTimestamp stores the timestamp for a hash range in the cache and in the in-memory mirror.
 func (s *Service) setSnapshotTimestamp(hashRange int64, timestamp uint64) error {
 	value := make([]byte, 8) // Encode timestamp as big-endian uint64
 	binary.BigEndian.PutUint64(value, timestamp)
@@ -1549,6 +1644,9 @@ func (s *Service) setSnapshotTimestamp(hashRange int64, timestamp uint64) error 
 	if err := s.cache.PutValue(key, internalKeysHashRange, value, 0); err != nil {
 		return fmt.Errorf("setting snapshot timestamp: %w", err)
 	}
+	s.markers.Lock()
+	s.markers.byRange[hashRange] = timestamp
+	s.markers.Unlock()
 
 	s.logger.Debugn("Stored snapshot timestamp",
 		logger.NewIntField("hashRange", hashRange),
