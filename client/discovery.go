@@ -48,6 +48,87 @@ type nodeResponse interface {
 	GetErrorCode() pb.ErrorCode
 }
 
+// resolveNodes returns the addresses of the nodes behind config.Addresses, skipping the ones that don't resolve.
+func (c *Client) resolveNodes(ctx context.Context) []string {
+	ctx, cancel := context.WithTimeout(ctx, resolveAddressTimeout)
+	defer cancel()
+	var nodes []string
+	for _, address := range c.config.Addresses {
+		resolved, err := c.resolve(ctx, address)
+		if err != nil {
+			c.logger.Warnn("Resolving a configured address",
+				logger.NewStringField("address", address), obskit.Error(err),
+			)
+			continue
+		}
+		nodes = append(nodes, resolved...)
+	}
+	return nodes
+}
+
+// applyAddresses adopts a new list of node addresses. Only the connection pools whose address changed are
+// replaced. It returns true when the list changed.
+func (c *Client) applyAddresses(addresses []string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed.Load() {
+		return false, errClientClosed // never reopen connections after Close
+	}
+	if slices.Equal(addresses, c.nodeAddresses) && len(c.pools) == len(addresses) {
+		return false, nil
+	}
+
+	dialOpts := c.getGrpcDialOptions()
+	for i, addr := range addresses {
+		if i < len(c.nodeAddresses) && c.nodeAddresses[i] == addr {
+			if _, ok := c.pools[i]; ok {
+				continue
+			}
+		}
+		pool, err := newConnectionPool(addr, c.config.ConnectionPoolSize, dialOpts...)
+		if err != nil {
+			return false, fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
+		}
+		if old, ok := c.pools[i]; ok {
+			_ = old.close() // requests still using it fail and retry on the new pool
+		}
+		c.pools[i] = pool
+		if c.metrics.connectionOps[i] == nil {
+			c.metrics.connectionOps[i] = make(map[int]stats.Counter)
+			for j := range c.config.ConnectionPoolSize {
+				c.metrics.connectionOps[i][j] = c.stats.NewTaggedStat(
+					"keydb_client_connection_ops_total", stats.CountType, stats.Tags{
+						"node": strconv.Itoa(i),
+						"conn": strconv.Itoa(j),
+					},
+				)
+			}
+		}
+	}
+	for i := len(addresses); i < len(c.nodeAddresses) || i < len(c.pools); i++ {
+		if pool, ok := c.pools[i]; ok {
+			_ = pool.close()
+			delete(c.pools, i)
+			delete(c.metrics.connectionOps, i)
+		}
+	}
+
+	oldClusterSize := int64(len(c.nodeAddresses))
+	newClusterSize := int64(len(addresses))
+	c.nodeAddresses = slices.Clone(addresses)
+	if newClusterSize != oldClusterSize {
+		c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
+	}
+
+	c.logger.Infon("Adopted new node addresses",
+		logger.NewIntField("oldClusterSize", oldClusterSize),
+		logger.NewIntField("newClusterSize", newClusterSize),
+		logger.NewStringField("nodesAddresses", strings.Join(addresses, ",")),
+	)
+	return true, nil
+}
+
 // waitForNodes finds the nodes for a request made while the client has no node list, because its addresses resolved
 // to no node when it was created. It asks the nodes behind them for the list, retrying with backoff until one answers
 // or ctx ends, unless retries are disabled. Every failed attempt it retries counts in
@@ -112,24 +193,6 @@ func (c *Client) discover(ctx context.Context) ([]string, error) {
 	return nil, errors.Join(errs...)
 }
 
-// resolveNodes returns the addresses of the nodes behind config.Addresses, skipping the ones that don't resolve.
-func (c *Client) resolveNodes(ctx context.Context) []string {
-	ctx, cancel := context.WithTimeout(ctx, resolveAddressTimeout)
-	defer cancel()
-	var nodes []string
-	for _, address := range c.config.Addresses {
-		resolved, err := c.resolve(ctx, address)
-		if err != nil {
-			c.logger.Warnn("Resolving a configured address",
-				logger.NewStringField("address", address), obskit.Error(err),
-			)
-			continue
-		}
-		nodes = append(nodes, resolved...)
-	}
-	return nodes
-}
-
 // askForAddresses asks the node at address for the cluster's addresses on a fresh connection.
 func (c *Client) askForAddresses(ctx context.Context, address string) ([]string, error) {
 	conn, err := grpc.NewClient(address, c.getGrpcDialOptions()...)
@@ -147,69 +210,6 @@ func (c *Client) askForAddresses(ctx context.Context, address string) ([]string,
 		return nil, fmt.Errorf("%s answered with no node address", address)
 	}
 	return info.NodesAddresses, nil
-}
-
-// applyAddresses adopts a new list of node addresses. Only the connection pools whose address changed are
-// replaced. It returns true when the list changed.
-func (c *Client) applyAddresses(addresses []string) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.closed.Load() {
-		return false, errClientClosed // never reopen connections after Close
-	}
-	if slices.Equal(addresses, c.nodeAddresses) && len(c.pools) == len(addresses) {
-		return false, nil
-	}
-
-	dialOpts := c.getGrpcDialOptions()
-	for i, addr := range addresses {
-		if i < len(c.nodeAddresses) && c.nodeAddresses[i] == addr {
-			if _, ok := c.pools[i]; ok {
-				continue
-			}
-		}
-		pool, err := newConnectionPool(addr, c.config.ConnectionPoolSize, dialOpts...)
-		if err != nil {
-			return false, fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
-		}
-		if old, ok := c.pools[i]; ok {
-			_ = old.close() // requests still using it fail and retry on the new pool
-		}
-		c.pools[i] = pool
-		if c.metrics.connectionOps[i] == nil {
-			c.metrics.connectionOps[i] = make(map[int]stats.Counter)
-			for j := range c.config.ConnectionPoolSize {
-				c.metrics.connectionOps[i][j] = c.stats.NewTaggedStat(
-					"keydb_client_connection_ops_total", stats.CountType, stats.Tags{
-						"node": strconv.Itoa(i),
-						"conn": strconv.Itoa(j),
-					},
-				)
-			}
-		}
-	}
-	for i := len(addresses); i < len(c.nodeAddresses) || i < len(c.pools); i++ {
-		if pool, ok := c.pools[i]; ok {
-			_ = pool.close()
-			delete(c.pools, i)
-			delete(c.metrics.connectionOps, i)
-		}
-	}
-
-	oldClusterSize := int64(len(c.nodeAddresses))
-	newClusterSize := int64(len(addresses))
-	c.nodeAddresses = slices.Clone(addresses)
-	if newClusterSize != oldClusterSize {
-		c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
-	}
-
-	c.logger.Infon("Adopted new node addresses",
-		logger.NewIntField("oldClusterSize", oldClusterSize),
-		logger.NewIntField("newClusterSize", newClusterSize),
-		logger.NewStringField("nodesAddresses", strings.Join(addresses, ",")),
-	)
-	return true, nil
 }
 
 // routingInfo returns the hash and cluster size requests must use.
