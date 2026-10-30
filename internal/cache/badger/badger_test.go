@@ -354,19 +354,6 @@ func TestSnapshotContextCancellationResourceCleanup(t *testing.T) {
 	require.NoError(t, err, "Cache should be in a good state after context cancellation")
 }
 
-// fastForwardCommitTs commits a single entry at timestamp 1e9 so that the commit timestamps of a
-// database opened later in dir have at least 10 decimal digits.
-func fastForwardCommitTs(t *testing.T, dir string) {
-	t.Helper()
-	const commitTs = 1_000_000_000
-	db, err := badger.OpenManaged(badger.DefaultOptions(dir).WithLogger(nil))
-	require.NoError(t, err)
-	txn := db.NewTransactionAt(commitTs, true)
-	require.NoError(t, txn.SetEntry(badger.NewEntry([]byte("seed"), nil)))
-	require.NoError(t, txn.CommitAt(commitTs, nil))
-	require.NoError(t, db.Close())
-}
-
 func TestPurgeValueLog(t *testing.T) {
 	// leakValueLog writes keys with a threshold that sends the transaction finish markers to the value log,
 	// reopening the database a few times so that the markers span several value log files.
@@ -465,28 +452,6 @@ func TestHasData(t *testing.T) {
 	require.True(t, hasData)
 }
 
-func newStreamTestCache(t *testing.T, compress bool) *Cache {
-	t.Helper()
-	conf := config.New()
-	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
-	conf.Set("BadgerDB.Dedup.Compress", compress)
-	bdb, err := New(conf, logger.NOP)
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, bdb.Close()) })
-	return bdb
-}
-
-func existsIn(t *testing.T, c *Cache, hashRange int64, keys ...string) []bool {
-	t.Helper()
-	indexes := make(map[string]int, len(keys))
-	for i, k := range keys {
-		indexes[k] = i
-	}
-	exists, err := c.Get(map[int64][]string{hashRange: keys}, indexes)
-	require.NoError(t, err)
-	return exists
-}
-
 func TestStreamSnapshotRoundTrip(t *testing.T) {
 	for _, compress := range []bool{false, true} {
 		t.Run("compress="+strconv.FormatBool(compress), func(t *testing.T) {
@@ -510,11 +475,6 @@ func TestStreamSnapshotRoundTrip(t *testing.T) {
 		})
 	}
 }
-
-// erroringReader fails every read, like a snapshot stream cut short.
-type erroringReader struct{ err error }
-
-func (r erroringReader) Read([]byte) (int, error) { return 0, r.err }
 
 func TestInterruptedLoadSnapshot(t *testing.T) {
 	for _, compress := range []bool{false, true} {
@@ -654,3 +614,43 @@ func TestStreamSnapshotIncrementalAllocations(t *testing.T) {
 	t.Logf("an incremental pass with nothing new allocated %d bytes", allocated)
 	require.Less(t, allocated, uint64(8<<20), "an incremental pass over unchanged data must stay cheap")
 }
+
+// fastForwardCommitTs commits a single entry at timestamp 1e9 so that the commit timestamps of a
+// database opened later in dir have at least 10 decimal digits.
+func fastForwardCommitTs(t *testing.T, dir string) {
+	t.Helper()
+	const commitTs = 1_000_000_000
+	db, err := badger.OpenManaged(badger.DefaultOptions(dir).WithLogger(nil))
+	require.NoError(t, err)
+	txn := db.NewTransactionAt(commitTs, true)
+	require.NoError(t, txn.SetEntry(badger.NewEntry([]byte("seed"), nil)))
+	require.NoError(t, txn.CommitAt(commitTs, nil))
+	require.NoError(t, db.Close())
+}
+
+func newStreamTestCache(t *testing.T, compress bool) *Cache {
+	t.Helper()
+	conf := config.New()
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	conf.Set("BadgerDB.Dedup.Compress", compress)
+	bdb, err := New(conf, logger.NOP)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, bdb.Close()) })
+	return bdb
+}
+
+func existsIn(t *testing.T, c *Cache, hashRange int64, keys ...string) []bool {
+	t.Helper()
+	indexes := make(map[string]int, len(keys))
+	for i, k := range keys {
+		indexes[k] = i
+	}
+	exists, err := c.Get(map[int64][]string{hashRange: keys}, indexes)
+	require.NoError(t, err)
+	return exists
+}
+
+// erroringReader fails every read, like a snapshot stream cut short.
+type erroringReader struct{ err error }
+
+func (r erroringReader) Read([]byte) (int, error) { return 0, r.err }

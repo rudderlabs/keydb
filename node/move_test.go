@@ -32,6 +32,301 @@ import (
 // has its own view of the configuration, which tests change one node at a time to reproduce the kubelet refreshing
 // the configmap of each pod at a different moment.
 
+func TestMoveHappyPath(t *testing.T) {
+	for _, order := range []switchOrder{oldNodeStopsFirst, newNodeRefreshesFirst, oldNodeRefreshesFirst} {
+		t.Run("order "+strconv.Itoa(int(order)), func(t *testing.T) {
+			c := newMoveCluster(t, fastMoveReplication())
+			node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
+			c.setTopology([]string{node0.address, node1.address}, nil)
+			c.start(node0)
+			c.start(node1)
+
+			cl := c.newClient()
+			l := startLoad(t, cl, "load")
+			require.Eventually(t, func() bool { return l.ackedCount() > 20 }, 10*time.Second, 10*time.Millisecond)
+
+			lastPassStart, stopped := c.move(t, node0, node0b, node1, cl, order)
+
+			// the client keeps writing through the switch and lands on the new node
+			acked := l.ackedCount()
+			require.Eventually(t, func() bool { return l.ackedCount() > acked+20 }, 30*time.Second,
+				10*time.Millisecond, "writes never resumed after the switch")
+			l.finish()
+
+			require.Empty(t, l.errors(), "the client must not surface errors during a move")
+			require.Less(t, l.maxStall, 10*time.Second, "the switch stalled the client for too long")
+			require.True(t, hasKeys(t, node0b, l.keysAckedBetween(time.Time{}, lastPassStart)),
+				"keys acknowledged before the last completed pass must be on the new node")
+			require.True(t, hasKeys(t, node0b, l.keysStartedAfter(stopped)),
+				"keys written after the old node stopped must be on the new node")
+			require.True(t, hasKeys(t, node1, l.keysAckedBetween(time.Time{}, time.Now())),
+				"the node that didn't move keeps all its keys")
+		})
+	}
+}
+
+func TestMoveTwiceBackAndForth(t *testing.T) {
+	c := newMoveCluster(t, fastMoveReplication())
+	slotA, node1 := c.addNode(0), c.addNode(1)
+	c.setTopology([]string{slotA.address, node1.address}, nil)
+	c.start(slotA)
+	c.start(node1)
+
+	cl := c.newClient()
+	l := startLoad(t, cl, "load")
+	require.Eventually(t, func() bool { return l.ackedCount() > 20 }, 10*time.Second, 10*time.Millisecond)
+
+	// first move: keydb-0 → keydb-0-b
+	slotB := c.addNode(0)
+	firstLastPass, _ := c.move(t, slotA, slotB, node1, cl, oldNodeStopsFirst)
+	acked := l.ackedCount()
+	require.Eventually(t, func() bool { return l.ackedCount() > acked+20 }, 30*time.Second, 10*time.Millisecond)
+	betweenMoves := time.Now()
+	require.Eventually(t, func() bool { return l.ackedCount() > acked+60 }, 30*time.Second, 10*time.Millisecond)
+
+	// second move: keydb-0-b → keydb-0 again, on a fresh disk
+	slotAAgain := c.addNode(0)
+	secondLastPass, _ := c.move(t, slotB, slotAAgain, node1, cl, newNodeRefreshesFirst)
+	acked = l.ackedCount()
+	require.Eventually(t, func() bool { return l.ackedCount() > acked+20 }, 30*time.Second, 10*time.Millisecond)
+	l.finish()
+
+	require.Empty(t, l.errors())
+	require.True(t, hasKeys(t, slotAAgain, l.keysAckedBetween(time.Time{}, firstLastPass)),
+		"keys from before the first move survive both moves")
+	require.True(t, hasKeys(t, slotAAgain, l.keysAckedBetween(betweenMoves, secondLastPass)),
+		"keys written between the moves survive the second move")
+	require.Equal(t, 2, cl.ClusterSize())
+
+	// the client is back on slot a's address: node 0's keys are served from there
+	finalKey := keyOf(0, "final")
+	require.NoError(t, cl.Put(context.Background(), []string{finalKey}, time.Hour))
+	require.True(t, hasKeys(t, slotAAgain, []string{finalKey}))
+	exists, err := cl.Get(context.Background(), l.keysAckedBetween(time.Time{}, firstLastPass))
+	require.NoError(t, err)
+	for _, e := range exists {
+		require.True(t, e)
+	}
+}
+
+func TestMoveRestartMidReplication(t *testing.T) {
+	c := newMoveCluster(t, fastMoveReplication())
+	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
+	c.setTopology([]string{node0.address, node1.address}, nil)
+	c.start(node0)
+	c.start(node1)
+	cl := c.newClient()
+	keys := testKeys(2000)
+	require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
+
+	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
+	c.start(node0b)
+	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
+		20*time.Millisecond)
+
+	// the serving node restarts on the same disk
+	c.stop(node0)
+	c.start(node0)
+	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().State == "running" }, 10*time.Second,
+		10*time.Millisecond, "replication resumes on boot")
+	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
+		20*time.Millisecond, "readiness must be reported again once caught up")
+	status := node0.service.ReplicationStatus()
+	require.Less(t, status.LastPassBytes, 100*bytesize.KB, "after a restart the passes are incremental")
+	require.True(t, hasKeys(t, node0b, keys))
+}
+
+func TestMoveIdleClient(t *testing.T) {
+	c := newMoveCluster(t, fastMoveReplication())
+	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
+	c.setTopology([]string{node0.address, node1.address}, nil)
+	c.start(node0)
+	c.start(node1)
+
+	active := c.newClient()
+	idle := c.newClient()
+	keys := testKeys(200)
+	require.NoError(t, idle.Put(context.Background(), keys, time.Hour)) // discovers, then goes quiet
+
+	c.move(t, node0, node0b, node1, active, oldNodeStopsFirst)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	exists, err := idle.Get(ctx, keys)
+	require.NoError(t, err, "an idle client must find the new node once the old one is gone")
+	for _, e := range exists {
+		require.True(t, e)
+	}
+}
+
+func TestMoveStaleListsDuringRefresh(t *testing.T) {
+	c := newMoveCluster(t, fastMoveReplication())
+	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
+	c.setTopology([]string{node0.address, node1.address}, nil)
+	c.start(node0)
+	c.start(node1)
+	cl := c.newClient()
+	keys := testKeys(200)
+	require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
+
+	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
+	c.start(node0b)
+	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
+		20*time.Millisecond)
+
+	// the old node is gone, but neither the shadow nor node 1 picked up the new config yet: both still hand out
+	// the old list, so the client is sent back to the dead address until they refresh
+	c.stop(node0)
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := cl.Get(ctx, keys)
+		done <- err
+	}()
+	time.Sleep(time.Second)
+	require.Empty(t, done, "the request cannot succeed before the configs refresh")
+
+	after := []string{node0b.address, node1.address}
+	c.setTopology(after, []string{"", ""}, node0b)
+	c.setTopology(after, []string{"", ""}, node1)
+	select {
+	case err := <-done:
+		require.NoError(t, err, "the client must converge once the configs refresh")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the client never converged")
+	}
+}
+
+func TestMoveCPUBounds(t *testing.T) {
+	t.Run("byte budget holds", func(t *testing.T) {
+		replication := fastMoveReplication()
+		replication.MaxBytesPerSecond = func() int64 { return bytesize.MB }
+		c := newMoveCluster(t, replication)
+		node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
+		c.setTopology([]string{node0.address, node1.address}, nil)
+		c.start(node0)
+		c.start(node1)
+		// about 2.5 MiB to send: well above the one second of budget the limiter starts with
+		keysByHashRange, err := moveTestHash.GetKeysByHashRange(ownedBy(0, testKeys(240_000)), 0)
+		require.NoError(t, err)
+		require.NoError(t, node0.service.cache.Put(keysByHashRange, time.Hour))
+
+		c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
+		c.start(node0b)
+		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().PassesCompleted >= 1 },
+			60*time.Second, 20*time.Millisecond)
+		status := node0.service.ReplicationStatus()
+		duration, err := time.ParseDuration(status.LastPassDuration)
+		require.NoError(t, err)
+		// the limiter starts with a second of budget, every byte past it waits for the budget
+		require.Greater(t, status.LastPassBytes, 2*bytesize.MB, "enough data to measure the budget")
+		minDuration := time.Duration(float64(status.LastPassBytes-bytesize.MB) / float64(bytesize.MB) *
+			float64(time.Second))
+		require.GreaterOrEqual(t, duration, minDuration-50*time.Millisecond,
+			"a budget of 1 MiB/s must slow the first pass down")
+	})
+
+	t.Run("brake engages and releases", func(t *testing.T) {
+		signals := &switchableSignals{}
+		replication := fastMoveReplication()
+		replication.Signals = signals
+		c := newMoveCluster(t, replication)
+		node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
+		c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
+		c.start(node0)
+		c.start(node1)
+		c.start(node0b)
+		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().State == "running" },
+			10*time.Second, 10*time.Millisecond)
+
+		signals.loaded.Store(true)
+		require.Eventually(t, func() bool {
+			status := node0.service.ReplicationStatus()
+			return status.BrakeEngaged && strings.Contains(status.BrakeReason, "scheduler latency")
+		}, 10*time.Second, 10*time.Millisecond, "the brake never engaged")
+		signals.loaded.Store(false)
+		require.Eventually(t, func() bool { return !node0.service.ReplicationStatus().BrakeEngaged },
+			30*time.Second, 10*time.Millisecond, "the brake never released")
+	})
+
+	t.Run("manual pause and resume", func(t *testing.T) {
+		var paused atomic.Bool
+		paused.Store(true)
+		replication := fastMoveReplication()
+		replication.Paused = paused.Load
+		c := newMoveCluster(t, replication)
+		node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
+		c.setTopology([]string{node0.address, node1.address}, nil)
+		c.start(node0)
+		c.start(node1)
+		cl := c.newClient()
+		keys := testKeys(500)
+		require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
+
+		c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
+		c.start(node0b)
+		time.Sleep(500 * time.Millisecond)
+		status := node0.service.ReplicationStatus()
+		require.Zero(t, status.PassesCompleted, "a paused copy makes no progress")
+		require.Zero(t, status.BudgetBytesPerSecond)
+		require.Contains(t, status.BrakeReason, "paused")
+
+		paused.Store(false)
+		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().PassesCompleted >= 1 },
+			30*time.Second, 20*time.Millisecond, "the copy never resumed")
+		require.True(t, hasKeys(t, node0b, keys))
+	})
+}
+
+func TestMoveLeftoverDisk(t *testing.T) {
+	c := newMoveCluster(t, fastMoveReplication())
+	slotA, node1 := c.addNode(0), c.addNode(1)
+	c.setTopology([]string{slotA.address, node1.address}, nil)
+	c.start(slotA)
+	c.start(node1)
+	cl := c.newClient()
+	require.NoError(t, cl.Put(context.Background(), testKeys(200), time.Hour))
+
+	slotB := c.addNode(0)
+	c.move(t, slotA, slotB, node1, cl, oldNodeStopsFirst)
+
+	// moving back onto slot a, but Kubernetes didn't delete its old disk
+	leftover := c.addNode(0)
+	leftover.dir = slotA.dir
+	c.setTopology([]string{slotB.address, node1.address}, []string{leftover.address, ""})
+	c.start(leftover)
+	require.Eventually(t, func() bool {
+		return strings.Contains(slotB.service.ReplicationStatus().LastError, "leftover")
+	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse to merge into a leftover disk")
+	require.False(t, slotB.service.ReplicationStatus().Ready)
+}
+
+func TestMoveLeftoverDiskReusedSlot(t *testing.T) {
+	c := newMoveCluster(t, fastMoveReplication())
+	slotA, node1 := c.addNode(0), c.addNode(1)
+	c.setTopology([]string{slotA.address, node1.address}, nil)
+	c.start(slotA)
+	c.start(node1)
+	cl := c.newClient()
+	require.NoError(t, cl.Put(context.Background(), testKeys(200), time.Hour))
+
+	// a → b, then b → a: slot b's pod goes away, but suppose Kubernetes didn't delete its disk
+	slotB := c.addNode(0)
+	c.move(t, slotA, slotB, node1, cl, oldNodeStopsFirst)
+	slotAAgain := c.addNodeAt(0, slotA.address, t.TempDir())
+	c.move(t, slotB, slotAAgain, node1, cl, oldNodeStopsFirst)
+
+	// a → b again: slot b's pod comes back with the same address and its leftover disk
+	leftover := c.addNodeAt(0, slotB.address, slotB.dir)
+	c.setTopology([]string{slotAAgain.address, node1.address}, []string{leftover.address, ""})
+	c.start(leftover)
+	require.Eventually(t, func() bool {
+		return strings.Contains(slotAAgain.service.ReplicationStatus().LastError, "leftover")
+	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse a leftover disk, even on a reused slot")
+	require.False(t, slotAAgain.service.ReplicationStatus().Ready)
+}
+
 const moveTestHashRanges = int64(8)
 
 // topology is a node's view of nodeAddresses and shadowNodeAddresses
@@ -389,172 +684,6 @@ func (c *moveCluster) move(
 	return lastPassStart, stopped
 }
 
-func TestMoveHappyPath(t *testing.T) {
-	for _, order := range []switchOrder{oldNodeStopsFirst, newNodeRefreshesFirst, oldNodeRefreshesFirst} {
-		t.Run("order "+strconv.Itoa(int(order)), func(t *testing.T) {
-			c := newMoveCluster(t, fastMoveReplication())
-			node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-			c.setTopology([]string{node0.address, node1.address}, nil)
-			c.start(node0)
-			c.start(node1)
-
-			cl := c.newClient()
-			l := startLoad(t, cl, "load")
-			require.Eventually(t, func() bool { return l.ackedCount() > 20 }, 10*time.Second, 10*time.Millisecond)
-
-			lastPassStart, stopped := c.move(t, node0, node0b, node1, cl, order)
-
-			// the client keeps writing through the switch and lands on the new node
-			acked := l.ackedCount()
-			require.Eventually(t, func() bool { return l.ackedCount() > acked+20 }, 30*time.Second,
-				10*time.Millisecond, "writes never resumed after the switch")
-			l.finish()
-
-			require.Empty(t, l.errors(), "the client must not surface errors during a move")
-			require.Less(t, l.maxStall, 10*time.Second, "the switch stalled the client for too long")
-			require.True(t, hasKeys(t, node0b, l.keysAckedBetween(time.Time{}, lastPassStart)),
-				"keys acknowledged before the last completed pass must be on the new node")
-			require.True(t, hasKeys(t, node0b, l.keysStartedAfter(stopped)),
-				"keys written after the old node stopped must be on the new node")
-			require.True(t, hasKeys(t, node1, l.keysAckedBetween(time.Time{}, time.Now())),
-				"the node that didn't move keeps all its keys")
-		})
-	}
-}
-
-func TestMoveTwiceBackAndForth(t *testing.T) {
-	c := newMoveCluster(t, fastMoveReplication())
-	slotA, node1 := c.addNode(0), c.addNode(1)
-	c.setTopology([]string{slotA.address, node1.address}, nil)
-	c.start(slotA)
-	c.start(node1)
-
-	cl := c.newClient()
-	l := startLoad(t, cl, "load")
-	require.Eventually(t, func() bool { return l.ackedCount() > 20 }, 10*time.Second, 10*time.Millisecond)
-
-	// first move: keydb-0 → keydb-0-b
-	slotB := c.addNode(0)
-	firstLastPass, _ := c.move(t, slotA, slotB, node1, cl, oldNodeStopsFirst)
-	acked := l.ackedCount()
-	require.Eventually(t, func() bool { return l.ackedCount() > acked+20 }, 30*time.Second, 10*time.Millisecond)
-	betweenMoves := time.Now()
-	require.Eventually(t, func() bool { return l.ackedCount() > acked+60 }, 30*time.Second, 10*time.Millisecond)
-
-	// second move: keydb-0-b → keydb-0 again, on a fresh disk
-	slotAAgain := c.addNode(0)
-	secondLastPass, _ := c.move(t, slotB, slotAAgain, node1, cl, newNodeRefreshesFirst)
-	acked = l.ackedCount()
-	require.Eventually(t, func() bool { return l.ackedCount() > acked+20 }, 30*time.Second, 10*time.Millisecond)
-	l.finish()
-
-	require.Empty(t, l.errors())
-	require.True(t, hasKeys(t, slotAAgain, l.keysAckedBetween(time.Time{}, firstLastPass)),
-		"keys from before the first move survive both moves")
-	require.True(t, hasKeys(t, slotAAgain, l.keysAckedBetween(betweenMoves, secondLastPass)),
-		"keys written between the moves survive the second move")
-	require.Equal(t, 2, cl.ClusterSize())
-
-	// the client is back on slot a's address: node 0's keys are served from there
-	finalKey := keyOf(0, "final")
-	require.NoError(t, cl.Put(context.Background(), []string{finalKey}, time.Hour))
-	require.True(t, hasKeys(t, slotAAgain, []string{finalKey}))
-	exists, err := cl.Get(context.Background(), l.keysAckedBetween(time.Time{}, firstLastPass))
-	require.NoError(t, err)
-	for _, e := range exists {
-		require.True(t, e)
-	}
-}
-
-func TestMoveRestartMidReplication(t *testing.T) {
-	c := newMoveCluster(t, fastMoveReplication())
-	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-	c.setTopology([]string{node0.address, node1.address}, nil)
-	c.start(node0)
-	c.start(node1)
-	cl := c.newClient()
-	keys := testKeys(2000)
-	require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
-
-	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
-	c.start(node0b)
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond)
-
-	// the serving node restarts on the same disk
-	c.stop(node0)
-	c.start(node0)
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().State == "running" }, 10*time.Second,
-		10*time.Millisecond, "replication resumes on boot")
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond, "readiness must be reported again once caught up")
-	status := node0.service.ReplicationStatus()
-	require.Less(t, status.LastPassBytes, 100*bytesize.KB, "after a restart the passes are incremental")
-	require.True(t, hasKeys(t, node0b, keys))
-}
-
-func TestMoveIdleClient(t *testing.T) {
-	c := newMoveCluster(t, fastMoveReplication())
-	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-	c.setTopology([]string{node0.address, node1.address}, nil)
-	c.start(node0)
-	c.start(node1)
-
-	active := c.newClient()
-	idle := c.newClient()
-	keys := testKeys(200)
-	require.NoError(t, idle.Put(context.Background(), keys, time.Hour)) // discovers, then goes quiet
-
-	c.move(t, node0, node0b, node1, active, oldNodeStopsFirst)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	exists, err := idle.Get(ctx, keys)
-	require.NoError(t, err, "an idle client must find the new node once the old one is gone")
-	for _, e := range exists {
-		require.True(t, e)
-	}
-}
-
-func TestMoveStaleListsDuringRefresh(t *testing.T) {
-	c := newMoveCluster(t, fastMoveReplication())
-	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-	c.setTopology([]string{node0.address, node1.address}, nil)
-	c.start(node0)
-	c.start(node1)
-	cl := c.newClient()
-	keys := testKeys(200)
-	require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
-
-	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
-	c.start(node0b)
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond)
-
-	// the old node is gone, but neither the shadow nor node 1 picked up the new config yet: both still hand out
-	// the old list, so the client is sent back to the dead address until they refresh
-	c.stop(node0)
-	done := make(chan error, 1)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, err := cl.Get(ctx, keys)
-		done <- err
-	}()
-	time.Sleep(time.Second)
-	require.Empty(t, done, "the request cannot succeed before the configs refresh")
-
-	after := []string{node0b.address, node1.address}
-	c.setTopology(after, []string{"", ""}, node0b)
-	c.setTopology(after, []string{"", ""}, node1)
-	select {
-	case err := <-done:
-		require.NoError(t, err, "the client must converge once the configs refresh")
-	case <-time.After(30 * time.Second):
-		t.Fatal("the client never converged")
-	}
-}
-
 // switchableSignals reports load when told to
 type switchableSignals struct{ loaded atomic.Bool }
 
@@ -563,133 +692,4 @@ func (s *switchableSignals) Sample() BrakeSample {
 		return BrakeSample{SchedLatencyP99: time.Second}
 	}
 	return BrakeSample{}
-}
-
-func TestMoveCPUBounds(t *testing.T) {
-	t.Run("byte budget holds", func(t *testing.T) {
-		replication := fastMoveReplication()
-		replication.MaxBytesPerSecond = func() int64 { return bytesize.MB }
-		c := newMoveCluster(t, replication)
-		node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-		c.setTopology([]string{node0.address, node1.address}, nil)
-		c.start(node0)
-		c.start(node1)
-		// about 2.5 MiB to send: well above the one second of budget the limiter starts with
-		keysByHashRange, err := moveTestHash.GetKeysByHashRange(ownedBy(0, testKeys(240_000)), 0)
-		require.NoError(t, err)
-		require.NoError(t, node0.service.cache.Put(keysByHashRange, time.Hour))
-
-		c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
-		c.start(node0b)
-		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().PassesCompleted >= 1 },
-			60*time.Second, 20*time.Millisecond)
-		status := node0.service.ReplicationStatus()
-		duration, err := time.ParseDuration(status.LastPassDuration)
-		require.NoError(t, err)
-		// the limiter starts with a second of budget, every byte past it waits for the budget
-		require.Greater(t, status.LastPassBytes, 2*bytesize.MB, "enough data to measure the budget")
-		minDuration := time.Duration(float64(status.LastPassBytes-bytesize.MB) / float64(bytesize.MB) *
-			float64(time.Second))
-		require.GreaterOrEqual(t, duration, minDuration-50*time.Millisecond,
-			"a budget of 1 MiB/s must slow the first pass down")
-	})
-
-	t.Run("brake engages and releases", func(t *testing.T) {
-		signals := &switchableSignals{}
-		replication := fastMoveReplication()
-		replication.Signals = signals
-		c := newMoveCluster(t, replication)
-		node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-		c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
-		c.start(node0)
-		c.start(node1)
-		c.start(node0b)
-		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().State == "running" },
-			10*time.Second, 10*time.Millisecond)
-
-		signals.loaded.Store(true)
-		require.Eventually(t, func() bool {
-			status := node0.service.ReplicationStatus()
-			return status.BrakeEngaged && strings.Contains(status.BrakeReason, "scheduler latency")
-		}, 10*time.Second, 10*time.Millisecond, "the brake never engaged")
-		signals.loaded.Store(false)
-		require.Eventually(t, func() bool { return !node0.service.ReplicationStatus().BrakeEngaged },
-			30*time.Second, 10*time.Millisecond, "the brake never released")
-	})
-
-	t.Run("manual pause and resume", func(t *testing.T) {
-		var paused atomic.Bool
-		paused.Store(true)
-		replication := fastMoveReplication()
-		replication.Paused = paused.Load
-		c := newMoveCluster(t, replication)
-		node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-		c.setTopology([]string{node0.address, node1.address}, nil)
-		c.start(node0)
-		c.start(node1)
-		cl := c.newClient()
-		keys := testKeys(500)
-		require.NoError(t, cl.Put(context.Background(), keys, time.Hour))
-
-		c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
-		c.start(node0b)
-		time.Sleep(500 * time.Millisecond)
-		status := node0.service.ReplicationStatus()
-		require.Zero(t, status.PassesCompleted, "a paused copy makes no progress")
-		require.Zero(t, status.BudgetBytesPerSecond)
-		require.Contains(t, status.BrakeReason, "paused")
-
-		paused.Store(false)
-		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().PassesCompleted >= 1 },
-			30*time.Second, 20*time.Millisecond, "the copy never resumed")
-		require.True(t, hasKeys(t, node0b, keys))
-	})
-}
-
-func TestMoveLeftoverDisk(t *testing.T) {
-	c := newMoveCluster(t, fastMoveReplication())
-	slotA, node1 := c.addNode(0), c.addNode(1)
-	c.setTopology([]string{slotA.address, node1.address}, nil)
-	c.start(slotA)
-	c.start(node1)
-	cl := c.newClient()
-	require.NoError(t, cl.Put(context.Background(), testKeys(200), time.Hour))
-
-	slotB := c.addNode(0)
-	c.move(t, slotA, slotB, node1, cl, oldNodeStopsFirst)
-
-	// moving back onto slot a, but Kubernetes didn't delete its old disk
-	leftover := c.addNode(0)
-	leftover.dir = slotA.dir
-	c.setTopology([]string{slotB.address, node1.address}, []string{leftover.address, ""})
-	c.start(leftover)
-	require.Eventually(t, func() bool {
-		return strings.Contains(slotB.service.ReplicationStatus().LastError, "leftover")
-	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse to merge into a leftover disk")
-	require.False(t, slotB.service.ReplicationStatus().Ready)
-}
-
-func TestMoveLeftoverDiskReusedSlot(t *testing.T) {
-	c := newMoveCluster(t, fastMoveReplication())
-	slotA, node1 := c.addNode(0), c.addNode(1)
-	c.setTopology([]string{slotA.address, node1.address}, nil)
-	c.start(slotA)
-	c.start(node1)
-	cl := c.newClient()
-	require.NoError(t, cl.Put(context.Background(), testKeys(200), time.Hour))
-
-	// a → b, then b → a: slot b's pod goes away, but suppose Kubernetes didn't delete its disk
-	slotB := c.addNode(0)
-	c.move(t, slotA, slotB, node1, cl, oldNodeStopsFirst)
-	slotAAgain := c.addNodeAt(0, slotA.address, t.TempDir())
-	c.move(t, slotB, slotAAgain, node1, cl, oldNodeStopsFirst)
-
-	// a → b again: slot b's pod comes back with the same address and its leftover disk
-	leftover := c.addNodeAt(0, slotB.address, slotB.dir)
-	c.setTopology([]string{slotAAgain.address, node1.address}, []string{leftover.address, ""})
-	c.start(leftover)
-	require.Eventually(t, func() bool {
-		return strings.Contains(slotAAgain.service.ReplicationStatus().LastError, "leftover")
-	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse a leftover disk, even on a reused slot")
-	require.False(t, slotAAgain.service.ReplicationStatus().Ready)
 }

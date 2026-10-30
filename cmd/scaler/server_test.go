@@ -38,12 +38,6 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
-const (
-	testTTL                 = "5m" // 5 minutes
-	defaultBackupFolderName = "default"
-	nodeAddressesConfKey    = "nodeAddresses"
-)
-
 func TestScaleUpAndDownManual(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
@@ -1797,6 +1791,12 @@ func TestBackup(t *testing.T) {
 	node1.Close()
 	node2.Close()
 }
+
+const (
+	testTTL                 = "5m" // 5 minutes
+	defaultBackupFolderName = "default"
+	nodeAddressesConfKey    = "nodeAddresses"
+)
 
 // Helper types and functions
 

@@ -28,12 +28,6 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
-const (
-	testTTL                 = 5 * time.Minute
-	defaultBackupFolderName = "default"
-	nodeAddressesConfKey    = "nodeAddresses"
-)
-
 func TestSimple(t *testing.T) {
 	pool, err := dockertest.NewPool("")
 	require.NoError(t, err)
@@ -1525,6 +1519,12 @@ func TestStreamingFailureScenarios(t *testing.T) {
 	cancel()
 	node0.Close()
 }
+
+const (
+	testTTL                 = 5 * time.Minute
+	defaultBackupFolderName = "default"
+	nodeAddressesConfKey    = "nodeAddresses"
+)
 
 func getService(
 	ctx context.Context, t testing.TB, cs cloudStorage, nodeConfig Config, conf ...*config.Config,

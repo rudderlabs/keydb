@@ -17,100 +17,6 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
-// healthySignals reports a node under no load
-type healthySignals struct{}
-
-func (healthySignals) Sample() BrakeSample { return BrakeSample{} }
-
-// shadowList is a shadow address list that tests can change while the nodes run
-type shadowList struct{ v atomic.Pointer[[]string] }
-
-func (l *shadowList) set(list ...string) { l.v.Store(&list) }
-
-func (l *shadowList) load() []string {
-	if p := l.v.Load(); p != nil {
-		return *p
-	}
-	return nil
-}
-
-// fastReplication is a replication config that runs passes back to back in tests
-func fastReplication(paused *atomic.Bool) ReplicationConfig {
-	cfg := ReplicationConfig{
-		PauseBetweenPasses: 20 * time.Millisecond,
-		BrakeInterval:      50 * time.Millisecond,
-		ReconcileInterval:  20 * time.Millisecond,
-		Signals:            healthySignals{},
-	}
-	if paused != nil {
-		cfg.Paused = paused.Load
-	}
-	return cfg
-}
-
-type replicationPair struct {
-	source, shadow               *Service
-	sourceAddress, shadowAddress string
-	shadows                      *shadowList
-}
-
-// newReplicationPair starts an active node 0 and a shadow for it, with no shadow listed yet
-func newReplicationPair(t *testing.T, replication ReplicationConfig, stat stats.Stats) *replicationPair {
-	t.Helper()
-	ctx := context.Background()
-	p := &replicationPair{sourceAddress: freeAddress(t), shadowAddress: freeAddress(t), shadows: &shadowList{}}
-	p.shadows.set("")
-	p.source = newTestServiceWithStats(ctx, t, Config{
-		NodeID:            0,
-		TotalHashRanges:   4,
-		Addresses:         staticList(p.sourceAddress),
-		AdvertisedAddress: p.sourceAddress,
-		ShadowAddresses:   p.shadows.load,
-		Replication:       replication,
-	}, newTestConf(t), stat)
-	serveTestService(t, p.source, p.sourceAddress)
-	p.shadow = newTestService(ctx, t, Config{
-		NodeID:            0,
-		TotalHashRanges:   4,
-		Addresses:         staticList(p.sourceAddress),
-		AdvertisedAddress: p.shadowAddress,
-		ShadowAddresses:   p.shadows.load,
-		Replication:       replication,
-	}, newTestConf(t))
-	serveTestService(t, p.shadow, p.shadowAddress)
-	return p
-}
-
-func testKeys(n int) []string {
-	keys := make([]string, n)
-	for i := range keys {
-		keys[i] = "key-" + strconv.Itoa(i)
-	}
-	return keys
-}
-
-func (p *replicationPair) put(t *testing.T, keys ...string) {
-	t.Helper()
-	keysByHashRange, err := p.source.GetKeysByHashRange(keys)
-	require.NoError(t, err)
-	require.NoError(t, p.source.cache.Put(keysByHashRange, time.Hour))
-}
-
-// onShadow returns true when every key exists on the shadow
-func (p *replicationPair) onShadow(t *testing.T, keys ...string) bool {
-	t.Helper()
-	keysByHashRange, indexes, err := p.shadow.GetKeysByHashRangeWithIndexes(keys)
-	require.NoError(t, err)
-	exists, err := p.shadow.cache.Get(keysByHashRange, indexes)
-	require.NoError(t, err)
-	for _, e := range exists {
-		if !e {
-			return false
-		}
-	}
-	return true
-}
-
 func TestReplicationStartsFromConfig(t *testing.T) {
 	p := newReplicationPair(t, fastReplication(nil), stats.NOP)
 	keys := testKeys(1000)
@@ -475,4 +381,98 @@ func TestGCSkippedOnShadow(t *testing.T) {
 	require.Never(t, func() bool {
 		return len(store.Get("keydb_gc_duration_seconds", stats.Tags{"nodeID": "0"}).Values()) > 0
 	}, 300*time.Millisecond, 20*time.Millisecond, "a shadow must not run garbage collection, even between receives")
+}
+
+// healthySignals reports a node under no load
+type healthySignals struct{}
+
+func (healthySignals) Sample() BrakeSample { return BrakeSample{} }
+
+// shadowList is a shadow address list that tests can change while the nodes run
+type shadowList struct{ v atomic.Pointer[[]string] }
+
+func (l *shadowList) set(list ...string) { l.v.Store(&list) }
+
+func (l *shadowList) load() []string {
+	if p := l.v.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// fastReplication is a replication config that runs passes back to back in tests
+func fastReplication(paused *atomic.Bool) ReplicationConfig {
+	cfg := ReplicationConfig{
+		PauseBetweenPasses: 20 * time.Millisecond,
+		BrakeInterval:      50 * time.Millisecond,
+		ReconcileInterval:  20 * time.Millisecond,
+		Signals:            healthySignals{},
+	}
+	if paused != nil {
+		cfg.Paused = paused.Load
+	}
+	return cfg
+}
+
+type replicationPair struct {
+	source, shadow               *Service
+	sourceAddress, shadowAddress string
+	shadows                      *shadowList
+}
+
+// newReplicationPair starts an active node 0 and a shadow for it, with no shadow listed yet
+func newReplicationPair(t *testing.T, replication ReplicationConfig, stat stats.Stats) *replicationPair {
+	t.Helper()
+	ctx := context.Background()
+	p := &replicationPair{sourceAddress: freeAddress(t), shadowAddress: freeAddress(t), shadows: &shadowList{}}
+	p.shadows.set("")
+	p.source = newTestServiceWithStats(ctx, t, Config{
+		NodeID:            0,
+		TotalHashRanges:   4,
+		Addresses:         staticList(p.sourceAddress),
+		AdvertisedAddress: p.sourceAddress,
+		ShadowAddresses:   p.shadows.load,
+		Replication:       replication,
+	}, newTestConf(t), stat)
+	serveTestService(t, p.source, p.sourceAddress)
+	p.shadow = newTestService(ctx, t, Config{
+		NodeID:            0,
+		TotalHashRanges:   4,
+		Addresses:         staticList(p.sourceAddress),
+		AdvertisedAddress: p.shadowAddress,
+		ShadowAddresses:   p.shadows.load,
+		Replication:       replication,
+	}, newTestConf(t))
+	serveTestService(t, p.shadow, p.shadowAddress)
+	return p
+}
+
+func testKeys(n int) []string {
+	keys := make([]string, n)
+	for i := range keys {
+		keys[i] = "key-" + strconv.Itoa(i)
+	}
+	return keys
+}
+
+func (p *replicationPair) put(t *testing.T, keys ...string) {
+	t.Helper()
+	keysByHashRange, err := p.source.GetKeysByHashRange(keys)
+	require.NoError(t, err)
+	require.NoError(t, p.source.cache.Put(keysByHashRange, time.Hour))
+}
+
+// onShadow returns true when every key exists on the shadow
+func (p *replicationPair) onShadow(t *testing.T, keys ...string) bool {
+	t.Helper()
+	keysByHashRange, indexes, err := p.shadow.GetKeysByHashRangeWithIndexes(keys)
+	require.NoError(t, err)
+	exists, err := p.shadow.cache.Get(keysByHashRange, indexes)
+	require.NoError(t, err)
+	for _, e := range exists {
+		if !e {
+			return false
+		}
+	}
+	return true
 }

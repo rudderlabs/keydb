@@ -308,41 +308,6 @@ func TestShadowStreamEndingEarlyIsAFailure(t *testing.T) {
 	require.False(t, found, "no marker over a partial range")
 }
 
-// rangeSnapshot returns an uncompressed snapshot of range 0 holding keys written in many commits, so that loading
-// it moves the destination's transaction timestamps forward. Small batches make any prefix of it loadable.
-func rangeSnapshot(t *testing.T) (snapshot []byte, keys []string) {
-	t.Helper()
-	conf := newTestConf(t)
-	conf.Set("BadgerDB.Dedup.Compress", false)
-	source, err := badger.New(conf, logger.NOP)
-	require.NoError(t, err)
-	defer func() { require.NoError(t, source.Close()) }()
-	for i := range 50 {
-		key := "key-" + strconv.Itoa(i)
-		keys = append(keys, key)
-		require.NoError(t, source.Put(map[int64][]string{0: {key}}, time.Hour))
-	}
-	var buf bytes.Buffer
-	_, _, err = source.StreamSnapshot(context.Background(), 0, 0, &buf, badger.StreamOptions{BatchSize: 64})
-	require.NoError(t, err)
-	return buf.Bytes(), keys
-}
-
-// returnsWithin reports whether f returns within the timeout. f keeps running in the background if it doesn't.
-func returnsWithin(timeout time.Duration, f func()) bool {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		f()
-	}()
-	select {
-	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
-	}
-}
-
 func TestShadowRetriesAnInterruptedRange(t *testing.T) {
 	ctx := context.Background()
 	conf := newTestConf(t)
@@ -432,27 +397,6 @@ func TestShadowPromotedMidRange(t *testing.T) {
 	require.Equal(t, pb.ErrorCode_NO_ERROR, putResp.ErrorCode)
 	require.Equal(t, pb.ErrorCode_NO_ERROR, getResp.ErrorCode)
 	require.Equal(t, []bool{true}, getResp.Exists)
-}
-
-// loadGuardCache records any GetValue made while a snapshot is being loaded: badger's Load moves the oracle
-// without synchronisation, so nothing else may open a transaction meanwhile
-type loadGuardCache struct {
-	Cache
-	inLoad     atomic.Bool
-	violations atomic.Int64
-}
-
-func (c *loadGuardCache) LoadSnapshot(ctx context.Context, r io.Reader) error {
-	c.inLoad.Store(true)
-	defer c.inLoad.Store(false)
-	return c.Cache.LoadSnapshot(ctx, r)
-}
-
-func (c *loadGuardCache) GetValue(key string, hashRange int64) ([]byte, bool, error) {
-	if c.inLoad.Load() {
-		c.violations.Add(1)
-	}
-	return c.Cache.GetValue(key, hashRange)
 }
 
 func TestShadowMetadataReadsDuringLoad(t *testing.T) {
@@ -601,6 +545,62 @@ func TestCloseWaitsForReceive(t *testing.T) {
 	cancel() // the gRPC server cancels in-flight calls on shutdown
 	require.Eventually(t, func() bool { return isClosed(closed) }, 10*time.Second, 10*time.Millisecond,
 		"Close must return once the receive ends")
+}
+
+// rangeSnapshot returns an uncompressed snapshot of range 0 holding keys written in many commits, so that loading
+// it moves the destination's transaction timestamps forward. Small batches make any prefix of it loadable.
+func rangeSnapshot(t *testing.T) (snapshot []byte, keys []string) {
+	t.Helper()
+	conf := newTestConf(t)
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	source, err := badger.New(conf, logger.NOP)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, source.Close()) }()
+	for i := range 50 {
+		key := "key-" + strconv.Itoa(i)
+		keys = append(keys, key)
+		require.NoError(t, source.Put(map[int64][]string{0: {key}}, time.Hour))
+	}
+	var buf bytes.Buffer
+	_, _, err = source.StreamSnapshot(context.Background(), 0, 0, &buf, badger.StreamOptions{BatchSize: 64})
+	require.NoError(t, err)
+	return buf.Bytes(), keys
+}
+
+// returnsWithin reports whether f returns within the timeout. f keeps running in the background if it doesn't.
+func returnsWithin(timeout time.Duration, f func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+// loadGuardCache records any GetValue made while a snapshot is being loaded: badger's Load moves the oracle
+// without synchronisation, so nothing else may open a transaction meanwhile
+type loadGuardCache struct {
+	Cache
+	inLoad     atomic.Bool
+	violations atomic.Int64
+}
+
+func (c *loadGuardCache) LoadSnapshot(ctx context.Context, r io.Reader) error {
+	c.inLoad.Store(true)
+	defer c.inLoad.Store(false)
+	return c.Cache.LoadSnapshot(ctx, r)
+}
+
+func (c *loadGuardCache) GetValue(key string, hashRange int64) ([]byte, bool, error) {
+	if c.inLoad.Load() {
+		c.violations.Add(1)
+	}
+	return c.Cache.GetValue(key, hashRange)
 }
 
 // isClosed returns true when c is closed.

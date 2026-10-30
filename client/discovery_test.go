@@ -23,191 +23,6 @@ import (
 	"github.com/rudderlabs/keydb/proto"
 )
 
-const discoveryTestHashRanges = 128
-
-// mockNode is a mock keydb node whose behaviour tests can change while it runs
-type mockNode struct {
-	address string
-	gets    atomic.Int64
-	puts    atomic.Int64
-	// peers records the client side address of every connection that sent a Get
-	peers sync.Map
-	// list is the address list the node answers with, cluster size included
-	list atomic.Pointer[[]string]
-	// notReady makes Get and Put answer NOT_READY with the node's list
-	notReady atomic.Bool
-	// stop shuts the node down, after which its address refuses connections
-	stop func()
-}
-
-func (n *mockNode) setList(list ...string) { n.list.Store(&list) }
-
-func (n *mockNode) currentList() []string { return *n.list.Load() }
-
-// owns tells whether the node owns every key under its list, as a real node checks. A node that isn't in its own
-// list, such as one reached under another name, owns every key.
-func (n *mockNode) owns(list, keys []string) bool {
-	nodeID := slices.Index(list, n.address)
-	if nodeID < 0 {
-		return true
-	}
-	h := hash.New(int64(len(list)), discoveryTestHashRanges)
-	for _, key := range keys {
-		if h.GetNodeNumber(key) != int64(nodeID) {
-			return false
-		}
-	}
-	return true
-}
-
-func freeMockAddress(t *testing.T) string {
-	t.Helper()
-	port, err := testhelper.GetFreePort()
-	require.NoError(t, err)
-	return fmt.Sprintf("localhost:%d", port)
-}
-
-// newMockNode starts a mock node that answers Get with all keys existing, Put with success, and GetNodeInfo with
-// its list. Like a real node, it answers WRONG_NODE for keys it doesn't own.
-func newMockNode(t *testing.T, address string) *mockNode {
-	t.Helper()
-	n := &mockNode{address: address}
-	n.setList(address)
-	server := &mockNodeServiceServer{
-		getFunc: func(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
-			n.gets.Add(1)
-			if p, ok := peer.FromContext(ctx); ok {
-				n.peers.Store(p.Addr.String(), struct{}{})
-			}
-			list := n.currentList()
-			resp := &proto.GetResponse{ClusterSize: int64(len(list)), NodesAddresses: list}
-			if n.notReady.Load() {
-				resp.ErrorCode = proto.ErrorCode_NOT_READY
-				return resp, nil
-			}
-			if !n.owns(list, req.Keys) {
-				resp.ErrorCode = proto.ErrorCode_WRONG_NODE
-				return resp, nil
-			}
-			resp.Exists = make([]bool, len(req.Keys))
-			for i := range resp.Exists {
-				resp.Exists[i] = true
-			}
-			return resp, nil
-		},
-		putFunc: func(_ context.Context, req *proto.PutRequest) (*proto.PutResponse, error) {
-			n.puts.Add(1)
-			list := n.currentList()
-			resp := &proto.PutResponse{ClusterSize: int64(len(list)), NodesAddresses: list}
-			if n.notReady.Load() {
-				resp.ErrorCode = proto.ErrorCode_NOT_READY
-				return resp, nil
-			}
-			if !n.owns(list, req.Keys) {
-				resp.ErrorCode = proto.ErrorCode_WRONG_NODE
-				return resp, nil
-			}
-			resp.Success = true
-			return resp, nil
-		},
-		getNodeInfoFunc: func(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
-			list := n.currentList()
-			return &proto.GetNodeInfoResponse{ClusterSize: int64(len(list)), NodesAddresses: list}, nil
-		},
-	}
-	n.stop = sync.OnceFunc(startMockServer(t, server, address))
-	t.Cleanup(n.stop)
-	return n
-}
-
-func newDiscoveryClient(t *testing.T, addresses ...string) *Client {
-	t.Helper()
-	return newTestClient(t, nil, addresses...)
-}
-
-// newTestClient creates a client with short timings, which adjust can change before the client is created
-func newTestClient(t *testing.T, adjust func(*Config), addresses ...string) *Client {
-	t.Helper()
-	return newTestClientWith(t, adjust, addresses)
-}
-
-// newHeadlessClient creates a client with short timings that discovers the cluster through h
-func newHeadlessClient(t *testing.T, h *headless) *Client {
-	t.Helper()
-	return newTestClientWith(t, nil, []string{headlessName}, WithAddressResolver(h.resolve))
-}
-
-// testConfig returns a client configuration with short timings
-func testConfig(addresses ...string) Config {
-	return Config{
-		Addresses:       addresses,
-		TotalHashRanges: discoveryTestHashRanges,
-		RetryPolicy: RetryPolicy{
-			InitialInterval: 20 * time.Millisecond,
-			Multiplier:      1.5,
-			MaxInterval:     200 * time.Millisecond,
-		},
-	}
-}
-
-// asIs resolves every address to itself, so that a client's first list is its configured addresses
-func asIs(_ context.Context, address string) ([]string, error) { return []string{address}, nil }
-
-func newTestClientWith(t *testing.T, adjust func(*Config), addresses []string, opts ...Opts) *Client {
-	t.Helper()
-	conf := testConfig(addresses...)
-	if adjust != nil {
-		adjust(&conf)
-	}
-	opts = append([]Opts{WithStats(stats.NOP), WithAddressResolver(asIs)}, opts...)
-	c, err := NewClient(t.Context(), conf, logger.NOP, opts...)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = c.Close() })
-	return c
-}
-
-// headlessName is the address of the headless Service that headless stands in for. Nothing can dial it, so a data
-// request sent to it would fail.
-const headlessName = "keydb-headless.test.invalid:50051"
-
-// headless stands in for a headless Service: its name resolves to the pods the test sets
-type headless struct {
-	mu      sync.Mutex
-	pods    []string
-	lookups atomic.Int64
-}
-
-func newHeadless(pods ...string) *headless { return &headless{pods: pods} }
-
-func (h *headless) set(pods ...string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.pods = pods
-}
-
-func (h *headless) resolve(_ context.Context, address string) ([]string, error) {
-	h.lookups.Add(1)
-	if address != headlessName {
-		return nil, fmt.Errorf("unknown name %q", address)
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return slices.Clone(h.pods), nil
-}
-
-// keysFor returns n keys that the hash sends to the given node
-func keysFor(nodeID, clusterSize int64, n int) []string {
-	h := hash.New(clusterSize, discoveryTestHashRanges)
-	var keys []string
-	for i := 0; len(keys) < n; i++ {
-		key := fmt.Sprintf("key-%d", i)
-		if h.GetNodeNumber(key) == nodeID {
-			keys = append(keys, key)
-		}
-	}
-	return keys
-}
-
 func TestDiscoveryFromOneNode(t *testing.T) {
 	addresses := []string{freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)}
 	nodes := make([]*mockNode, len(addresses))
@@ -279,23 +94,6 @@ func TestWrongNodeMakesTheClientDiscover(t *testing.T) {
 	exists, err := c.Get(ctx, append(keysFor(0, 2, 2), keysFor(1, 2, 2)...))
 	require.NoError(t, err)
 	require.Equal(t, []bool{true, true, true, true}, exists)
-}
-
-// startStuckNode starts a pod that accepts calls but never answers them, like a node whose handlers wait behind a lock
-func startStuckNode(t *testing.T) string {
-	t.Helper()
-	address := freeMockAddress(t)
-	t.Cleanup(startMockServer(t, &mockNodeServiceServer{
-		getFunc: func(ctx context.Context, _ *proto.GetRequest) (*proto.GetResponse, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-		getNodeInfoFunc: func(ctx context.Context, _ *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-	}, address))
-	return address
 }
 
 func TestCallTimeout(t *testing.T) {
@@ -736,4 +534,206 @@ func TestDefaultResolveAddress(t *testing.T) {
 	require.Error(t, err)
 	_, err = defaultResolveAddress(ctx, "no-port")
 	require.Error(t, err)
+}
+
+const discoveryTestHashRanges = 128
+
+// mockNode is a mock keydb node whose behaviour tests can change while it runs
+type mockNode struct {
+	address string
+	gets    atomic.Int64
+	puts    atomic.Int64
+	// peers records the client side address of every connection that sent a Get
+	peers sync.Map
+	// list is the address list the node answers with, cluster size included
+	list atomic.Pointer[[]string]
+	// notReady makes Get and Put answer NOT_READY with the node's list
+	notReady atomic.Bool
+	// stop shuts the node down, after which its address refuses connections
+	stop func()
+}
+
+func (n *mockNode) setList(list ...string) { n.list.Store(&list) }
+
+func (n *mockNode) currentList() []string { return *n.list.Load() }
+
+// owns tells whether the node owns every key under its list, as a real node checks. A node that isn't in its own
+// list, such as one reached under another name, owns every key.
+func (n *mockNode) owns(list, keys []string) bool {
+	nodeID := slices.Index(list, n.address)
+	if nodeID < 0 {
+		return true
+	}
+	h := hash.New(int64(len(list)), discoveryTestHashRanges)
+	for _, key := range keys {
+		if h.GetNodeNumber(key) != int64(nodeID) {
+			return false
+		}
+	}
+	return true
+}
+
+func freeMockAddress(t *testing.T) string {
+	t.Helper()
+	port, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	return fmt.Sprintf("localhost:%d", port)
+}
+
+// newMockNode starts a mock node that answers Get with all keys existing, Put with success, and GetNodeInfo with
+// its list. Like a real node, it answers WRONG_NODE for keys it doesn't own.
+func newMockNode(t *testing.T, address string) *mockNode {
+	t.Helper()
+	n := &mockNode{address: address}
+	n.setList(address)
+	server := &mockNodeServiceServer{
+		getFunc: func(ctx context.Context, req *proto.GetRequest) (*proto.GetResponse, error) {
+			n.gets.Add(1)
+			if p, ok := peer.FromContext(ctx); ok {
+				n.peers.Store(p.Addr.String(), struct{}{})
+			}
+			list := n.currentList()
+			resp := &proto.GetResponse{ClusterSize: int64(len(list)), NodesAddresses: list}
+			if n.notReady.Load() {
+				resp.ErrorCode = proto.ErrorCode_NOT_READY
+				return resp, nil
+			}
+			if !n.owns(list, req.Keys) {
+				resp.ErrorCode = proto.ErrorCode_WRONG_NODE
+				return resp, nil
+			}
+			resp.Exists = make([]bool, len(req.Keys))
+			for i := range resp.Exists {
+				resp.Exists[i] = true
+			}
+			return resp, nil
+		},
+		putFunc: func(_ context.Context, req *proto.PutRequest) (*proto.PutResponse, error) {
+			n.puts.Add(1)
+			list := n.currentList()
+			resp := &proto.PutResponse{ClusterSize: int64(len(list)), NodesAddresses: list}
+			if n.notReady.Load() {
+				resp.ErrorCode = proto.ErrorCode_NOT_READY
+				return resp, nil
+			}
+			if !n.owns(list, req.Keys) {
+				resp.ErrorCode = proto.ErrorCode_WRONG_NODE
+				return resp, nil
+			}
+			resp.Success = true
+			return resp, nil
+		},
+		getNodeInfoFunc: func(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
+			list := n.currentList()
+			return &proto.GetNodeInfoResponse{ClusterSize: int64(len(list)), NodesAddresses: list}, nil
+		},
+	}
+	n.stop = sync.OnceFunc(startMockServer(t, server, address))
+	t.Cleanup(n.stop)
+	return n
+}
+
+func newDiscoveryClient(t *testing.T, addresses ...string) *Client {
+	t.Helper()
+	return newTestClient(t, nil, addresses...)
+}
+
+// newTestClient creates a client with short timings, which adjust can change before the client is created
+func newTestClient(t *testing.T, adjust func(*Config), addresses ...string) *Client {
+	t.Helper()
+	return newTestClientWith(t, adjust, addresses)
+}
+
+// newHeadlessClient creates a client with short timings that discovers the cluster through h
+func newHeadlessClient(t *testing.T, h *headless) *Client {
+	t.Helper()
+	return newTestClientWith(t, nil, []string{headlessName}, WithAddressResolver(h.resolve))
+}
+
+// testConfig returns a client configuration with short timings
+func testConfig(addresses ...string) Config {
+	return Config{
+		Addresses:       addresses,
+		TotalHashRanges: discoveryTestHashRanges,
+		RetryPolicy: RetryPolicy{
+			InitialInterval: 20 * time.Millisecond,
+			Multiplier:      1.5,
+			MaxInterval:     200 * time.Millisecond,
+		},
+	}
+}
+
+// asIs resolves every address to itself, so that a client's first list is its configured addresses
+func asIs(_ context.Context, address string) ([]string, error) { return []string{address}, nil }
+
+func newTestClientWith(t *testing.T, adjust func(*Config), addresses []string, opts ...Opts) *Client {
+	t.Helper()
+	conf := testConfig(addresses...)
+	if adjust != nil {
+		adjust(&conf)
+	}
+	opts = append([]Opts{WithStats(stats.NOP), WithAddressResolver(asIs)}, opts...)
+	c, err := NewClient(t.Context(), conf, logger.NOP, opts...)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// headlessName is the address of the headless Service that headless stands in for. Nothing can dial it, so a data
+// request sent to it would fail.
+const headlessName = "keydb-headless.test.invalid:50051"
+
+// headless stands in for a headless Service: its name resolves to the pods the test sets
+type headless struct {
+	mu      sync.Mutex
+	pods    []string
+	lookups atomic.Int64
+}
+
+func newHeadless(pods ...string) *headless { return &headless{pods: pods} }
+
+func (h *headless) set(pods ...string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pods = pods
+}
+
+func (h *headless) resolve(_ context.Context, address string) ([]string, error) {
+	h.lookups.Add(1)
+	if address != headlessName {
+		return nil, fmt.Errorf("unknown name %q", address)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.pods), nil
+}
+
+// keysFor returns n keys that the hash sends to the given node
+func keysFor(nodeID, clusterSize int64, n int) []string {
+	h := hash.New(clusterSize, discoveryTestHashRanges)
+	var keys []string
+	for i := 0; len(keys) < n; i++ {
+		key := fmt.Sprintf("key-%d", i)
+		if h.GetNodeNumber(key) == nodeID {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// startStuckNode starts a pod that accepts calls but never answers them, like a node whose handlers wait behind a lock
+func startStuckNode(t *testing.T) string {
+	t.Helper()
+	address := freeMockAddress(t)
+	t.Cleanup(startMockServer(t, &mockNodeServiceServer{
+		getFunc: func(ctx context.Context, _ *proto.GetRequest) (*proto.GetResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+		getNodeInfoFunc: func(ctx context.Context, _ *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}, address))
+	return address
 }

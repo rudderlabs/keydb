@@ -13,6 +13,65 @@ import (
 	"google.golang.org/grpc/resolver"
 )
 
+// TestDeadNodeBehindResolver moves node 1 the way Kubernetes deletes a pod: its name first keeps resolving to an
+// address that no longer answers, or stops resolving at once.
+func TestDeadNodeBehindResolver(t *testing.T) {
+	cases := []struct {
+		name string
+		// kill makes the old node's name unusable
+		kill   func(t *testing.T, name string)
+		adjust func(*Config)
+		// within is how long the request may take once the old node is gone
+		within time.Duration
+	}{
+		{
+			name: "blackholed",
+			kill: func(t *testing.T, name string) { testResolvers.set(name, startSilentListener(t)) },
+			adjust: func(conf *Config) {
+				conf.GrpcConfig.MinConnectTimeout = 2 * time.Second
+				conf.GrpcConfig.BackoffBaseDelay = 100 * time.Millisecond
+			},
+			// the first attempt blocks for MinConnectTimeout: its failure must be enough to discover the cluster again
+			within: 3 * time.Second,
+		},
+		{
+			name:   "nxdomain",
+			kill:   func(_ *testing.T, name string) { testResolvers.set(name) },
+			within: 3 * time.Second,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a0, old1, new1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
+			name1 := testResolvers.name(old1)
+			node0 := newMockNode(t, a0)
+			node0.setList(a0, name1)
+			oldNode1 := newMockNode(t, old1)
+			oldNode1.setList(a0, name1)
+			newNode1 := newMockNode(t, new1)
+			newNode1.setList(a0, new1)
+
+			c := newTestClient(t, tc.adjust, a0)
+			keys := keysFor(1, 2, 2)
+			_, err := c.Get(context.Background(), keys) // the connections to the old node are in use
+			require.NoError(t, err)
+
+			oldNode1.stop()
+			tc.kill(t, name1)
+			node0.setList(a0, new1)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			start := time.Now()
+			exists, err := c.Get(ctx, keys)
+			require.NoError(t, err)
+			require.Equal(t, []bool{true, true}, exists)
+			require.Less(t, time.Since(start), tc.within, "the first failure must make the client discover again")
+			require.Positive(t, newNode1.gets.Load())
+		})
+	}
+}
+
 // testResolverScheme names the addresses that testResolvers resolves
 const testResolverScheme = "keydbtest"
 
@@ -131,63 +190,4 @@ func startSilentListener(t *testing.T) string {
 		}
 	}()
 	return lis.Addr().String()
-}
-
-// TestDeadNodeBehindResolver moves node 1 the way Kubernetes deletes a pod: its name first keeps resolving to an
-// address that no longer answers, or stops resolving at once.
-func TestDeadNodeBehindResolver(t *testing.T) {
-	cases := []struct {
-		name string
-		// kill makes the old node's name unusable
-		kill   func(t *testing.T, name string)
-		adjust func(*Config)
-		// within is how long the request may take once the old node is gone
-		within time.Duration
-	}{
-		{
-			name: "blackholed",
-			kill: func(t *testing.T, name string) { testResolvers.set(name, startSilentListener(t)) },
-			adjust: func(conf *Config) {
-				conf.GrpcConfig.MinConnectTimeout = 2 * time.Second
-				conf.GrpcConfig.BackoffBaseDelay = 100 * time.Millisecond
-			},
-			// the first attempt blocks for MinConnectTimeout: its failure must be enough to discover the cluster again
-			within: 3 * time.Second,
-		},
-		{
-			name:   "nxdomain",
-			kill:   func(_ *testing.T, name string) { testResolvers.set(name) },
-			within: 3 * time.Second,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			a0, old1, new1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
-			name1 := testResolvers.name(old1)
-			node0 := newMockNode(t, a0)
-			node0.setList(a0, name1)
-			oldNode1 := newMockNode(t, old1)
-			oldNode1.setList(a0, name1)
-			newNode1 := newMockNode(t, new1)
-			newNode1.setList(a0, new1)
-
-			c := newTestClient(t, tc.adjust, a0)
-			keys := keysFor(1, 2, 2)
-			_, err := c.Get(context.Background(), keys) // the connections to the old node are in use
-			require.NoError(t, err)
-
-			oldNode1.stop()
-			tc.kill(t, name1)
-			node0.setList(a0, new1)
-
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			start := time.Now()
-			exists, err := c.Get(ctx, keys)
-			require.NoError(t, err)
-			require.Equal(t, []bool{true, true}, exists)
-			require.Less(t, time.Since(start), tc.within, "the first failure must make the client discover again")
-			require.Positive(t, newNode1.gets.Load())
-		})
-	}
 }

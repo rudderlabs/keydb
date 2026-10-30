@@ -15,13 +15,6 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
 )
 
-func newTestBudget(maxBytes int64, paused *atomic.Bool) *budget {
-	return newBudget(budgetConfig{
-		max:    func() int64 { return maxBytes },
-		paused: paused.Load,
-	})
-}
-
 func TestBudgetHalvesOnBreach(t *testing.T) {
 	var paused atomic.Bool
 	b := newTestBudget(32*bytesize.MB, &paused)
@@ -291,4 +284,11 @@ func TestBudgetNonPositiveMax(t *testing.T) {
 		require.Never(t, func() bool { return len(done) > 0 }, 300*time.Millisecond, 50*time.Millisecond,
 			"the copy waits like a paused one")
 	}
+}
+
+func newTestBudget(maxBytes int64, paused *atomic.Bool) *budget {
+	return newBudget(budgetConfig{
+		max:    func() int64 { return maxBytes },
+		paused: paused.Load,
+	})
 }
