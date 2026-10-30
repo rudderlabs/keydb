@@ -577,7 +577,7 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
 
 - A keydb image with node moves, and `global.keydb.nodeMoves: true` in the customer object, which restarts the keydb pods once.
 - Every processor of the customer running a rudder-server with this client, which it needs before the operator release that makes the keydb headless Service their URL. An older client treats that name as node 0's address, and hangs on node 0's keys whenever it resolves to more than one keydb pod: with several nodes, or with a shadow.
-- No `/hashRangeMovements` or `/backup` while a move is in progress: they compete with replication for the snapshot slot.
+- No scaling, `/hashRangeMovements` or `/backup` while a move is in progress. Moves are only tested with a fixed cluster size and no degraded nodes, and hash range movements and backups compete with replication for the snapshot slot.
 - **Disk size:** the new disk holds the live data, without what expired. Give it at least 25% headroom, so that it stays under the volume usage alerts (80% and 90%). The old disk's usage overstates the live data when it holds expired keys, so watch the shadow's disk usage during the first pass, and revert PR1 if it would fill up.
 
 ### Procedure

@@ -50,6 +50,8 @@ type ReplicationConfig struct {
 	ReconcileInterval time.Duration
 	// Signals measures the node's load, the Go runtime, request latency and cgroup throttling when nil
 	Signals BrakeSignals
+	// ChunkSize is the most data a snapshot chunk sent to the shadow carries, DefaultStreamingChunkSize when zero
+	ChunkSize int
 
 	// BrakeSchedLatencyThreshold is the scheduler latency p99 above which the brake engages, 10ms when zero
 	BrakeSchedLatencyThreshold time.Duration
@@ -79,6 +81,9 @@ func (c *ReplicationConfig) setDefaults() {
 	}
 	if c.ReconcileInterval == 0 {
 		c.ReconcileInterval = time.Second
+	}
+	if c.ChunkSize == 0 {
+		c.ChunkSize = DefaultStreamingChunkSize
 	}
 }
 
@@ -400,7 +405,7 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 	}
 
 	source := r.s.config.AdvertisedAddress
-	w := &chunkWriter{max: DefaultStreamingChunkSize, send: func(data []byte) error {
+	w := &chunkWriter{max: r.cfg.ChunkSize, send: func(data []byte) error {
 		return stream.Send(&pb.SnapshotChunk{HashRange: hashRange, Data: data, SourceAddress: source})
 	}}
 	var charged int64
