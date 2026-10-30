@@ -129,6 +129,34 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 	return true, nil
 }
 
+// routeUntilStable sends a request with the client's current routing until it no longer fails because the client
+// adopted another node list. A client without a node list waits for the nodes first (see waitForNodes). The first
+// re-route goes at once, every later one waits for the request's backoff first, so that nodes that hand out different
+// lists don't make the request spin.
+func (c *Client) routeUntilStable(ctx context.Context, send func() error) error {
+	if c.ClusterSize() == 0 {
+		if err := c.waitForNodes(ctx); err != nil {
+			return err
+		}
+	}
+	var nextBackoff func() time.Duration
+	for {
+		err := send()
+		if !errors.Is(err, errClusterChanged) {
+			return err
+		}
+		if nextBackoff == nil {
+			nextBackoff = c.getNextBackoffFunc()
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(nextBackoff()):
+		}
+	}
+}
+
 // waitForNodes finds the nodes for a request made while the client has no node list, because its addresses resolved
 // to no node when it was created. It asks the nodes behind them for the list, retrying with backoff until one answers
 // or ctx ends, unless retries are disabled. Every failed attempt it retries counts in
@@ -240,47 +268,26 @@ func (c *Client) nodeClient(nodeID, clusterSize int64) (pb.NodeServiceClient, *g
 	return client, conn, nil
 }
 
-// routeUntilStable sends a request with the client's current routing until it no longer fails because the client
-// adopted another node list. A client without a node list waits for the nodes first (see waitForNodes). The first
-// re-route goes at once, every later one waits for the request's backoff first, so that nodes that hand out different
-// lists don't make the request spin.
-func (c *Client) routeUntilStable(ctx context.Context, send func() error) error {
-	if c.ClusterSize() == 0 {
-		if err := c.waitForNodes(ctx); err != nil {
-			return err
-		}
-	}
-	var nextBackoff func() time.Duration
-	for {
-		err := send()
-		if !errors.Is(err, errClusterChanged) {
-			return err
-		}
-		if nextBackoff == nil {
-			nextBackoff = c.getNextBackoffFunc()
-			continue
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(nextBackoff()):
-		}
-	}
-}
-
-// listIsWrong tells whether a node's answer shows that the client's node list is wrong: the node can't be reached or
-// doesn't answer in time, doesn't own the keys, isn't ready to serve them, or sees a cluster of another size.
-func listIsWrong[R nodeResponse](resp R, err error, clusterSize int64) bool {
+// defaultResolveAddress is the client's resolver unless WithAddressResolver replaces it. It looks the host of address
+// up in DNS and returns every address it resolves to, with the port: every ready pod for a headless Service. An IP
+// address is returned as it is.
+func defaultResolveAddress(ctx context.Context, address string) ([]string, error) {
+	host, port, err := net.SplitHostPort(address)
 	if err != nil {
-		code := status.Code(err)
-		return code == codes.Unavailable || code == codes.DeadlineExceeded
+		return nil, fmt.Errorf("splitting %q into host and port: %w", address, err)
 	}
-	switch resp.GetErrorCode() {
-	case pb.ErrorCode_WRONG_NODE, pb.ErrorCode_NOT_READY:
-		return true
-	default:
-		return resp.GetClusterSize() != clusterSize
+	if host == "" {
+		return []string{address}, nil // gRPC dials it as the local machine
 	}
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("looking up %q: %w", host, err)
+	}
+	resolved := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		resolved = append(resolved, net.JoinHostPort(ip, port))
+	}
+	return resolved, nil
 }
 
 // callNode sends a request to a node until it succeeds, the context is done, or the client adopts another node list.
@@ -366,24 +373,17 @@ func callNode[R nodeResponse](
 	}
 }
 
-// defaultResolveAddress is the client's resolver unless WithAddressResolver replaces it. It looks the host of address
-// up in DNS and returns every address it resolves to, with the port: every ready pod for a headless Service. An IP
-// address is returned as it is.
-func defaultResolveAddress(ctx context.Context, address string) ([]string, error) {
-	host, port, err := net.SplitHostPort(address)
+// listIsWrong tells whether a node's answer shows that the client's node list is wrong: the node can't be reached or
+// doesn't answer in time, doesn't own the keys, isn't ready to serve them, or sees a cluster of another size.
+func listIsWrong[R nodeResponse](resp R, err error, clusterSize int64) bool {
 	if err != nil {
-		return nil, fmt.Errorf("splitting %q into host and port: %w", address, err)
+		code := status.Code(err)
+		return code == codes.Unavailable || code == codes.DeadlineExceeded
 	}
-	if host == "" {
-		return []string{address}, nil // gRPC dials it as the local machine
+	switch resp.GetErrorCode() {
+	case pb.ErrorCode_WRONG_NODE, pb.ErrorCode_NOT_READY:
+		return true
+	default:
+		return resp.GetClusterSize() != clusterSize
 	}
-	ips, err := net.DefaultResolver.LookupHost(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("looking up %q: %w", host, err)
-	}
-	resolved := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		resolved = append(resolved, net.JoinHostPort(ip, port))
-	}
-	return resolved, nil
 }
