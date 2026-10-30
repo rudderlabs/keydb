@@ -77,13 +77,13 @@ func (c *Client) waitForNodes(ctx context.Context) error {
 	}
 }
 
-// discover resolves the discovery addresses and asks every node behind them for the cluster's addresses at once. It
+// discover resolves config.Addresses and asks every node behind them for the cluster's addresses at once. It
 // returns the first list a node answers with. A node that hasn't reloaded its config yet may answer first with an
 // old list: requests then fail again, and the next discovery may hear from another node first.
 func (c *Client) discover(ctx context.Context) ([]string, error) {
-	nodes := c.resolveDiscoveryAddresses(ctx)
+	nodes := c.resolveNodes(ctx)
 	if len(nodes) == 0 {
-		return nil, fmt.Errorf("no node behind %s", strings.Join(c.discoveryAddresses, ","))
+		return nil, fmt.Errorf("no node behind %s", strings.Join(c.config.Addresses, ","))
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // stops the calls still running once a node answered
@@ -110,16 +110,15 @@ func (c *Client) discover(ctx context.Context) ([]string, error) {
 	return nil, errors.Join(errs...)
 }
 
-// resolveDiscoveryAddresses returns the addresses of the nodes behind the discovery addresses, skipping the ones
-// that don't resolve.
-func (c *Client) resolveDiscoveryAddresses(ctx context.Context) []string {
+// resolveNodes returns the addresses of the nodes behind config.Addresses, skipping the ones that don't resolve.
+func (c *Client) resolveNodes(ctx context.Context) []string {
 	ctx, cancel := context.WithTimeout(ctx, addressesTimeout)
 	defer cancel()
 	var nodes []string
-	for _, address := range c.discoveryAddresses {
+	for _, address := range c.config.Addresses {
 		resolved, err := c.resolve(ctx, address)
 		if err != nil {
-			c.logger.Warnn("Resolving a discovery address",
+			c.logger.Warnn("Resolving a configured address",
 				logger.NewStringField("address", address), obskit.Error(err),
 			)
 			continue
@@ -178,13 +177,13 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 	if c.closed.Load() {
 		return false, errClientClosed // never reopen connections after Close
 	}
-	if slices.Equal(addresses, c.config.Addresses) && len(c.pools) == len(addresses) {
+	if slices.Equal(addresses, c.nodeAddresses) && len(c.pools) == len(addresses) {
 		return false, nil
 	}
 
 	dialOpts := c.getGrpcDialOptions()
 	for i, addr := range addresses {
-		if i < len(c.config.Addresses) && c.config.Addresses[i] == addr {
+		if i < len(c.nodeAddresses) && c.nodeAddresses[i] == addr {
 			if _, ok := c.pools[i]; ok {
 				continue
 			}
@@ -209,7 +208,7 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 			}
 		}
 	}
-	for i := len(addresses); i < len(c.config.Addresses) || i < len(c.pools); i++ {
+	for i := len(addresses); i < len(c.nodeAddresses) || i < len(c.pools); i++ {
 		if pool, ok := c.pools[i]; ok {
 			_ = pool.close()
 			delete(c.pools, i)
@@ -217,10 +216,9 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 		}
 	}
 
-	oldClusterSize := c.clusterSize
+	oldClusterSize := int64(len(c.nodeAddresses))
 	newClusterSize := int64(len(addresses))
-	c.config.Addresses = slices.Clone(addresses)
-	c.clusterSize = newClusterSize
+	c.nodeAddresses = slices.Clone(addresses)
 	if newClusterSize != oldClusterSize {
 		c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
 	}
@@ -237,7 +235,7 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 func (c *Client) routingInfo() (*hash.Hash, int64) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.hash, c.clusterSize
+	return c.hash, int64(len(c.nodeAddresses))
 }
 
 // nodeClient returns the next pooled connection to a node, counting the operation. It returns errClusterChanged when
@@ -245,7 +243,7 @@ func (c *Client) routingInfo() (*hash.Hash, int64) {
 func (c *Client) nodeClient(nodeID, clusterSize int64) (pb.NodeServiceClient, *grpc.ClientConn, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.clusterSize != clusterSize {
+	if int64(len(c.nodeAddresses)) != clusterSize {
 		return nil, nil, errClusterChanged
 	}
 	pool, ok := c.pools[int(nodeID)]
@@ -305,7 +303,7 @@ func listIsWrong[R nodeResponse](resp R, err error, clusterSize int64) bool {
 
 // callNode sends a request to a node until it succeeds, the context is done, or the client adopts another node list.
 //   - When the answer shows that the client's node list is wrong (see listIsWrong), the client asks every node behind
-//     the discovery addresses for the list and adopts the first answer. A changed list re-routes the keys at once.
+//     config.Addresses for the list and adopts the first answer. A changed list re-routes the keys at once.
 //   - Every retry takes the next pooled connection and waits for the backoff, without holding the client's lock.
 //     After a NOT_READY answer the wait is capped at notReadyMaxRetryDelay.
 func callNode[R nodeResponse](

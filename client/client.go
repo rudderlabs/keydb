@@ -93,8 +93,9 @@ type Config struct {
 type Client struct {
 	config Config
 
-	// clusterSize is the number of nodes in the cluster
-	clusterSize int64
+	// nodeAddresses is the node list, indexed by node ID: what config.Addresses resolved to, then the list the nodes
+	// answered with. Its length is the cluster size.
+	nodeAddresses []string
 
 	// hash is the hash instance used for consistent hashing
 	hash *hash.Hash
@@ -102,12 +103,10 @@ type Client struct {
 	// pools is a map of node index to gRPC connection pool
 	pools map[int]*connectionPool
 
-	// mu protects pools, clusterSize, hash, config.Addresses and metrics.connectionOps
+	// mu protects nodeAddresses, hash, pools and metrics.connectionOps
 	mu sync.RWMutex
 
-	// discoveryAddresses are the configured addresses, which resolve to the nodes to ask for the cluster's list
-	discoveryAddresses []string
-	// resolve turns a discovery address into the addresses of the nodes behind it
+	// resolve turns one of config.Addresses into the addresses of the nodes behind it
 	resolve func(ctx context.Context, address string) ([]string, error)
 	// closed is true once Close was called, requests still retrying then stop
 	closed atomic.Bool
@@ -200,15 +199,14 @@ func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Op
 		config.ConnectionPoolSize = DefaultConnectionPoolSize
 	}
 
-	discoveryAddresses := slices.Clone(config.Addresses)
-	config.Addresses = nil // the nodes' list, once discovered
+	// read without the lock, so a caller's later edits to its slice mustn't reach it
+	config.Addresses = slices.Clone(config.Addresses)
 
 	client := &Client{
-		discoveryAddresses: discoveryAddresses,
-		resolve:            resolveAddress,
-		config:             config,
-		pools:              make(map[int]*connectionPool),
-		logger:             log,
+		resolve: resolveAddress,
+		config:  config,
+		pools:   make(map[int]*connectionPool),
+		logger:  log,
 	}
 
 	for _, opt := range opts {
@@ -221,7 +219,7 @@ func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Op
 
 	client.initMetrics()
 
-	if addresses := client.resolveDiscoveryAddresses(ctx); len(addresses) > 0 {
+	if addresses := client.resolveNodes(ctx); len(addresses) > 0 {
 		if _, err := client.applyAddresses(addresses); err != nil {
 			_ = client.Close()
 			return nil, err
@@ -277,7 +275,7 @@ func (c *Client) Close() error {
 	}
 
 	c.pools = make(map[int]*connectionPool)
-	c.clusterSize = 0
+	c.nodeAddresses = nil
 
 	return lastErr
 }
@@ -285,7 +283,7 @@ func (c *Client) Close() error {
 func (c *Client) ClusterSize() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return int(c.clusterSize)
+	return len(c.nodeAddresses)
 }
 
 // Get retrieves values for multiple keys
