@@ -23,8 +23,10 @@ import (
 )
 
 const (
-	// addressesTimeout bounds each call made to learn the cluster's addresses
-	addressesTimeout = 5 * time.Second
+	// resolveAddressTimeout bounds the DNS lookups of config.Addresses
+	resolveAddressTimeout = 5 * time.Second
+	// getNodeInfoTimeout bounds each GetNodeInfo call that asks a node for the cluster's addresses
+	getNodeInfoTimeout = 5 * time.Second
 
 	// notReadyMaxRetryDelay caps the wait before retrying a node that answered NOT_READY. A shadow becomes ACTIVE
 	// as soon as its kubelet refreshes the config and a NOT_READY answer is cheap, so this bounds how long a request
@@ -112,7 +114,7 @@ func (c *Client) discover(ctx context.Context) ([]string, error) {
 
 // resolveNodes returns the addresses of the nodes behind config.Addresses, skipping the ones that don't resolve.
 func (c *Client) resolveNodes(ctx context.Context) []string {
-	ctx, cancel := context.WithTimeout(ctx, addressesTimeout)
+	ctx, cancel := context.WithTimeout(ctx, resolveAddressTimeout)
 	defer cancel()
 	var nodes []string
 	for _, address := range c.config.Addresses {
@@ -156,7 +158,7 @@ func (c *Client) askForAddresses(ctx context.Context, address string) ([]string,
 		return nil, fmt.Errorf("creating gRPC client for %s: %w", address, err)
 	}
 	defer func() { _ = conn.Close() }()
-	ctx, cancel := context.WithTimeout(ctx, addressesTimeout)
+	ctx, cancel := context.WithTimeout(ctx, getNodeInfoTimeout)
 	defer cancel()
 	info, err := pb.NewNodeServiceClient(conn).GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
 	if err != nil {

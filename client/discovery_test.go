@@ -585,7 +585,7 @@ func TestDiscoveryResolvesTheNameAgain(t *testing.T) {
 }
 
 // TestDiscoveryAsksEveryPodAtOnce has two pods that never answer: asking one pod after the other would wait
-// addressesTimeout for at least one of them.
+// getNodeInfoTimeout for at least one of them.
 func TestDiscoveryAsksEveryPodAtOnce(t *testing.T) {
 	a0 := freeMockAddress(t)
 	newMockNode(t, a0)
@@ -594,7 +594,7 @@ func TestDiscoveryAsksEveryPodAtOnce(t *testing.T) {
 	addresses, err := c.discover(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, []string{a0}, addresses)
-	require.Less(t, time.Since(start), addressesTimeout/2, "a pod that doesn't answer must not hold up the others")
+	require.Less(t, time.Since(start), getNodeInfoTimeout/2, "a pod that doesn't answer must not hold up the others")
 }
 
 func TestNoDiscoveryOnOtherErrors(t *testing.T) {
