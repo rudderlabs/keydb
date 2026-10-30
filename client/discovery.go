@@ -130,27 +130,6 @@ func (c *Client) resolveNodes(ctx context.Context) []string {
 	return nodes
 }
 
-// resolveAddress looks the host of address up in DNS and returns every address it resolves to, with the port: every
-// ready pod for a headless Service. An IP address is returned as it is.
-func resolveAddress(ctx context.Context, address string) ([]string, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, fmt.Errorf("splitting %q into host and port: %w", address, err)
-	}
-	if host == "" {
-		return []string{address}, nil // gRPC dials it as the local machine
-	}
-	ips, err := net.DefaultResolver.LookupHost(ctx, host)
-	if err != nil {
-		return nil, fmt.Errorf("looking up %q: %w", host, err)
-	}
-	resolved := make([]string, 0, len(ips))
-	for _, ip := range ips {
-		resolved = append(resolved, net.JoinHostPort(ip, port))
-	}
-	return resolved, nil
-}
-
 // askForAddresses asks the node at address for the cluster's addresses on a fresh connection.
 func (c *Client) askForAddresses(ctx context.Context, address string) ([]string, error) {
 	conn, err := grpc.NewClient(address, c.getGrpcDialOptions()...)
@@ -385,4 +364,26 @@ func callNode[R nodeResponse](
 		case <-time.After(retryDelay):
 		}
 	}
+}
+
+// defaultResolveAddress is the client's resolver unless WithAddressResolver replaces it. It looks the host of address
+// up in DNS and returns every address it resolves to, with the port: every ready pod for a headless Service. An IP
+// address is returned as it is.
+func defaultResolveAddress(ctx context.Context, address string) ([]string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("splitting %q into host and port: %w", address, err)
+	}
+	if host == "" {
+		return []string{address}, nil // gRPC dials it as the local machine
+	}
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("looking up %q: %w", host, err)
+	}
+	resolved := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		resolved = append(resolved, net.JoinHostPort(ip, port))
+	}
+	return resolved, nil
 }

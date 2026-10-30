@@ -716,24 +716,24 @@ func TestMoveSelfHeals(t *testing.T) {
 		"once every pod has the new config, a discovery and a retry are all it takes")
 }
 
-func TestResolveAddress(t *testing.T) {
+func TestDefaultResolveAddress(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resolved, err := resolveAddress(ctx, "127.0.0.1:1234")
+	resolved, err := defaultResolveAddress(ctx, "127.0.0.1:1234")
 	require.NoError(t, err)
 	require.Equal(t, []string{"127.0.0.1:1234"}, resolved, "an IP address is used as it is")
 
-	resolved, err = resolveAddress(ctx, ":1234")
+	resolved, err = defaultResolveAddress(ctx, ":1234")
 	require.NoError(t, err)
 	require.Equal(t, []string{":1234"}, resolved, "gRPC dials an empty host as the local machine")
 
-	resolved, err = resolveAddress(ctx, "localhost:1234")
+	resolved, err = defaultResolveAddress(ctx, "localhost:1234")
 	require.NoError(t, err)
 	require.Contains(t, resolved, "127.0.0.1:1234", "a name gives every address it resolves to, with the port")
 
-	_, err = resolveAddress(ctx, "keydb.test.invalid:1234")
+	_, err = defaultResolveAddress(ctx, "keydb.test.invalid:1234")
 	require.Error(t, err)
-	_, err = resolveAddress(ctx, "no-port")
+	_, err = defaultResolveAddress(ctx, "no-port")
 	require.Error(t, err)
 }

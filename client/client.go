@@ -213,7 +213,7 @@ func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Op
 	config.Addresses = slices.Clone(config.Addresses)
 
 	client := &Client{
-		resolve: resolveAddress,
+		resolve: defaultResolveAddress,
 		config:  config,
 		pools:   make(map[int]*connectionPool),
 		logger:  log,
