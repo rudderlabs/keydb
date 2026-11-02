@@ -520,14 +520,14 @@ type StreamOptions struct {
 // StreamSnapshot writes the entries of one hash range with a version above since to w, as LoadSnapshot reads them.
 // Unlike CreateSnapshots it reads the range with a single iterator and writes small batches as it goes, so it never
 // holds more than a batch in memory, and a pass over unchanged data allocates next to nothing.
-// Expired keys are skipped. It returns the highest version written and whether anything was written.
+// Expired keys are skipped. It returns the highest version written, 0 when nothing was.
 func (c *Cache) StreamSnapshot(
 	ctx context.Context, hashRange int64, since uint64, w io.Writer, opts StreamOptions,
-) (uint64, bool, error) {
+) (uint64, error) {
 	c.snapshottingLock.Lock()
 	if c.snapshotting {
 		c.snapshottingLock.Unlock()
-		return 0, false, ErrSnapshotInProgress
+		return 0, ErrSnapshotInProgress
 	}
 	c.snapshotting = true
 	c.snapshottingLock.Unlock()
@@ -552,7 +552,7 @@ func (c *Cache) StreamSnapshot(
 		lw.closer = zw
 	}
 
-	maxVersion, hasData, err := c.streamRange(ctx, hashRange, since, lw, batchSize, opts.Wait)
+	maxVersion, err := c.streamRange(ctx, hashRange, since, lw, batchSize, opts.Wait)
 	if lw.closer != nil {
 		// flushes the zstd frame, the caller's writer is left open
 		if closeErr := lw.closer.Close(); err == nil && closeErr != nil {
@@ -560,15 +560,15 @@ func (c *Cache) StreamSnapshot(
 		}
 	}
 	if err != nil {
-		return 0, false, fmt.Errorf("streaming hash range %d: %w", hashRange, err)
+		return 0, fmt.Errorf("streaming hash range %d: %w", hashRange, err)
 	}
-	return maxVersion, hasData, nil
+	return maxVersion, nil
 }
 
 func (c *Cache) streamRange(
 	ctx context.Context, hashRange int64, since uint64, w *lockedWriter, batchSize int,
 	wait func(ctx context.Context, n int) error,
-) (uint64, bool, error) {
+) (uint64, error) {
 	txn := c.cache.NewTransaction(false)
 	defer txn.Discard()
 	iterOpts := badger.DefaultIteratorOptions
@@ -580,7 +580,6 @@ func (c *Cache) streamRange(
 
 	var (
 		maxVersion uint64
-		hasData    bool
 		batch      = &pb.KVList{}
 		batchBytes int
 		now        = uint64(time.Now().Unix())
@@ -604,7 +603,7 @@ func (c *Cache) streamRange(
 
 	for it.Rewind(); it.Valid(); it.Next() {
 		if err := ctx.Err(); err != nil {
-			return 0, false, err
+			return 0, err
 		}
 		item := it.Item()
 		if item.IsDeletedOrExpired() || (item.ExpiresAt() > 0 && item.ExpiresAt() <= now) {
@@ -612,7 +611,7 @@ func (c *Cache) streamRange(
 		}
 		value, err := item.ValueCopy(nil)
 		if err != nil {
-			return 0, false, fmt.Errorf("reading value: %w", err)
+			return 0, fmt.Errorf("reading value: %w", err)
 		}
 		kv := &pb.KV{
 			Key:       item.KeyCopy(nil),
@@ -624,17 +623,16 @@ func (c *Cache) streamRange(
 		batch.Kv = append(batch.Kv, kv)
 		batchBytes += len(kv.Key) + len(kv.Value) + 24
 		maxVersion = max(maxVersion, kv.Version)
-		hasData = true
 		if batchBytes >= batchSize {
 			if err := flush(); err != nil {
-				return 0, false, err
+				return 0, err
 			}
 		}
 	}
 	if err := flush(); err != nil {
-		return 0, false, err
+		return 0, err
 	}
-	return maxVersion, hasData, nil
+	return maxVersion, nil
 }
 
 // LoadSnapshot reads the cache contents from the provided reader

@@ -1,9 +1,11 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,10 +36,9 @@ const (
 
 // ReplicationConfig configures how an active node fills its shadow.
 type ReplicationConfig struct {
-	// MaxBytesPerSecond returns the byte budget ceiling, DefaultReplicationMaxBytesPerSecond when nil
+	// MaxBytesPerSecond returns the byte budget ceiling, DefaultReplicationMaxBytesPerSecond when nil.
+	// 0 or less pauses the copy without stopping the job.
 	MaxBytesPerSecond func() int64
-	// Paused returns true to pause the copy without stopping the job, never paused when nil
-	Paused func() bool
 	// PauseBetweenPasses is the pause between two passes, 5s when zero
 	// A pass copies every hash range the node owns to the shadow: all of it at first, then only what changed.
 	PauseBetweenPasses time.Duration
@@ -47,25 +48,11 @@ type ReplicationConfig struct {
 	ReconcileInterval time.Duration
 	// Signals measures the node's load, the Go runtime, request latency and cgroup throttling when nil
 	Signals BrakeSignals
-	// ChunkSize is the most data a snapshot chunk sent to the shadow carries, DefaultStreamingChunkSize when zero
-	ChunkSize int
-
-	// BrakeSchedLatencyThreshold is the scheduler latency p99 above which the brake engages, 10ms when zero
-	BrakeSchedLatencyThreshold time.Duration
-	// BrakeRequestLatencyFactor is how many times the baseline Get/Put latency engages the brake, 2 when zero
-	BrakeRequestLatencyFactor float64
-	// BrakeRequestLatencyFloor is the Get/Put latency below which the brake never engages, 5ms when zero
-	BrakeRequestLatencyFloor time.Duration
-	// BrakeThrottledRatioThreshold is the cgroup throttled ratio above which the brake engages, 0.1 when zero
-	BrakeThrottledRatioThreshold float64
 }
 
 func (c *ReplicationConfig) setDefaults() {
 	if c.MaxBytesPerSecond == nil {
 		c.MaxBytesPerSecond = func() int64 { return DefaultReplicationMaxBytesPerSecond }
-	}
-	if c.Paused == nil {
-		c.Paused = func() bool { return false }
 	}
 	if c.PauseBetweenPasses == 0 {
 		c.PauseBetweenPasses = 5 * time.Second
@@ -76,15 +63,11 @@ func (c *ReplicationConfig) setDefaults() {
 	if c.ReconcileInterval == 0 {
 		c.ReconcileInterval = time.Second
 	}
-	if c.ChunkSize == 0 {
-		c.ChunkSize = DefaultStreamingChunkSize
-	}
 }
 
 // ReplicationStatus is what GET /replication/status returns.
 // Byte counts are what the copy read from the cache and charged to the budget, before compression.
 type ReplicationStatus struct {
-	Role          string `json:"role"`
 	ShadowAddress string `json:"shadowAddress"`
 	// State is "running" while this node fills a shadow, "shadow" on a shadow, and "idle" otherwise
 	State                  string    `json:"state"`
@@ -97,7 +80,6 @@ type ReplicationStatus struct {
 	LastPassEndedAt        time.Time `json:"lastPassEndedAt"`
 	LastPassDuration       string    `json:"lastPassDuration"`
 	LastPassBytes          int64     `json:"lastPassBytes"`
-	LastPassRanges         int       `json:"lastPassRanges"`
 	// GapSeconds is how much the shadow may lack now: the time since the start of the last completed pass.
 	// -1 before the first pass.
 	GapSeconds float64 `json:"gapSeconds"`
@@ -113,17 +95,19 @@ type ReplicationStatus struct {
 // replicator fills the node's shadow, if it has one. It re-reads the shadow list periodically and runs a job
 // that sends a full pass of every hash range the node owns, then incremental passes back to back.
 type replicator struct {
-	s       *Service
-	cfg     ReplicationConfig
-	budget  *budget
-	signals BrakeSignals
+	s      *Service
+	cfg    ReplicationConfig
+	budget *budget
+	// sourceForgotten is true once this node, active, holds no shadow source marker. Only reconcile uses it.
+	sourceForgotten bool
 
 	// mu protects the fields below
-	mu       sync.Mutex
-	target   string
-	cancel   context.CancelFunc
-	done     chan struct{}
-	progress replicationProgress
+	mu     sync.Mutex
+	target string
+	cancel context.CancelFunc
+	done   chan struct{}
+	// progress is the status of the running job, without the fields status computes
+	progress ReplicationStatus
 
 	metrics struct {
 		gap          stats.Gauge
@@ -134,39 +118,13 @@ type replicator struct {
 	}
 }
 
-// replicationProgress is the job's state for the current target
-type replicationProgress struct {
-	passesCompleted  int64
-	currentPassStart time.Time
-	currentPassDone  int
-	currentPassTotal int
-	currentPassBytes int64
-	lastPassStart    time.Time
-	lastPassEnd      time.Time
-	lastPassBytes    int64
-	lastPassRanges   int
-	lastError        string
-}
-
 func newReplicator(s *Service) *replicator {
 	cfg := s.config.Replication
 	cfg.setDefaults()
-	r := &replicator{
-		s:   s,
-		cfg: cfg,
-		budget: newBudget(budgetConfig{
-			max:                     cfg.MaxBytesPerSecond,
-			paused:                  cfg.Paused,
-			schedLatencyThreshold:   cfg.BrakeSchedLatencyThreshold,
-			requestLatencyFactor:    cfg.BrakeRequestLatencyFactor,
-			requestLatencyFloor:     cfg.BrakeRequestLatencyFloor,
-			throttledRatioThreshold: cfg.BrakeThrottledRatioThreshold,
-		}),
-		signals: cfg.Signals,
+	if cfg.Signals == nil {
+		cfg.Signals = newRuntimeSignals(s.latency.meanSinceLast)
 	}
-	if r.signals == nil {
-		r.signals = newRuntimeSignals(s.latency.meanSinceLast, defaultCgroupCPUStatFile)
-	}
+	r := &replicator{s: s, cfg: cfg, budget: newBudget(cfg.MaxBytesPerSecond)}
 	tags := stats.Tags{"nodeID": strconv.FormatInt(s.config.NodeID, 10)}
 	r.metrics.gap = s.stats.NewTaggedStat("keydb_replication_gap_seconds", stats.GaugeType, tags)
 	r.metrics.gap.Gauge(-1) // no pass is done yet
@@ -193,15 +151,14 @@ func (r *replicator) run(ctx context.Context) {
 }
 
 func (r *replicator) reconcile(ctx context.Context) {
-	r.s.forgetShadowSource()
+	if !r.sourceForgotten {
+		r.sourceForgotten = r.s.forgetShadowSource()
+	}
 
 	target := ""
 	// without its own address a node can't tell whether it is the shadow listed for its index
-	if r.s.config.AdvertisedAddress != "" && r.s.role() == pb.NodeRole_ACTIVE {
+	if r.s.config.AdvertisedAddress != "" && !r.s.isShadow() {
 		target = r.s.shadowAddress()
-	}
-	if target == r.s.config.AdvertisedAddress {
-		target = ""
 	}
 	r.mu.Lock()
 	current := r.target
@@ -216,7 +173,7 @@ func (r *replicator) switchTarget(ctx context.Context, target string) {
 	r.mu.Lock()
 	cancel, done := r.cancel, r.done
 	r.target, r.cancel, r.done = "", nil, nil
-	r.progress = replicationProgress{} // a stopped copy reports nothing, not even while it winds down
+	r.progress = ReplicationStatus{} // a stopped copy reports nothing, not even while it winds down
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -233,7 +190,6 @@ func (r *replicator) switchTarget(ctx context.Context, target string) {
 	jobDone := make(chan struct{})
 	r.mu.Lock()
 	r.target, r.cancel, r.done = target, jobCancel, jobDone
-	r.progress = replicationProgress{}
 	r.mu.Unlock()
 	r.s.logger.Infon("Replication started", logger.NewStringField("shadowAddress", target))
 	go func() {
@@ -255,76 +211,73 @@ func (r *replicator) job(ctx context.Context, target string) {
 
 	// take the request latency baseline before copying anything, from this job's own window
 	r.budget.resetBaseline()
-	_ = r.signals.Sample()
+	_ = r.cfg.Signals.Sample()
 	if !sleepCtx(ctx, r.cfg.BrakeInterval) {
 		return
 	}
-	r.budget.tick(r.signals.Sample())
-	bytesPerSecond, _, _ := r.budget.current()
-	r.metrics.budget.Gauge(bytesPerSecond)
+	r.brake(log)
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	wg.Go(func() { r.brakeLoop(ctx, log) })
+	wg.Go(func() {
+		ticker := time.NewTicker(r.cfg.BrakeInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.brake(log)
+			}
+		}
+	})
 
 	for ctx.Err() == nil {
 		r.pass(ctx, shadow, log)
-		r.recordGap()
 		if !sleepCtx(ctx, r.passDelay()) {
 			return
 		}
 	}
 }
 
-// brakeLoop samples the node's load, adjusts the byte budget and publishes the gap.
-func (r *replicator) brakeLoop(ctx context.Context, log logger.Logger) {
-	ticker := time.NewTicker(r.cfg.BrakeInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		if reason := r.budget.tick(r.signals.Sample()); reason != "" {
-			for single := range strings.SplitSeq(reason, ", ") {
-				r.s.stats.NewTaggedStat("keydb_replication_brake_events_total", stats.CountType, stats.Tags{
-					"nodeID": strconv.FormatInt(r.s.config.NodeID, 10),
-					"reason": single,
-				}).Increment()
-			}
-			bytesPerSecond, _, _ := r.budget.current()
-			log.Warnn("Replication brake engaged",
-				logger.NewStringField("reason", reason),
-				logger.NewIntField("budgetBytesPerSecond", bytesPerSecond),
-			)
-		}
-		bytesPerSecond, _, _ := r.budget.current()
-		r.metrics.budget.Gauge(bytesPerSecond)
-		r.recordGap()
+// brake samples the node's load, adjusts the byte budget, and publishes the budget and the gap.
+func (r *replicator) brake(log logger.Logger) {
+	reasons := r.budget.tick(r.cfg.Signals.Sample())
+	status := r.status()
+	r.metrics.budget.Gauge(status.BudgetBytesPerSecond)
+	r.metrics.gap.Gauge(status.GapSeconds)
+	if len(reasons) == 0 {
+		return
 	}
+	for _, reason := range reasons {
+		r.s.stats.NewTaggedStat("keydb_replication_brake_events_total", stats.CountType, stats.Tags{
+			"nodeID": strconv.FormatInt(r.s.config.NodeID, 10),
+			"reason": reason,
+		}).Increment()
+	}
+	log.Warnn("Replication brake engaged",
+		logger.NewStringField("reason", strings.Join(reasons, ", ")),
+		logger.NewIntField("budgetBytesPerSecond", status.BudgetBytesPerSecond),
+	)
 }
 
 // pass sends every hash range the node owns, retrying a range until it is sent or ctx is done.
 func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log logger.Logger) {
 	r.s.mu.RLock() // the hasher is swapped under the write lock when the degraded nodes change
-	ranges := make([]int64, 0)
-	for hashRange := range r.s.getCurrentRanges() {
-		ranges = append(ranges, hashRange)
-	}
+	ranges := slices.Sorted(maps.Keys(r.s.getCurrentRanges()))
 	r.s.mu.RUnlock()
-	slices.Sort(ranges)
 
 	start := r.s.now()
-	r.update(func(p *replicationProgress) {
-		p.currentPassStart, p.currentPassDone, p.currentPassTotal, p.currentPassBytes = start, 0, len(ranges), 0
+	r.update(func(p *ReplicationStatus) {
+		p.CurrentPassStartedAt, p.CurrentPassRangesDone, p.CurrentPassRangesTotal = start, 0, len(ranges)
+		p.CurrentPassBytes = 0
 	})
 	r.s.replicating.Store(true)
 	defer r.s.replicating.Store(false)
 
 	var passBytes int64
 	for i, hashRange := range ranges {
-		for attempt := 0; ; attempt++ {
+		for failures := 0; ; {
 			// a paused or fully braked copy must not even scan: wait before opening the range
 			if err := r.budget.waitNonZero(ctx); err != nil {
 				return
@@ -338,15 +291,14 @@ func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log 
 				return
 			}
 			if errors.Is(err, errBudgetPaused) {
-				// the range was given up so as not to hold it open while paused, it starts over once resumed
-				attempt = -1
-				continue
+				continue // the range was given up so as not to hold it open while paused, it starts over once resumed
 			}
 			r.recordError(err)
-			delay := min(time.Second<<min(attempt, 5), replicationMaxRetryDelay)
+			delay := min(time.Second<<min(failures, 5), replicationMaxRetryDelay)
+			failures++
 			log.Warnn("Sending hash range to the shadow",
 				logger.NewIntField("hashRange", hashRange),
-				logger.NewIntField("attempt", int64(attempt+1)),
+				logger.NewIntField("attempt", int64(failures)),
 				logger.NewDurationField("retryDelay", delay),
 				obskit.Error(err),
 			)
@@ -354,16 +306,14 @@ func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log 
 				return
 			}
 		}
-		r.update(func(p *replicationProgress) { p.currentPassDone = i + 1 })
+		r.update(func(p *ReplicationStatus) { p.CurrentPassRangesDone = i + 1 })
 	}
 
 	end := r.s.now()
 	r.metrics.passDuration.SendTiming(end.Sub(start))
-	r.update(func(p *replicationProgress) {
-		p.passesCompleted++
-		p.lastPassStart, p.lastPassEnd = start, end
-		p.lastPassBytes, p.lastPassRanges = passBytes, len(ranges)
-		p.lastError = ""
+	r.update(func(p *ReplicationStatus) {
+		p.PassesCompleted++
+		p.LastPassStartedAt, p.LastPassEndedAt, p.LastPassBytes, p.LastError = start, end, passBytes, ""
 	})
 	log.Infon("Replication pass completed",
 		logger.NewIntField("ranges", int64(len(ranges))),
@@ -388,11 +338,16 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 	}
 
 	source := r.s.config.AdvertisedAddress
-	w := &chunkWriter{max: r.cfg.ChunkSize, send: func(data []byte) error {
-		return stream.Send(&pb.SnapshotChunk{HashRange: hashRange, Data: data, SourceAddress: source})
-	}}
+	send := writerFunc(func(data []byte) (int, error) {
+		// gRPC may read a message after Send returns, and the writer reuses its buffer
+		chunk := &pb.SnapshotChunk{HashRange: hashRange, Data: bytes.Clone(data), SourceAddress: source}
+		if err := stream.Send(chunk); err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	})
 	var charged int64
-	maxVersion, _, err := r.s.cache.StreamSnapshot(ctx, hashRange, since.SinceTimestamp, w, badger.StreamOptions{
+	maxVersion, err := r.s.cache.StreamSnapshot(ctx, hashRange, since.SinceTimestamp, send, badger.StreamOptions{
 		CompressionLevel: replicationCompressionLevel,
 		BatchSize:        replicationBatchSize,
 		Wait: func(ctx context.Context, n int) error {
@@ -401,15 +356,12 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 			}
 			charged += int64(n)
 			r.metrics.bytes.Count(n)
-			r.update(func(p *replicationProgress) { p.currentPassBytes += int64(n) })
+			r.update(func(p *ReplicationStatus) { p.CurrentPassBytes += int64(n) })
 			return nil
 		},
 	})
 	if err != nil {
 		return 0, fmt.Errorf("streaming hash range %d: %w", hashRange, err)
-	}
-	if err := w.flush(); err != nil {
-		return 0, fmt.Errorf("sending the last data chunk: %w", err)
 	}
 	if err := stream.Send(&pb.SnapshotChunk{
 		HashRange: hashRange, IsLast: true, Timestamp: maxVersion, SourceAddress: source,
@@ -426,36 +378,11 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 	return charged, nil
 }
 
-// gaps returns the gap and the worst-case gap at the current pace, both -1 before the first pass.
-func gaps(now time.Time, p replicationProgress, pauseBetweenPasses time.Duration) (gap, worstCaseGap time.Duration) {
-	if p.passesCompleted == 0 {
-		return -1, -1
-	}
-	return now.Sub(p.lastPassStart), 2*p.lastPassEnd.Sub(p.lastPassStart) + pauseBetweenPasses
-}
-
-// seconds returns d in seconds, and -1 for the -1 of gaps.
-func seconds(d time.Duration) float64 {
-	if d < 0 {
-		return -1
-	}
-	return d.Seconds()
-}
-
-// recordGap publishes the gap at the current pace.
-func (r *replicator) recordGap() {
-	r.mu.Lock()
-	p := r.progress
-	r.mu.Unlock()
-	gap, _ := gaps(r.s.now(), p, r.passDelay())
-	r.metrics.gap.Gauge(seconds(gap))
-}
-
 // passDelay is the pause before the next pass. It grows as the brake lowers the budget: an incremental pass scans
 // every table written since the last one even when it sends little, so the brake has to space passes out too.
 func (r *replicator) passDelay() time.Duration {
 	bytesPerSecond, _, _ := r.budget.current()
-	maxBytes := r.budget.cfg.max()
+	maxBytes := r.budget.max()
 	if bytesPerSecond <= 0 {
 		return maxPassDelay
 	}
@@ -468,7 +395,7 @@ func (r *replicator) passDelay() time.Duration {
 
 // update changes the progress of the running job. A job that is stopping changes nothing: its target is already
 // cleared, and the next job only starts once it has ended.
-func (r *replicator) update(f func(p *replicationProgress)) {
+func (r *replicator) update(f func(p *ReplicationStatus)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.target == "" {
@@ -479,46 +406,31 @@ func (r *replicator) update(f func(p *replicationProgress)) {
 
 func (r *replicator) recordError(err error) {
 	r.metrics.errors.Increment()
-	r.update(func(p *replicationProgress) { p.lastError = err.Error() })
+	r.update(func(p *ReplicationStatus) { p.LastError = err.Error() })
 }
 
 // status returns a snapshot of the replication state.
 func (r *replicator) status() ReplicationStatus {
 	r.mu.Lock()
-	target, p := r.target, r.progress
+	status := r.progress
+	status.ShadowAddress = r.target
 	r.mu.Unlock()
 
-	role := r.s.role()
-	status := ReplicationStatus{
-		Role:                   role.String(),
-		ShadowAddress:          target,
-		State:                  "idle",
-		PassesCompleted:        p.passesCompleted,
-		CurrentPassStartedAt:   p.currentPassStart,
-		CurrentPassRangesDone:  p.currentPassDone,
-		CurrentPassRangesTotal: p.currentPassTotal,
-		CurrentPassBytes:       p.currentPassBytes,
-		LastPassStartedAt:      p.lastPassStart,
-		LastPassEndedAt:        p.lastPassEnd,
-		LastPassBytes:          p.lastPassBytes,
-		LastPassRanges:         p.lastPassRanges,
-		GapSeconds:             -1,
-		WorstCaseGapSeconds:    -1,
-		LastError:              p.lastError,
-	}
-	if role == pb.NodeRole_SHADOW {
+	status.State, status.GapSeconds, status.WorstCaseGapSeconds = "idle", -1, -1
+	if r.s.isShadow() {
 		// a shadow only receives: the copy and its budget live on the active pod
 		status.State = "shadow"
 		return status
 	}
-	if target != "" {
+	if status.ShadowAddress != "" {
 		status.State = "running"
 	}
-	if !p.lastPassEnd.IsZero() {
-		status.LastPassDuration = p.lastPassEnd.Sub(p.lastPassStart).String()
+	if status.PassesCompleted > 0 {
+		lastPass := status.LastPassEndedAt.Sub(status.LastPassStartedAt)
+		status.LastPassDuration = lastPass.String()
+		status.GapSeconds = r.s.now().Sub(status.LastPassStartedAt).Seconds()
+		status.WorstCaseGapSeconds = (2*lastPass + r.passDelay()).Seconds()
 	}
-	gap, worstCaseGap := gaps(r.s.now(), p, r.passDelay())
-	status.GapSeconds, status.WorstCaseGapSeconds = seconds(gap), seconds(worstCaseGap)
 	status.BudgetBytesPerSecond, status.BrakeEngaged, status.BrakeReason = r.budget.current()
 	return status
 }
@@ -528,36 +440,10 @@ func (s *Service) ReplicationStatus() ReplicationStatus {
 	return s.replication.status()
 }
 
-// chunkWriter sends what is written in chunks of at most max bytes.
-type chunkWriter struct {
-	send func(data []byte) error
-	max  int
-	buf  []byte
-}
+// writerFunc is an io.Writer that calls itself
+type writerFunc func(p []byte) (int, error)
 
-func (w *chunkWriter) Write(p []byte) (int, error) {
-	w.buf = append(w.buf, p...)
-	for len(w.buf) >= w.max {
-		chunk, rest := w.buf[:w.max:w.max], w.buf[w.max:]
-		if err := w.send(chunk); err != nil {
-			return 0, err
-		}
-		// a message handed to gRPC must not change afterwards, so the rest goes to a new buffer
-		w.buf = append([]byte(nil), rest...)
-	}
-	return len(p), nil
-}
-
-func (w *chunkWriter) flush() error {
-	if len(w.buf) == 0 {
-		return nil
-	}
-	if err := w.send(w.buf); err != nil {
-		return err
-	}
-	w.buf = nil
-	return nil
-}
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // sleepCtx sleeps for d and returns false if ctx is done first.
 func sleepCtx(ctx context.Context, d time.Duration) bool {

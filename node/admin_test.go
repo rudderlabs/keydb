@@ -31,7 +31,6 @@ func TestAdminReplicationStatus(t *testing.T) {
 		require.NoError(t, err)
 		var status ReplicationStatus
 		require.NoError(t, jsonrs.Unmarshal(body, &status))
-		require.Equal(t, "ACTIVE", status.Role)
 		require.Equal(t, "idle", status.State)
 		require.EqualValues(t, -1, status.GapSeconds)
 	})
@@ -68,7 +67,6 @@ func TestAdminReplicationStatusWhileRunning(t *testing.T) {
 	// the field names are what the runbook tells people to read, so they are checked as JSON, not through the struct
 	var status map[string]any
 	require.NoError(t, jsonrs.Unmarshal(body, &status))
-	require.Equal(t, "ACTIVE", status["role"])
 	require.Equal(t, "running", status["state"])
 	require.Equal(t, p.shadowAddress, status["shadowAddress"])
 	for _, key := range []string{

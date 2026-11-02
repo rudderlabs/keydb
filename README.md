@@ -566,7 +566,7 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
 - **Load:** the copy never starves the serving node:
   - one stream goroutine, one range at a time, and zstd level 1;
   - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s), counted on the data read from the cache, before compression;
-  - an automatic brake that halves the budget, down to a pause, whenever Go scheduler latency, the node's own Get/Put latency or cgroup CPU throttling crosses its threshold, and raises it again in steps once healthy. Get/Put latency is compared with a baseline taken from the first sample with traffic of each job, and never counts below an absolute floor. Throttling is the share of CPU periods in which the pod was throttled, so it only ever fires for a pod with a CPU limit. A lower budget also spaces passes out, because an incremental pass still scans every table written since the previous one;
+  - an automatic brake that halves the budget, down to a pause, whenever the Go scheduler latency p99 goes over 10ms or the node's own Get/Put latency over twice its baseline (and 5ms), and raises it again in steps once healthy. The baseline is taken before each job starts copying. CPU throttling shows in both. A lower budget also spaces passes out, because an incremental pass still scans every table written since the previous one;
   - a paused or fully braked copy stops at its next batch or range, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
   - garbage collection skips its runs while a pass is in progress, and never runs on a shadow.
 - **Gap:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends, and peaks at two pass durations plus the pause between passes, the worst-case gap. A switch at a given moment loses at most the gap at that moment. keydb doesn't judge whether a gap is small enough: whoever merges PR2 decides, case by case.
@@ -642,15 +642,8 @@ Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV
 | `shadowNodeAddresses` | empty | yes |
 | `adminPort` | `8080` | no |
 | `replication.maxBytesPerSecond` | `33554432` (32 MiB) | yes |
-| `replication.paused` | `false` | yes |
-| `replication.pauseBetweenPasses` | `5s` | no |
-| `replication.brakeInterval` | `5s` | no |
-| `replication.brake.schedLatencyThreshold` | `10ms` | no |
-| `replication.brake.requestLatencyFactor` | `2` | no |
-| `replication.brake.requestLatencyFloor` | `5ms` | no |
-| `replication.brake.throttledRatioThreshold` | `0.1` | no |
 
-`replication.maxBytesPerSecond` and `replication.paused` can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. `maxBytesPerSecond` is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0, which pauses the copy, and the status then gives `maxBytesPerSecond is not positive` as the brake reason. The brake always works below the configured ceiling.
+`replication.maxBytesPerSecond` can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. Set it to `0` to pause the copy; the status then gives `paused: maxBytesPerSecond is not positive` as the brake reason. It is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0 and pauses the copy too. The brake always works below the configured ceiling.
 
 ### Metrics
 

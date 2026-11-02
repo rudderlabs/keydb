@@ -1,14 +1,11 @@
 package node
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"math"
-	"os"
 	"runtime/metrics"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,8 +19,14 @@ import (
 const (
 	// minBudgetBytesPerSecond is the smallest budget the brake keeps, below it the copy pauses
 	minBudgetBytesPerSecond = bytesize.MB
-	// defaultCgroupCPUStatFile is where cgroup v2 reports CPU throttling
-	defaultCgroupCPUStatFile = "/sys/fs/cgroup/cpu.stat"
+	// brakeSchedLatency is the scheduler latency p99 above which the brake engages
+	brakeSchedLatency = 10 * time.Millisecond
+	// brakeRequestLatencyFactor is how many times the baseline Get/Put latency engages the brake
+	brakeRequestLatencyFactor = 2
+	// brakeRequestLatencyFloor is the Get/Put latency below which the brake never engages
+	brakeRequestLatencyFloor = 5 * time.Millisecond
+	// healthySamplesToGrow is how many healthy samples in a row raise the budget by a step
+	healthySamplesToGrow = 3
 	// pausedPollInterval is how often a paused Wait checks whether it may continue
 	pausedPollInterval = 200 * time.Millisecond
 	// defaultMaxPausedWait is how long a Wait stays paused before giving up its batch, so that a long pause doesn't
@@ -40,9 +43,6 @@ type BrakeSample struct {
 	SchedLatencyP99 time.Duration
 	// RequestLatency is the mean Get and Put latency
 	RequestLatency time.Duration
-	// ThrottledRatio is the fraction of the cgroup's CPU periods in which it was throttled. It stays at 0 without a
-	// CPU limit, since a cgroup without a quota is never throttled.
-	ThrottledRatio float64
 }
 
 // BrakeSignals measures how loaded the node is. Each call returns the signals since the previous call.
@@ -50,80 +50,44 @@ type BrakeSignals interface {
 	Sample() BrakeSample
 }
 
-type budgetConfig struct {
-	// max is the highest budget in bytes per second, it can change at any time
-	max func() int64
-	// paused stops the copy altogether, it can change at any time
-	paused func() bool
-
-	schedLatencyThreshold   time.Duration // 10ms when zero
-	requestLatencyFactor    float64       // 2 when zero
-	requestLatencyFloor     time.Duration // 5ms when zero, request latency below it never counts as load
-	throttledRatioThreshold float64       // 0.1 when zero
-	healthySamplesToGrow    int           // 3 when zero
-	maxPausedWait           time.Duration // defaultMaxPausedWait when zero
-}
-
 // budget is the byte budget of the replication job. It halves on every sample that shows the node under load,
 // down to a pause, and grows back in steps once the node is healthy again.
 type budget struct {
-	cfg budgetConfig
+	// max is the highest budget in bytes per second. It can change at any time, and 0 or less pauses the copy.
+	max func() int64
+	// maxPausedWait is how long a Wait stays paused before giving up its batch
+	maxPausedWait time.Duration
 
 	mu          sync.Mutex
 	budgetBytes int64
-	baseline    time.Duration
-	baselineSet bool
+	baseline    time.Duration // 0 until a sample with traffic
 	healthy     int
 	reason      string
 	limiter     *rate.Limiter
 }
 
-func newBudget(cfg budgetConfig) *budget {
-	if cfg.schedLatencyThreshold == 0 {
-		cfg.schedLatencyThreshold = 10 * time.Millisecond
-	}
-	if cfg.requestLatencyFactor == 0 {
-		cfg.requestLatencyFactor = 2
-	}
-	if cfg.requestLatencyFloor == 0 {
-		cfg.requestLatencyFloor = 5 * time.Millisecond
-	}
-	if cfg.throttledRatioThreshold == 0 {
-		cfg.throttledRatioThreshold = 0.1
-	}
-	if cfg.healthySamplesToGrow == 0 {
-		cfg.healthySamplesToGrow = 3
-	}
-	if cfg.maxPausedWait == 0 {
-		cfg.maxPausedWait = defaultMaxPausedWait
-	}
-	maxBytes := max(cfg.max(), 1)
+func newBudget(maxBytesPerSecond func() int64) *budget {
 	return &budget{
-		cfg:         cfg,
-		budgetBytes: maxBytes,
-		limiter:     rate.NewLimiter(rate.Limit(maxBytes), int(maxBytes)),
+		max:           maxBytesPerSecond,
+		maxPausedWait: defaultMaxPausedWait,
+		budgetBytes:   math.MaxInt64,                // unbraked, only the max applies
+		limiter:       rate.NewLimiter(rate.Inf, 0), // Wait sets the limit it needs
 	}
 }
 
 // effective returns the budget that applies now, 0 meaning paused.
 func (b *budget) effective() int64 {
-	if b.cfg.paused() {
-		return 0
-	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return max(min(b.budgetBytes, b.cfg.max()), 0)
+	return max(min(b.budgetBytes, b.max()), 0)
 }
 
 // current returns the budget that applies now, whether the brake (or a pause) holds it below the max, and why.
 func (b *budget) current() (bytesPerSecond int64, engaged bool, reason string) {
-	if b.cfg.paused() {
-		return 0, true, "paused manually"
-	}
-	maxBytes := b.cfg.max()
+	maxBytes := b.max()
 	if maxBytes <= 0 {
-		// for example a value written with a unit, which the config reads as 0
-		return 0, true, "maxBytesPerSecond is not positive"
+		// set on purpose, or a value written with a unit, which the config reads as 0
+		return 0, true, "paused: maxBytesPerSecond is not positive"
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -134,31 +98,26 @@ func (b *budget) current() (bytesPerSecond int64, engaged bool, reason string) {
 	return bytesPerSecond, false, ""
 }
 
-// tick takes one brake step and returns the reason when the sample showed the node under load, empty otherwise.
+// tick takes one brake step and returns the reasons when the sample showed the node under load, none otherwise.
 // The first sample with traffic sets the request latency baseline; until then request latency doesn't count.
-func (b *budget) tick(sample BrakeSample) string {
+func (b *budget) tick(sample BrakeSample) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	maxBytes := b.cfg.max()
+	maxBytes := b.max()
+	if maxBytes <= 0 {
+		return nil // paused: the budget resumes where it was
+	}
 	b.budgetBytes = min(b.budgetBytes, maxBytes)
 
 	var reasons []string
-	if sample.SchedLatencyP99 > b.cfg.schedLatencyThreshold {
+	if sample.SchedLatencyP99 > brakeSchedLatency {
 		reasons = append(reasons, "scheduler latency")
 	}
-	switch {
-	case !b.baselineSet:
-		if sample.RequestLatency > 0 {
-			b.baseline, b.baselineSet = sample.RequestLatency, true
-		}
-	case float64(sample.RequestLatency) > max(
-		float64(b.baseline)*b.cfg.requestLatencyFactor, float64(b.cfg.requestLatencyFloor),
-	):
+	if b.baseline == 0 {
+		b.baseline = sample.RequestLatency
+	} else if sample.RequestLatency > max(brakeRequestLatencyFactor*b.baseline, brakeRequestLatencyFloor) {
 		reasons = append(reasons, "request latency")
-	}
-	if sample.ThrottledRatio > b.cfg.throttledRatioThreshold {
-		reasons = append(reasons, "cpu throttling")
 	}
 
 	if len(reasons) > 0 {
@@ -168,11 +127,11 @@ func (b *budget) tick(sample BrakeSample) string {
 			b.budgetBytes = 0
 		}
 		b.reason = strings.Join(reasons, ", ")
-		return b.reason
+		return reasons
 	}
 
 	b.healthy++
-	if b.healthy >= b.cfg.healthySamplesToGrow {
+	if b.healthy >= healthySamplesToGrow {
 		b.healthy = 0
 		if b.budgetBytes == 0 {
 			b.budgetBytes = minBudgetBytesPerSecond
@@ -184,14 +143,14 @@ func (b *budget) tick(sample BrakeSample) string {
 	if b.budgetBytes >= maxBytes {
 		b.reason = ""
 	}
-	return ""
+	return nil
 }
 
 // resetBaseline makes the next sample with traffic the new request latency baseline, for a new replication job.
 func (b *budget) resetBaseline() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.baseline, b.baselineSet = 0, false
+	b.baseline = 0
 }
 
 // Wait blocks until n bytes fit in the budget. While the budget is 0 it waits for it to grow or be unpaused, and
@@ -203,7 +162,7 @@ func (b *budget) Wait(ctx context.Context, n int) error {
 		if bytesPerSecond <= 0 {
 			if pausedSince.IsZero() {
 				pausedSince = time.Now()
-			} else if time.Since(pausedSince) > b.cfg.maxPausedWait {
+			} else if time.Since(pausedSince) > b.maxPausedWait {
 				return errBudgetPaused
 			}
 			select {
@@ -246,46 +205,27 @@ func (b *budget) waitNonZero(ctx context.Context) error {
 	return nil
 }
 
-// runtimeSignals measures the node's load from the Go runtime, the node's own request latency and cgroup v2.
+// runtimeSignals measures the node's load from the Go runtime and the node's own request latency. CPU throttling
+// needs no signal of its own: it shows in both.
 type runtimeSignals struct {
 	requestLatency func() time.Duration
-	cgroupFile     string
-
-	samples   []metrics.Sample
-	prevSched *metrics.Float64Histogram
-	prevCPU   cgroupCPUStat
-	prevCPUOK bool
+	samples        []metrics.Sample
+	prevSched      *metrics.Float64Histogram
 }
 
-func newRuntimeSignals(requestLatency func() time.Duration, cgroupFile string) *runtimeSignals {
-	return &runtimeSignals{
-		requestLatency: requestLatency,
-		cgroupFile:     cgroupFile,
-		samples:        []metrics.Sample{{Name: "/sched/latencies:seconds"}},
-	}
+func newRuntimeSignals(requestLatency func() time.Duration) *runtimeSignals {
+	samples := []metrics.Sample{{Name: "/sched/latencies:seconds"}}
+	return &runtimeSignals{requestLatency: requestLatency, samples: samples}
 }
 
 func (r *runtimeSignals) Sample() BrakeSample {
 	sample := BrakeSample{RequestLatency: r.requestLatency()}
-
 	metrics.Read(r.samples)
 	if r.samples[0].Value.Kind() == metrics.KindFloat64Histogram {
 		cur := r.samples[0].Value.Float64Histogram()
-		cur = &metrics.Float64Histogram{
-			Counts:  append([]uint64(nil), cur.Counts...),
-			Buckets: append([]float64(nil), cur.Buckets...),
-		}
+		cur = &metrics.Float64Histogram{Counts: slices.Clone(cur.Counts), Buckets: slices.Clone(cur.Buckets)}
 		sample.SchedLatencyP99 = histogramP99(r.prevSched, cur)
 		r.prevSched = cur
-	}
-
-	if cpu, ok := readCgroupCPUStat(r.cgroupFile); ok {
-		if r.prevCPUOK {
-			if periods := cpu.periods - r.prevCPU.periods; periods > 0 {
-				sample.ThrottledRatio = float64(cpu.throttled-r.prevCPU.throttled) / float64(periods)
-			}
-		}
-		r.prevCPU, r.prevCPUOK = cpu, true
 	}
 	return sample
 }
@@ -320,45 +260,6 @@ func histogramP99(prev, cur *metrics.Float64Histogram) time.Duration {
 		}
 	}
 	return 0
-}
-
-// cgroupCPUStat holds the CPU period counters of a cgroup v2 cpu.stat file.
-type cgroupCPUStat struct {
-	periods, throttled int64
-}
-
-// readCgroupCPUStat reads nr_periods and nr_throttled from a cgroup v2 cpu.stat file. Both stay at 0 without a CPU
-// limit. Throttled time (throttled_usec) isn't used: it adds up across CPUs, so it makes no ratio of the window.
-func readCgroupCPUStat(file string) (cgroupCPUStat, bool) {
-	if file == "" {
-		return cgroupCPUStat{}, false
-	}
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return cgroupCPUStat{}, false
-	}
-	var (
-		stat                         cgroupCPUStat
-		foundPeriods, foundThrottled bool
-	)
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	for scanner.Scan() {
-		name, value, ok := strings.Cut(scanner.Text(), " ")
-		if !ok {
-			continue
-		}
-		n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
-		if err != nil {
-			continue
-		}
-		switch name {
-		case "nr_periods":
-			stat.periods, foundPeriods = n, true
-		case "nr_throttled":
-			stat.throttled, foundThrottled = n, true
-		}
-	}
-	return stat, foundPeriods && foundThrottled
 }
 
 // latencyTracker keeps the mean Get and Put latency since it was last read.

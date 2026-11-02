@@ -252,7 +252,7 @@ func TestMoveCPUBounds(t *testing.T) {
 		var paused atomic.Bool
 		paused.Store(true)
 		replication := fastMoveReplication()
-		replication.Paused = paused.Load
+		replication.MaxBytesPerSecond = pausable(&paused, DefaultReplicationMaxBytesPerSecond)
 		c := newMoveCluster(t, replication)
 		node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
 		c.setTopology([]string{node0.address, node1.address}, nil)
@@ -508,9 +508,7 @@ func TestMovePromotionMidReceive(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var paused atomic.Bool
 			replication := fastMoveReplication()
-			replication.ChunkSize = 4 * int(bytesize.KB) // every range spans many chunks
-			replication.MaxBytesPerSecond = func() int64 { return 256 * bytesize.KB }
-			replication.Paused = paused.Load
+			replication.MaxBytesPerSecond = pausable(&paused, 256*bytesize.KB)
 			c := newMoveCluster(t, replication)
 			node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
 			c.setTopology([]string{node0.address, node1.address}, nil)

@@ -9,23 +9,20 @@ import (
 	pb "github.com/rudderlabs/keydb/proto"
 )
 
-func TestRole(t *testing.T) {
+func TestIsShadow(t *testing.T) {
 	tests := []struct {
 		name       string
 		nodeID     int64
 		advertised string
 		shadows    []string
-		expected   pb.NodeRole
+		shadow     bool
 	}{
-		{name: "no advertised address", nodeID: 0, shadows: []string{"a:1"}, expected: pb.NodeRole_ACTIVE},
-		{name: "no shadow list", nodeID: 0, advertised: "a:1", expected: pb.NodeRole_ACTIVE},
-		{name: "empty entry", nodeID: 1, advertised: "a:1", shadows: []string{"a:1", ""}, expected: pb.NodeRole_ACTIVE},
-		{name: "short list", nodeID: 2, advertised: "a:1", shadows: []string{"", ""}, expected: pb.NodeRole_ACTIVE},
-		{name: "other address", nodeID: 0, advertised: "a:1", shadows: []string{"b:1"}, expected: pb.NodeRole_ACTIVE},
-		{
-			name: "listed as shadow", nodeID: 1, advertised: "b:1", shadows: []string{"", "b:1"},
-			expected: pb.NodeRole_SHADOW,
-		},
+		{name: "no advertised address", nodeID: 0, shadows: []string{"a:1"}},
+		{name: "no shadow list", nodeID: 0, advertised: "a:1"},
+		{name: "empty entry", nodeID: 1, advertised: "a:1", shadows: []string{"a:1", ""}},
+		{name: "short list", nodeID: 2, advertised: "a:1", shadows: []string{"", ""}},
+		{name: "other address", nodeID: 0, advertised: "a:1", shadows: []string{"b:1"}},
+		{name: "listed as shadow", nodeID: 1, advertised: "b:1", shadows: []string{"", "b:1"}, shadow: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -34,13 +31,13 @@ func TestRole(t *testing.T) {
 				AdvertisedAddress: tc.advertised,
 				ShadowAddresses:   staticList(tc.shadows...),
 			}}
-			require.Equal(t, tc.expected, s.role())
+			require.Equal(t, tc.shadow, s.isShadow())
 		})
 	}
 
 	t.Run("nil shadow addresses func", func(t *testing.T) {
 		s := &Service{config: Config{AdvertisedAddress: "a:1"}}
-		require.Equal(t, pb.NodeRole_ACTIVE, s.role())
+		require.False(t, s.isShadow())
 		require.Empty(t, s.shadowAddress())
 	})
 
@@ -72,10 +69,6 @@ func TestShadowRefusesRequests(t *testing.T) {
 	require.Equal(t, pb.ErrorCode_NOT_READY, putResp.ErrorCode)
 	require.EqualValues(t, len(addresses), putResp.ClusterSize)
 	require.Equal(t, addresses, putResp.NodesAddresses)
-
-	info, err := shadow.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
-	require.NoError(t, err)
-	require.Equal(t, pb.NodeRole_SHADOW, info.Role)
 }
 
 func TestReplacedNodeRefusesRequests(t *testing.T) {

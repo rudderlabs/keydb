@@ -11,16 +11,12 @@ import (
 //   - GET /replication/status returns the ReplicationStatus of the job filling this node's shadow
 func (s *Service) AdminHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/replication/status", s.replicationStatusHandler())
+	mux.Handle("GET /replication/status", s.replicationStatusHandler())
 	return mux
 }
 
 func (s *Service) replicationStatusHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		body, err := jsonrs.Marshal(s.ReplicationStatus())
 		if err != nil {
 			s.logger.Errorn("Marshalling the replication status", obskit.Error(err))

@@ -125,3 +125,11 @@ func sendChunks(t testing.TB, c pb.NodeServiceClient, chunks ...*pb.SnapshotChun
 	require.NoError(t, err)
 	return resp
 }
+
+// marker returns the node's since marker for a hash range, 0 when it has none.
+func marker(t testing.TB, s *Service, hashRange int64) uint64 {
+	t.Helper()
+	timestamp, err := s.getSnapshotTimestamp(hashRange)
+	require.NoError(t, err)
+	return timestamp
+}

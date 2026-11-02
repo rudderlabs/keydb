@@ -2,10 +2,7 @@ package node
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"runtime/metrics"
-	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,8 +13,7 @@ import (
 )
 
 func TestBudgetHalvesOnBreach(t *testing.T) {
-	var paused atomic.Bool
-	b := newTestBudget(32*bytesize.MB, &paused)
+	b := newTestBudget(32 * bytesize.MB)
 	b.tick(BrakeSample{RequestLatency: time.Millisecond}) // baseline
 
 	rate, engaged, _ := b.current()
@@ -31,17 +27,16 @@ func TestBudgetHalvesOnBreach(t *testing.T) {
 	require.Contains(t, reason, "scheduler latency")
 
 	for range 10 {
-		b.tick(BrakeSample{RequestLatency: time.Millisecond, ThrottledRatio: 0.5})
+		b.tick(BrakeSample{RequestLatency: 6 * time.Millisecond, SchedLatencyP99: 20 * time.Millisecond})
 	}
 	rate, engaged, reason = b.current()
 	require.Zero(t, rate, "below the minimum budget the copy pauses")
 	require.True(t, engaged)
-	require.Contains(t, reason, "cpu throttling")
+	require.Equal(t, "scheduler latency, request latency", reason)
 }
 
 func TestBudgetRequestLatencyAgainstBaseline(t *testing.T) {
-	var paused atomic.Bool
-	b := newTestBudget(32*bytesize.MB, &paused)
+	b := newTestBudget(32 * bytesize.MB)
 	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond}) // baseline
 
 	b.tick(BrakeSample{RequestLatency: 15 * time.Millisecond})
@@ -55,8 +50,7 @@ func TestBudgetRequestLatencyAgainstBaseline(t *testing.T) {
 }
 
 func TestBudgetBaselineSkipsIdleSamples(t *testing.T) {
-	var paused atomic.Bool
-	b := newTestBudget(32*bytesize.MB, &paused)
+	b := newTestBudget(32 * bytesize.MB)
 	b.tick(BrakeSample{}) // no traffic yet, no baseline
 	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond})
 	b.tick(BrakeSample{RequestLatency: 30 * time.Millisecond})
@@ -66,8 +60,7 @@ func TestBudgetBaselineSkipsIdleSamples(t *testing.T) {
 }
 
 func TestBudgetRequestLatencyFloor(t *testing.T) {
-	var paused atomic.Bool
-	b := newTestBudget(32*bytesize.MB, &paused)
+	b := newTestBudget(32 * bytesize.MB)
 	b.tick(BrakeSample{RequestLatency: 100 * time.Microsecond}) // a quiet-hour baseline
 	b.tick(BrakeSample{RequestLatency: time.Millisecond})
 	_, engaged, _ := b.current()
@@ -80,8 +73,7 @@ func TestBudgetRequestLatencyFloor(t *testing.T) {
 }
 
 func TestBudgetResetBaseline(t *testing.T) {
-	var paused atomic.Bool
-	b := newTestBudget(32*bytesize.MB, &paused)
+	b := newTestBudget(32 * bytesize.MB)
 	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond})
 	b.resetBaseline()
 	b.tick(BrakeSample{RequestLatency: 50 * time.Millisecond}) // the new job's baseline
@@ -89,22 +81,8 @@ func TestBudgetResetBaseline(t *testing.T) {
 	require.False(t, engaged, "after a reset the next sample with traffic is the new baseline")
 }
 
-func TestBudgetConfiguredThresholds(t *testing.T) {
-	var paused atomic.Bool
-	b := newBudget(budgetConfig{
-		max:                     func() int64 { return 32 * bytesize.MB },
-		paused:                  paused.Load,
-		schedLatencyThreshold:   time.Second,
-		throttledRatioThreshold: 0.9,
-	})
-	b.tick(BrakeSample{SchedLatencyP99: 500 * time.Millisecond, ThrottledRatio: 0.5})
-	_, engaged, _ := b.current()
-	require.False(t, engaged, "the configured thresholds apply")
-}
-
 func TestBudgetRecoversAfterHealthySamples(t *testing.T) {
-	var paused atomic.Bool
-	b := newTestBudget(32*bytesize.MB, &paused)
+	b := newTestBudget(32 * bytesize.MB)
 	b.tick(BrakeSample{}) // baseline
 	for range 10 {
 		b.tick(BrakeSample{SchedLatencyP99: time.Second})
@@ -134,10 +112,9 @@ func TestBudgetRecoversAfterHealthySamples(t *testing.T) {
 }
 
 func TestBudgetCappedByMax(t *testing.T) {
-	var paused atomic.Bool
 	var maxBytes atomic.Int64
 	maxBytes.Store(32 * bytesize.MB)
-	b := newBudget(budgetConfig{max: maxBytes.Load, paused: paused.Load})
+	b := newBudget(maxBytes.Load)
 	b.tick(BrakeSample{})
 
 	maxBytes.Store(2 * bytesize.MB)
@@ -150,27 +127,29 @@ func TestBudgetCappedByMax(t *testing.T) {
 }
 
 func TestBudgetPausedBlocksWait(t *testing.T) {
-	var paused atomic.Bool
-	paused.Store(true)
-	b := newTestBudget(32*bytesize.MB, &paused)
+	var maxBytes atomic.Int64
+	b := newBudget(maxBytes.Load) // a ceiling of 0 pauses the copy
 
 	rate, engaged, reason := b.current()
 	require.Zero(t, rate)
 	require.True(t, engaged)
-	require.Contains(t, reason, "paused")
+	require.Equal(t, "paused: maxBytesPerSecond is not positive", reason)
+	b.tick(BrakeSample{})
 
 	done := make(chan error, 1)
 	go func() { done <- b.Wait(context.Background(), 1024) }()
 	require.Never(t, func() bool { return len(done) > 0 }, 300*time.Millisecond, 50*time.Millisecond,
 		"Wait must block while paused")
 
-	paused.Store(false)
+	maxBytes.Store(32 * bytesize.MB)
 	require.Eventually(t, func() bool { return len(done) > 0 }, 3*time.Second, 50*time.Millisecond,
 		"Wait must resume once unpaused")
 	require.NoError(t, <-done)
+	rate, _, _ = b.current()
+	require.EqualValues(t, 32*bytesize.MB, rate, "a pause doesn't brake the budget")
 
 	t.Run("cancelled context", func(t *testing.T) {
-		paused.Store(true)
+		maxBytes.Store(0)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() { done <- b.Wait(ctx, 1024) }()
@@ -181,50 +160,15 @@ func TestBudgetPausedBlocksWait(t *testing.T) {
 }
 
 func TestBudgetWaitLargerThanBurst(t *testing.T) {
-	var paused atomic.Bool
-	b := newTestBudget(bytesize.MB, &paused)
+	b := newTestBudget(bytesize.MB)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, b.Wait(ctx, int(bytesize.MB+bytesize.MB/2)), "a batch bigger than a second's budget waits")
 }
 
-func TestRuntimeSignalsCgroup(t *testing.T) {
-	t.Run("missing file", func(t *testing.T) {
-		s := newRuntimeSignals(func() time.Duration { return 0 }, filepath.Join(t.TempDir(), "missing"))
-		require.Zero(t, s.Sample().ThrottledRatio)
-		require.Zero(t, s.Sample().ThrottledRatio)
-	})
-
-	t.Run("throttled in half of the periods", func(t *testing.T) {
-		file := filepath.Join(t.TempDir(), "cpu.stat")
-		stat := func(periods, throttled, throttledUsec int) []byte {
-			return []byte("usage_usec 10\nnr_periods " + strconv.Itoa(periods) +
-				"\nnr_throttled " + strconv.Itoa(throttled) + "\nthrottled_usec " + strconv.Itoa(throttledUsec) + "\n")
-		}
-		require.NoError(t, os.WriteFile(file, stat(100, 10, 1000), 0o600))
-		s := newRuntimeSignals(func() time.Duration { return 0 }, file)
-		require.Zero(t, s.Sample().ThrottledRatio, "the first sample has nothing to compare with")
-
-		// throttled time adds up across CPUs, so it can exceed the window: only the periods make a ratio
-		require.NoError(t, os.WriteFile(file, stat(200, 60, 9_000_000), 0o600))
-		require.InDelta(t, 0.5, s.Sample().ThrottledRatio, 0.001)
-
-		require.NoError(t, os.WriteFile(file, stat(200, 60, 9_000_000), 0o600))
-		require.Zero(t, s.Sample().ThrottledRatio, "no period elapsed")
-	})
-
-	t.Run("no CPU limit", func(t *testing.T) {
-		file := filepath.Join(t.TempDir(), "cpu.stat")
-		require.NoError(t, os.WriteFile(file, []byte("usage_usec 10\nnr_periods 0\nnr_throttled 0\n"), 0o600))
-		s := newRuntimeSignals(func() time.Duration { return 0 }, file)
-		_ = s.Sample()
-		require.Zero(t, s.Sample().ThrottledRatio)
-	})
-
-	t.Run("request latency comes from the tracker", func(t *testing.T) {
-		s := newRuntimeSignals(func() time.Duration { return 7 * time.Millisecond }, "")
-		require.Equal(t, 7*time.Millisecond, s.Sample().RequestLatency)
-	})
+func TestRuntimeSignals(t *testing.T) {
+	s := newRuntimeSignals(func() time.Duration { return 7 * time.Millisecond })
+	require.Equal(t, 7*time.Millisecond, s.Sample().RequestLatency, "request latency comes from the tracker")
 }
 
 func TestHistogramP99(t *testing.T) {
@@ -246,13 +190,9 @@ func TestLatencyTracker(t *testing.T) {
 }
 
 func TestBudgetAbandonsLongPause(t *testing.T) {
-	var paused atomic.Bool
-	paused.Store(true)
-	b := newBudget(budgetConfig{
-		max:           func() int64 { return bytesize.MB },
-		paused:        paused.Load,
-		maxPausedWait: 200 * time.Millisecond,
-	})
+	var maxBytes atomic.Int64
+	b := newBudget(maxBytes.Load)
+	b.maxPausedWait = 200 * time.Millisecond
 	start := time.Now()
 	err := b.Wait(context.Background(), 1024)
 	require.ErrorIs(t, err, errBudgetPaused, "a long pause must give up the range instead of holding it open")
@@ -262,33 +202,12 @@ func TestBudgetAbandonsLongPause(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- b.waitNonZero(context.Background()) }()
 		require.Never(t, func() bool { return len(done) > 0 }, 300*time.Millisecond, 50*time.Millisecond)
-		paused.Store(false)
+		maxBytes.Store(bytesize.MB)
 		require.Eventually(t, func() bool { return len(done) > 0 }, 3*time.Second, 50*time.Millisecond)
 		require.NoError(t, <-done)
 	})
 }
 
-func TestBudgetNonPositiveMax(t *testing.T) {
-	for _, maxBytes := range []int64{0, -1} {
-		var paused atomic.Bool
-		b := newTestBudget(maxBytes, &paused)
-		b.tick(BrakeSample{})
-
-		rate, engaged, reason := b.current()
-		require.Zero(t, rate)
-		require.True(t, engaged, "a copy that can't move must not look unbraked")
-		require.Equal(t, "maxBytesPerSecond is not positive", reason)
-
-		done := make(chan error, 1)
-		go func() { done <- b.waitNonZero(context.Background()) }()
-		require.Never(t, func() bool { return len(done) > 0 }, 300*time.Millisecond, 50*time.Millisecond,
-			"the copy waits like a paused one")
-	}
-}
-
-func newTestBudget(maxBytes int64, paused *atomic.Bool) *budget {
-	return newBudget(budgetConfig{
-		max:    func() int64 { return maxBytes },
-		paused: paused.Load,
-	})
+func newTestBudget(maxBytes int64) *budget {
+	return newBudget(func() int64 { return maxBytes })
 }

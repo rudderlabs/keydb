@@ -30,7 +30,6 @@ func TestReplicationStartsFromConfig(t *testing.T) {
 	status := p.source.ReplicationStatus()
 	require.Equal(t, "running", status.State)
 	require.Equal(t, p.shadowAddress, status.ShadowAddress)
-	require.Equal(t, "ACTIVE", status.Role)
 	shadowStatus := p.shadow.ReplicationStatus()
 	require.Equal(t, "shadow", shadowStatus.State, "a shadow never replicates")
 }
@@ -109,26 +108,6 @@ func TestReplicationNoRaceWithDegradedChange(t *testing.T) {
 			p.source.DegradedNodesChanged() // swaps the hasher under the write lock while passes run
 		}
 	}
-}
-
-func TestChunkWriterDoesNotReuseSentChunks(t *testing.T) {
-	var sent [][]byte
-	w := &chunkWriter{max: 4, send: func(data []byte) error {
-		sent = append(sent, data) // keeps the slice, as a message handed to gRPC must not change afterwards
-		return nil
-	}}
-	_, err := w.Write([]byte("aaaabbbbcc"))
-	require.NoError(t, err)
-	_, err = w.Write([]byte("ccdddd"))
-	require.NoError(t, err)
-	require.NoError(t, w.flush())
-	require.Equal(t, []string{"aaaa", "bbbb", "cccc", "dddd"}, func() []string {
-		out := make([]string, len(sent))
-		for i, b := range sent {
-			out[i] = string(b)
-		}
-		return out
-	}())
 }
 
 func TestReplicationStopsOnShutdown(t *testing.T) {
@@ -221,11 +200,7 @@ func TestReplicationPausedStopsScanning(t *testing.T) {
 }
 
 func TestPassDelayStretchesWithBrake(t *testing.T) {
-	var paused atomic.Bool
-	r := &replicator{
-		cfg:    ReplicationConfig{PauseBetweenPasses: time.Second},
-		budget: newTestBudget(32*bytesize.MB, &paused),
-	}
+	r := &replicator{cfg: ReplicationConfig{PauseBetweenPasses: time.Second}, budget: newTestBudget(32 * bytesize.MB)}
 	require.Equal(t, time.Second, r.passDelay(), "at full budget the pause is the configured one")
 
 	r.budget.tick(BrakeSample{})
@@ -233,41 +208,37 @@ func TestPassDelayStretchesWithBrake(t *testing.T) {
 	require.Equal(t, 2*time.Second, r.passDelay(), "at half the budget the pause doubles")
 
 	for range 20 {
-		r.budget.tick(BrakeSample{ThrottledRatio: 1})
+		r.budget.tick(BrakeSample{SchedLatencyP99: time.Second})
 	}
 	require.Equal(t, maxPassDelay, r.passDelay(), "the stretched pause is capped")
 }
 
-func TestGaps(t *testing.T) {
+func TestReplicationStatusGap(t *testing.T) {
 	start := time.Unix(1000, 0)
-	const pause = 5 * time.Second
-	afterPass := func(duration time.Duration) replicationProgress {
-		return replicationProgress{passesCompleted: 3, lastPassStart: start, lastPassEnd: start.Add(duration)}
+	now := start
+	r := &replicator{
+		s:      &Service{now: func() time.Time { return now }},
+		cfg:    ReplicationConfig{PauseBetweenPasses: 5 * time.Second},
+		budget: newTestBudget(32 * bytesize.MB),
 	}
-	tests := []struct {
-		name         string
-		now          time.Time
-		progress     replicationProgress
-		gap          time.Duration
-		worstCaseGap time.Duration
-	}{
-		{name: "no pass yet", now: start, gap: -1, worstCaseGap: -1},
-		{
-			name: "after a pass", now: start.Add(20 * time.Second), progress: afterPass(10 * time.Second),
-			gap: 20 * time.Second, worstCaseGap: 25 * time.Second,
-		},
-		{
-			name: "the gap runs from the start of the last pass", now: start.Add(61 * time.Second),
-			progress: afterPass(time.Second), gap: 61 * time.Second, worstCaseGap: 7 * time.Second,
-		},
+	status := r.status()
+	require.EqualValues(t, -1, status.GapSeconds, "no pass yet")
+	require.EqualValues(t, -1, status.WorstCaseGapSeconds)
+
+	r.progress = ReplicationStatus{
+		PassesCompleted: 3, LastPassStartedAt: start, LastPassEndedAt: start.Add(10 * time.Second),
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gap, worstCaseGap := gaps(tt.now, tt.progress, pause)
-			require.Equal(t, tt.gap, gap)
-			require.Equal(t, tt.worstCaseGap, worstCaseGap)
-		})
-	}
+	now = start.Add(20 * time.Second)
+	status = r.status()
+	require.EqualValues(t, 20, status.GapSeconds)
+	require.EqualValues(t, 25, status.WorstCaseGapSeconds, "two pass durations plus the pause")
+	require.Equal(t, "10s", status.LastPassDuration)
+
+	r.progress.LastPassEndedAt = start.Add(time.Second)
+	now = start.Add(61 * time.Second)
+	status = r.status()
+	require.EqualValues(t, 61, status.GapSeconds, "the gap runs from the start of the last pass")
+	require.EqualValues(t, 7, status.WorstCaseGapSeconds)
 }
 
 func TestReplicationMetrics(t *testing.T) {
@@ -364,9 +335,19 @@ func fastReplication(paused *atomic.Bool) ReplicationConfig {
 		Signals:            healthySignals{},
 	}
 	if paused != nil {
-		cfg.Paused = paused.Load
+		cfg.MaxBytesPerSecond = pausable(paused, DefaultReplicationMaxBytesPerSecond)
 	}
 	return cfg
+}
+
+// pausable is a byte budget ceiling of maxBytes, or 0, which pauses the copy, while paused is true
+func pausable(paused *atomic.Bool, maxBytes int64) func() int64 {
+	return func() int64 {
+		if paused.Load() {
+			return 0
+		}
+		return maxBytes
+	}
 }
 
 type replicationPair struct {

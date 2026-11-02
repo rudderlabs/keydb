@@ -31,29 +31,7 @@ func TestEmptyDeltaKeepsMarker(t *testing.T) {
 	resp := sendChunks(t, nodeClient(t, address), &pb.SnapshotChunk{HashRange: 0, IsLast: true, Timestamp: 0})
 	require.True(t, resp.Success, resp.ErrorMessage)
 
-	ts, found, err := s.getSnapshotTimestamp(0)
-	require.NoError(t, err)
-	require.True(t, found)
-	require.EqualValues(t, 100, ts, "an empty delta must not move the marker backwards")
-}
-
-func TestEmptyRangeGetsMarker(t *testing.T) {
-	ctx := context.Background()
-	address := freeAddress(t)
-	s := newTestService(ctx, t, Config{NodeID: 0, Addresses: staticList(address)}, newTestConf(t))
-	serveTestService(t, s, address)
-
-	_, found, err := s.getSnapshotTimestamp(0)
-	require.NoError(t, err)
-	require.False(t, found)
-
-	resp := sendChunks(t, nodeClient(t, address), &pb.SnapshotChunk{HashRange: 0, IsLast: true, Timestamp: 0})
-	require.True(t, resp.Success, resp.ErrorMessage)
-
-	ts, found, err := s.getSnapshotTimestamp(0)
-	require.NoError(t, err)
-	require.True(t, found, "an empty range must be marked as synced")
-	require.Zero(t, ts)
+	require.EqualValues(t, 100, marker(t, s, 0), "an empty delta must not move the marker backwards")
 }
 
 func TestLeftoverDiskGuard(t *testing.T) {
@@ -99,9 +77,7 @@ func TestLeftoverDiskGuard(t *testing.T) {
 		resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: 0, Data: []byte("x"), IsLast: true, Timestamp: 5})
 		require.False(t, resp.Success, "a shadow only takes replication streams, which name their source")
 		require.Contains(t, resp.ErrorMessage, "source address")
-		_, found, err := s.getSnapshotTimestamp(0)
-		require.NoError(t, err)
-		require.False(t, found)
+		require.Zero(t, marker(t, s, 0))
 	})
 
 	t.Run("markers without a source are dropped with the first source", func(t *testing.T) {
@@ -113,20 +89,15 @@ func TestLeftoverDiskGuard(t *testing.T) {
 
 		resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: 0, IsLast: true, Timestamp: 5, SourceAddress: "active:1"})
 		require.True(t, resp.Success, resp.ErrorMessage)
-		ts, found, err := s.getSnapshotTimestamp(0)
-		require.NoError(t, err)
-		require.True(t, found)
-		require.EqualValues(t, 5, ts, "the new source's marker replaces the old one")
-		_, found, err = s.getSnapshotTimestamp(1)
-		require.NoError(t, err)
-		require.False(t, found, "a marker from another source would skip data the shadow lacks")
-		_, found, err = s.cache.GetValue(getSnapshotTimestampKey(1), internalKeysHashRange)
+		require.EqualValues(t, 5, marker(t, s, 0), "the new source's marker replaces the old one")
+		require.Zero(t, marker(t, s, 1), "a marker from another source would skip data the shadow lacks")
+		_, found, err := s.cache.GetValue(getSnapshotTimestampKey(1), internalKeysHashRange)
 		require.NoError(t, err)
 		require.False(t, found, "the marker is gone from the disk too, not only from memory")
 	})
 }
 
-func TestShadowReceiveMultiChunk(t *testing.T) {
+func TestReceiveMultiChunk(t *testing.T) {
 	ctx := context.Background()
 	newConf := func() *config.Config {
 		conf := newTestConf(t)
@@ -134,54 +105,62 @@ func TestShadowReceiveMultiChunk(t *testing.T) {
 		return conf
 	}
 
-	sourceAddress, shadowAddress := freeAddress(t), freeAddress(t)
+	sourceAddress := freeAddress(t)
 	source := newTestService(ctx, t,
 		Config{NodeID: 0, TotalHashRanges: 1, Addresses: staticList(sourceAddress)}, newConf(),
 	)
 	serveTestService(t, source, sourceAddress)
-	shadow := newTestService(ctx, t, Config{
-		NodeID:            0,
-		TotalHashRanges:   1,
-		Addresses:         staticList(sourceAddress),
-		AdvertisedAddress: shadowAddress,
-		ShadowAddresses:   staticList(shadowAddress),
-	}, newConf())
-	serveTestService(t, shadow, shadowAddress)
-
 	// enough keys for the range to span several 1 MiB chunks
 	keys := make([]string, 60_000)
 	for i := range keys {
 		keys[i] = "a-reasonably-long-key-" + strconv.Itoa(i)
 	}
 	require.NoError(t, source.cache.Put(map[int64][]string{0: keys}, time.Hour))
-
-	// stream the range the way replication does, in 1 MiB chunks that name their source
 	var buf bytes.Buffer
-	maxVersion, _, err := source.cache.StreamSnapshot(ctx, 0, 0, &buf, badger.StreamOptions{})
+	maxVersion, err := source.cache.StreamSnapshot(ctx, 0, 0, &buf, badger.StreamOptions{})
 	require.NoError(t, err)
-	var chunks []*pb.SnapshotChunk
-	for data := buf.Bytes(); len(data) > 0; {
-		n := min(len(data), DefaultStreamingChunkSize)
-		chunks = append(chunks, &pb.SnapshotChunk{HashRange: 0, Data: data[:n], SourceAddress: sourceAddress})
-		data = data[n:]
-	}
-	require.Greater(t, len(chunks), 1, "the range must span several chunks")
-	chunks = append(chunks, &pb.SnapshotChunk{
-		HashRange: 0, IsLast: true, Timestamp: maxVersion, SourceAddress: sourceAddress,
-	})
-	resp := sendChunks(t, nodeClient(t, shadowAddress), chunks...)
-	require.True(t, resp.Success, resp.ErrorMessage)
 
-	keysByHashRange, indexes, err := shadow.GetKeysByHashRangeWithIndexes(keys)
-	require.NoError(t, err)
-	exists, err := shadow.cache.Get(keysByHashRange, indexes)
-	require.NoError(t, err)
-	for i, e := range exists {
-		require.True(t, e, "key %d missing on the shadow", i)
+	for _, tc := range []struct {
+		name   string
+		shadow bool
+	}{
+		{name: "replication to a shadow", shadow: true},
+		{name: "scaling to an active node"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			address := freeAddress(t)
+			destination := Config{NodeID: 0, TotalHashRanges: 1, Addresses: staticList(sourceAddress)}
+			named := "" // scaling streams don't name their source
+			if tc.shadow {
+				destination.AdvertisedAddress, destination.ShadowAddresses = address, staticList(address)
+				named = sourceAddress
+			}
+			node := newTestService(ctx, t, destination, newConf())
+			serveTestService(t, node, address)
+
+			var chunks []*pb.SnapshotChunk
+			for data := buf.Bytes(); len(data) > 0; {
+				n := min(len(data), DefaultStreamingChunkSize)
+				chunks = append(chunks, &pb.SnapshotChunk{HashRange: 0, Data: data[:n], SourceAddress: named})
+				data = data[n:]
+			}
+			require.Greater(t, len(chunks), 1, "the range must span several chunks")
+			chunks = append(chunks, &pb.SnapshotChunk{
+				HashRange: 0, IsLast: true, Timestamp: maxVersion, SourceAddress: named,
+			})
+			resp := sendChunks(t, nodeClient(t, address), chunks...)
+			require.True(t, resp.Success, resp.ErrorMessage)
+
+			keysByHashRange, indexes, err := node.GetKeysByHashRangeWithIndexes(keys)
+			require.NoError(t, err)
+			exists, err := node.cache.Get(keysByHashRange, indexes)
+			require.NoError(t, err)
+			for i, e := range exists {
+				require.True(t, e, "key %d missing", i)
+			}
+			require.Equal(t, maxVersion, marker(t, node, 0))
+		})
 	}
-	_, found, err := shadow.getSnapshotTimestamp(0)
-	require.NoError(t, err)
-	require.True(t, found)
 }
 
 func TestShadowSourceClearedOnActivation(t *testing.T) {
@@ -240,9 +219,8 @@ func TestShadowGetNodeInfoDuringReceive(t *testing.T) {
 
 	infoCtx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	info, err := c.GetNodeInfo(infoCtx, &pb.GetNodeInfoRequest{})
+	_, err = c.GetNodeInfo(infoCtx, &pb.GetNodeInfoRequest{})
 	require.NoError(t, err, "a shadow must answer GetNodeInfo while it receives a range")
-	require.Equal(t, pb.NodeRole_SHADOW, info.Role)
 
 	t.Run("a shadow that became active refuses writes until the receive ends", func(t *testing.T) {
 		actives.set(address)
@@ -277,9 +255,7 @@ func TestShadowStreamEndingEarlyIsAFailure(t *testing.T) {
 	resp, err := stream.CloseAndRecv() // no last chunk
 	require.NoError(t, err)
 	require.False(t, resp.Success, "a stream that ends before its last chunk must not count as a sync")
-	_, found, err := s.getSnapshotTimestamp(0)
-	require.NoError(t, err)
-	require.False(t, found, "no marker over a partial range")
+	require.Zero(t, marker(t, s, 0), "no marker over a partial range")
 }
 
 func TestShadowRetriesAnInterruptedRange(t *testing.T) {
@@ -380,7 +356,7 @@ func TestShadowMetadataReadsDuringLoad(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, source.cache.Put(keysByHashRange, time.Hour))
 	var snapshot bytes.Buffer
-	_, _, err = source.cache.StreamSnapshot(ctx, 0, 0, &snapshot, badger.StreamOptions{})
+	_, err = source.cache.StreamSnapshot(ctx, 0, 0, &snapshot, badger.StreamOptions{})
 	require.NoError(t, err)
 	require.Greater(t, snapshot.Len(), 100)
 
@@ -404,17 +380,23 @@ func TestShadowMetadataReadsDuringLoad(t *testing.T) {
 
 	_, err = c.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
 	require.NoError(t, err)
-	_, err = c.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{HashRange: 0})
-	require.NoError(t, err)
+	since := make(chan uint64, 1)
+	go func() {
+		resp, err := c.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{HashRange: 0})
+		if err == nil {
+			since <- resp.SinceTimestamp
+		}
+	}()
+	require.Never(t, func() bool { return len(since) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
+		"GetSnapshotSince must wait for the load")
 	require.Zero(t, guard.violations.Load(), "metadata reads must not open transactions while a range loads")
 
 	require.NoError(t, stream.Send(&pb.SnapshotChunk{HashRange: 0, Data: data[50:], IsLast: true, Timestamp: 7}))
 	resp, err := stream.CloseAndRecv()
 	require.NoError(t, err)
 	require.True(t, resp.Success, resp.ErrorMessage)
-	since, err := c.GetSnapshotSince(ctx, &pb.GetSnapshotSinceRequest{HashRange: 0})
-	require.NoError(t, err)
-	require.EqualValues(t, 7, since.SinceTimestamp)
+	require.Eventually(t, func() bool { return len(since) > 0 }, 5*time.Second, 10*time.Millisecond)
+	require.EqualValues(t, 7, <-since, "the waiting GetSnapshotSince answers with the new marker")
 }
 
 func TestForgetShadowSourceSkipsWhileLocked(t *testing.T) {
@@ -482,7 +464,7 @@ func TestActiveNodeRefusesReplicationStream(t *testing.T) {
 	resp, err := stream.CloseAndRecv()
 	require.NoError(t, err)
 	require.False(t, resp.Success)
-	require.Contains(t, resp.ErrorMessage, "not a shadow")
+	require.Contains(t, resp.ErrorMessage, "shadows only")
 }
 
 func TestCloseWaitsForReceive(t *testing.T) {
@@ -536,7 +518,7 @@ func rangeSnapshot(t *testing.T) (snapshot []byte, keys []string) {
 		require.NoError(t, source.Put(map[int64][]string{0: {key}}, time.Hour))
 	}
 	var buf bytes.Buffer
-	_, _, err = source.StreamSnapshot(context.Background(), 0, 0, &buf, badger.StreamOptions{BatchSize: 64})
+	_, err = source.StreamSnapshot(context.Background(), 0, 0, &buf, badger.StreamOptions{BatchSize: 64})
 	require.NoError(t, err)
 	return buf.Bytes(), keys
 }

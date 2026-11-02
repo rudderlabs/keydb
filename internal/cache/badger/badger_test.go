@@ -461,11 +461,10 @@ func TestStreamSnapshotRoundTrip(t *testing.T) {
 			time.Sleep(2 * time.Second) // let "expired" expire
 
 			var buf bytes.Buffer
-			maxVersion, hasData, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
+			maxVersion, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
 				CompressionLevel: 1, BatchSize: 1 << 20,
 			})
 			require.NoError(t, err)
-			require.True(t, hasData)
 			require.Positive(t, maxVersion)
 
 			destination := newStreamTestCache(t, compress)
@@ -484,7 +483,7 @@ func TestInterruptedLoadSnapshot(t *testing.T) {
 				require.NoError(t, source.Put(map[int64][]string{0: {"k" + strconv.Itoa(i)}}, time.Hour))
 			}
 			var buf bytes.Buffer
-			_, _, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{})
+			_, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{})
 			require.NoError(t, err)
 			snapshot := buf.Bytes()
 
@@ -521,7 +520,7 @@ func TestStreamSnapshotWaitCalled(t *testing.T) {
 
 	var buf bytes.Buffer
 	var waited int
-	_, _, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
+	_, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
 		Wait: func(_ context.Context, n int) error {
 			waited += n
 			return nil
@@ -533,7 +532,7 @@ func TestStreamSnapshotWaitCalled(t *testing.T) {
 
 	t.Run("a wait error stops the stream", func(t *testing.T) {
 		waitErr := errors.New("paused for good")
-		_, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
+		_, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
 			Wait: func(context.Context, int) error { return waitErr },
 		})
 		require.ErrorIs(t, err, waitErr)
@@ -543,14 +542,13 @@ func TestStreamSnapshotWaitCalled(t *testing.T) {
 func TestStreamSnapshotSince(t *testing.T) {
 	source := newStreamTestCache(t, true)
 	require.NoError(t, source.Put(map[int64][]string{0: {"old"}}, time.Hour))
-	since, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{})
+	since, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{})
 	require.NoError(t, err)
 
 	require.NoError(t, source.Put(map[int64][]string{0: {"new"}}, time.Hour))
 	var buf bytes.Buffer
-	maxVersion, hasData, err := source.StreamSnapshot(context.Background(), 0, since, &buf, StreamOptions{})
+	maxVersion, err := source.StreamSnapshot(context.Background(), 0, since, &buf, StreamOptions{})
 	require.NoError(t, err)
-	require.True(t, hasData)
 	require.Greater(t, maxVersion, since)
 
 	destination := newStreamTestCache(t, true)
@@ -559,9 +557,9 @@ func TestStreamSnapshotSince(t *testing.T) {
 
 	t.Run("nothing new", func(t *testing.T) {
 		var buf bytes.Buffer
-		_, hasData, err := source.StreamSnapshot(context.Background(), 0, maxVersion, &buf, StreamOptions{})
+		version, err := source.StreamSnapshot(context.Background(), 0, maxVersion, &buf, StreamOptions{})
 		require.NoError(t, err)
-		require.False(t, hasData)
+		require.Zero(t, version)
 	})
 }
 
@@ -577,7 +575,7 @@ func TestStreamSnapshotBatchesBounded(t *testing.T) {
 	}
 
 	var largest, total int
-	_, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
+	_, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
 		BatchSize: 64 << 10,
 		Wait: func(_ context.Context, n int) error {
 			largest = max(largest, n)
@@ -601,15 +599,15 @@ func TestStreamSnapshotIncrementalAllocations(t *testing.T) {
 		}
 		require.NoError(t, source.Put(map[int64][]string{0: keys}, time.Hour))
 	}
-	since, _, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{})
+	since, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{})
 	require.NoError(t, err)
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	_, hasData, err := source.StreamSnapshot(context.Background(), 0, since, io.Discard, StreamOptions{})
+	version, err := source.StreamSnapshot(context.Background(), 0, since, io.Discard, StreamOptions{})
 	require.NoError(t, err)
 	runtime.ReadMemStats(&after)
-	require.False(t, hasData)
+	require.Zero(t, version)
 	allocated := after.TotalAlloc - before.TotalAlloc
 	t.Logf("an incremental pass with nothing new allocated %d bytes", allocated)
 	require.Less(t, allocated, uint64(8<<20), "an incremental pass over unchanged data must stay cheap")
