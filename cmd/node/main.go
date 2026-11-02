@@ -162,13 +162,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		GarbageCollectionInterval: conf.GetDurationVar( // node.DefaultGarbageCollectionInterval will be used
 			0, time.Nanosecond, "gcInterval",
 		),
-		Addresses: func() []string {
-			raw := strings.TrimSpace(nodeAddresses.Load())
-			if raw == "" {
-				return nil
-			}
-			return strings.Split(raw, ",")
-		},
+		Addresses: func() []string { return splitAddresses(nodeAddresses.Load()) },
 		DegradedNodes: func() []bool {
 			raw := strings.TrimSpace(degradedNodes.Load())
 			if raw == "" {
@@ -189,17 +183,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		LogTableStructureDuration: conf.GetDurationVar(10, time.Minute, "logTableStructureDuration"),
 		BackupFolderName:          conf.GetStringVar("", "KUBE_NAMESPACE"),
 		AdvertisedAddress:         strings.TrimSpace(conf.GetStringVar("", "advertisedAddress")),
-		ShadowAddresses: func() []string {
-			raw := strings.TrimSpace(shadowNodeAddresses.Load())
-			if raw == "" {
-				return nil
-			}
-			shadows := strings.Split(raw, ",")
-			for i := range shadows {
-				shadows[i] = strings.TrimSpace(shadows[i])
-			}
-			return shadows
-		},
+		ShadowAddresses:           func() []string { return splitAddresses(shadowNodeAddresses.Load()) },
 		Replication: node.ReplicationConfig{
 			MaxBytesPerSecond:  replicationMaxBytesPerSecond.Load,
 			Paused:             replicationPaused.Load,
@@ -451,6 +435,16 @@ func getNodeID(podName string) (int64, error) {
 	return 0, fmt.Errorf(
 		"invalid pod name %q, expected format: keydb-<nodeId>-0, keydb-<nodeId>-b-0 or keydb-<nodeId>", podName,
 	)
+}
+
+// splitAddresses splits a comma-separated address list, keeping empty entries so that indexes match node IDs.
+// It returns nil when the list is empty.
+func splitAddresses(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
 }
 
 type configObserver struct {

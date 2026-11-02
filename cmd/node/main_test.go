@@ -167,6 +167,14 @@ func TestGetNodeID(t *testing.T) {
 //   - readiness ("keydb.NodeService") becomes SERVING once NodeService is registered
 //   - the main gRPC port also serves the health service
 //   - SIGTERM / context cancel flips everything to NOT_SERVING and shuts down cleanly
+func TestSplitAddresses(t *testing.T) {
+	require.Nil(t, splitAddresses(""))
+	require.Nil(t, splitAddresses("  "))
+	require.Equal(t, []string{"a:1"}, splitAddresses(" a:1 "))
+	require.Equal(t, []string{"a:1", "b:1"}, splitAddresses("a:1,b:1"))
+	require.Equal(t, []string{"", "b:1", ""}, splitAddresses(",b:1,"), "empty entries keep the node indexes")
+}
+
 func TestRunWith_HealthEndpoints(t *testing.T) {
 	mainPort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
