@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rudderlabs/rudder-go-kit/logger"
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
@@ -22,22 +21,6 @@ func (s *Service) advanceSnapshotTimestamp(hashRange int64, timestamp uint64) er
 		return nil
 	}
 	return s.setSnapshotTimestamp(hashRange, timestamp)
-}
-
-// allRangesSynced returns true when every hash range this node owns has a since marker,
-// meaning the node received at least one full pass for each of them.
-func (s *Service) allRangesSynced() bool {
-	for hashRange := range s.getCurrentRanges() {
-		_, found, err := s.getSnapshotTimestamp(hashRange)
-		if err != nil {
-			s.logger.Warnn("Checking snapshot timestamp", logger.NewIntField("hashRange", hashRange), obskit.Error(err))
-			return false
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
 }
 
 // checkShadowSource makes sure a shadow only ever receives data from one source.

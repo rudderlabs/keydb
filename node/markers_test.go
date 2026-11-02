@@ -56,30 +56,6 @@ func TestEmptyRangeGetsMarker(t *testing.T) {
 	require.Zero(t, ts)
 }
 
-func TestAllRangesSynced(t *testing.T) {
-	ctx := context.Background()
-	address := freeAddress(t)
-	s := newTestService(ctx, t, Config{NodeID: 0, TotalHashRanges: 4, Addresses: staticList(address)}, newTestConf(t))
-	serveTestService(t, s, address)
-	c := nodeClient(t, address)
-
-	synced := func() bool {
-		info, err := s.GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
-		require.NoError(t, err)
-		return info.AllRangesSynced
-	}
-
-	require.False(t, synced())
-	for hr := range int64(3) {
-		resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: hr, IsLast: true, Timestamp: 1})
-		require.True(t, resp.Success, resp.ErrorMessage)
-	}
-	require.False(t, synced(), "one range has no marker yet")
-	resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: 3, IsLast: true, Timestamp: 1})
-	require.True(t, resp.Success, resp.ErrorMessage)
-	require.True(t, synced())
-}
-
 func TestLeftoverDiskGuard(t *testing.T) {
 	ctx := context.Background()
 	newShadow := func(t *testing.T, stat stats.Stats) (*Service, pb.NodeServiceClient) {
@@ -134,7 +110,6 @@ func TestLeftoverDiskGuard(t *testing.T) {
 		for hashRange := range s.config.TotalHashRanges {
 			require.NoError(t, s.setSnapshotTimestamp(hashRange, 1_000_000))
 		}
-		require.True(t, s.allRangesSynced())
 
 		resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: 0, IsLast: true, Timestamp: 5, SourceAddress: "active:1"})
 		require.True(t, resp.Success, resp.ErrorMessage)
@@ -145,7 +120,6 @@ func TestLeftoverDiskGuard(t *testing.T) {
 		_, found, err = s.getSnapshotTimestamp(1)
 		require.NoError(t, err)
 		require.False(t, found, "a marker from another source would skip data the shadow lacks")
-		require.False(t, s.allRangesSynced())
 		_, found, err = s.cache.GetValue(getSnapshotTimestampKey(1), internalKeysHashRange)
 		require.NoError(t, err)
 		require.False(t, found, "the marker is gone from the disk too, not only from memory")

@@ -864,7 +864,6 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 		HashRanges:            hashRanges,
 		LastSnapshotTimestamp: s.lastSnapshotTime.Unix(),
 		Role:                  s.role(),
-		AllRangesSynced:       s.allRangesSynced(),
 	}, nil
 }
 
