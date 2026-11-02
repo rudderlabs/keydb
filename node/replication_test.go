@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -13,8 +12,6 @@ import (
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/stats/memstats"
-
-	pb "github.com/rudderlabs/keydb/proto"
 )
 
 func TestReplicationStartsFromConfig(t *testing.T) {
@@ -36,8 +33,6 @@ func TestReplicationStartsFromConfig(t *testing.T) {
 	require.Equal(t, "ACTIVE", status.Role)
 	shadowStatus := p.shadow.ReplicationStatus()
 	require.Equal(t, "shadow", shadowStatus.State, "a shadow never replicates")
-	require.Equal(t, []string{"this pod is the shadow, the active pod " + p.sourceAddress + " reports readiness"},
-		shadowStatus.NotReadyReasons)
 }
 
 func TestReplicationIncremental(t *testing.T) {
@@ -59,34 +54,33 @@ func TestReplicationIncremental(t *testing.T) {
 		"an incremental pass must only send what changed")
 }
 
-func TestReplicationReadiness(t *testing.T) {
+func TestReplicationGap(t *testing.T) {
 	p := newReplicationPair(t, fastReplication(nil), stats.NOP)
 	status := p.source.ReplicationStatus()
-	require.False(t, status.Ready)
 	require.EqualValues(t, -1, status.GapSeconds)
+	require.EqualValues(t, -1, status.WorstCaseGapSeconds)
 
 	p.put(t, testKeys(100)...)
 	p.shadows.set(p.shadowAddress)
-	require.Eventually(t, func() bool { return p.source.ReplicationStatus().Ready },
-		10*time.Second, 20*time.Millisecond, "never became ready")
+	require.Eventually(t, func() bool { return p.source.ReplicationStatus().PassesCompleted > 0 },
+		10*time.Second, 20*time.Millisecond, "no pass ever completed")
 	status = p.source.ReplicationStatus()
-	require.True(t, status.ShadowAllRangesSynced)
-	require.Empty(t, status.NotReadyReasons)
 	require.GreaterOrEqual(t, status.GapSeconds, float64(0))
+	require.GreaterOrEqual(t, status.WorstCaseGapSeconds, float64(0))
 }
 
 func TestReplicationStopsOnClear(t *testing.T) {
 	p := newReplicationPair(t, fastReplication(nil), stats.NOP)
 	p.shadows.set(p.shadowAddress)
-	require.Eventually(t, func() bool { return p.source.ReplicationStatus().Ready },
+	require.Eventually(t, func() bool { return p.source.ReplicationStatus().PassesCompleted > 0 },
 		10*time.Second, 20*time.Millisecond)
 
 	p.shadows.set("")
 	require.Eventually(t, func() bool { return p.source.ReplicationStatus().State == "idle" },
 		10*time.Second, 20*time.Millisecond)
 	status := p.source.ReplicationStatus()
-	require.False(t, status.Ready, "a stopped copy must not report the old readiness")
-	require.Zero(t, status.PassesCompleted)
+	require.Zero(t, status.PassesCompleted, "a stopped copy must not report the old progress")
+	require.EqualValues(t, -1, status.GapSeconds)
 }
 
 func TestReplicationNeedsAdvertisedAddress(t *testing.T) {
@@ -244,13 +238,9 @@ func TestPassDelayStretchesWithBrake(t *testing.T) {
 	require.Equal(t, maxPassDelay, r.passDelay(), "the stretched pause is capped")
 }
 
-func TestReadiness(t *testing.T) {
+func TestGaps(t *testing.T) {
 	start := time.Unix(1000, 0)
-	const (
-		threshold = time.Minute
-		pause     = 5 * time.Second
-	)
-	shadowSynced := &pb.GetNodeInfoResponse{Role: pb.NodeRole_SHADOW, AllRangesSynced: true}
+	const pause = 5 * time.Second
 	afterPass := func(duration time.Duration) replicationProgress {
 		return replicationProgress{passesCompleted: 3, lastPassStart: start, lastPassEnd: start.Add(duration)}
 	}
@@ -258,58 +248,24 @@ func TestReadiness(t *testing.T) {
 		name         string
 		now          time.Time
 		progress     replicationProgress
-		info         *pb.GetNodeInfoResponse
-		infoErr      error
-		reasons      []string
 		gap          time.Duration
 		worstCaseGap time.Duration
 	}{
+		{name: "no pass yet", now: start, gap: -1, worstCaseGap: -1},
 		{
-			name: "ready", now: start.Add(20 * time.Second), progress: afterPass(10 * time.Second),
-			info: shadowSynced, gap: 20 * time.Second, worstCaseGap: 25 * time.Second,
-		},
-		{
-			name: "ready through the whole next pass", now: start.Add(44 * time.Second),
-			progress: afterPass(20 * time.Second),
-			info:     shadowSynced, gap: 44 * time.Second, worstCaseGap: 45 * time.Second,
-		},
-		{
-			name: "no pass yet", now: start, info: shadowSynced,
-			reasons: []string{"first pass not completed"}, gap: -1, worstCaseGap: -1,
+			name: "after a pass", now: start.Add(20 * time.Second), progress: afterPass(10 * time.Second),
+			gap: 20 * time.Second, worstCaseGap: 25 * time.Second,
 		},
 		{
 			name: "the gap runs from the start of the last pass", now: start.Add(61 * time.Second),
-			progress: afterPass(time.Second), info: shadowSynced,
-			reasons: []string{"gap above threshold"}, gap: 61 * time.Second, worstCaseGap: 7 * time.Second,
-		},
-		{
-			name: "passes too slow for the threshold", now: start.Add(30 * time.Second),
-			progress: afterPass(28 * time.Second),
-			info:     shadowSynced, reasons: []string{"worst-case gap above threshold"},
-			gap: 30 * time.Second, worstCaseGap: 61 * time.Second,
-		},
-		{
-			name: "shadow unreachable", now: start.Add(time.Second), progress: afterPass(time.Second),
-			infoErr: errors.New("unavailable"), reasons: []string{"shadow unreachable"},
-			gap: time.Second, worstCaseGap: 7 * time.Second,
-		},
-		{
-			name: "destination is not a shadow", now: start.Add(time.Second), progress: afterPass(time.Second),
-			info:    &pb.GetNodeInfoResponse{Role: pb.NodeRole_ACTIVE, AllRangesSynced: true},
-			reasons: []string{"destination is not a shadow"}, gap: time.Second, worstCaseGap: 7 * time.Second,
-		},
-		{
-			name: "shadow is missing ranges", now: start.Add(time.Second), progress: afterPass(time.Second),
-			info: &pb.GetNodeInfoResponse{Role: pb.NodeRole_SHADOW}, reasons: []string{"shadow is missing ranges"},
-			gap: time.Second, worstCaseGap: 7 * time.Second,
+			progress: afterPass(time.Second), gap: 61 * time.Second, worstCaseGap: 7 * time.Second,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			check := readiness(tt.now, tt.progress, pause, threshold, tt.info, tt.infoErr)
-			require.Equal(t, tt.reasons, check.reasons)
-			require.Equal(t, tt.gap, check.gap)
-			require.Equal(t, tt.worstCaseGap, check.worstCaseGap)
+			gap, worstCaseGap := gaps(tt.now, tt.progress, pause)
+			require.Equal(t, tt.gap, gap)
+			require.Equal(t, tt.worstCaseGap, worstCaseGap)
 		})
 	}
 }
@@ -326,18 +282,17 @@ func TestReplicationMetrics(t *testing.T) {
 		}
 		return m.LastValue()
 	}
+	require.EqualValues(t, -1, gauge("keydb_replication_gap_seconds"), "no pass is done yet")
 	p.put(t, testKeys(100)...)
 	p.shadows.set(p.shadowAddress)
-	require.Eventually(t, func() bool { return gauge("keydb_replication_ready") == 1 },
-		10*time.Second, 20*time.Millisecond, "the ready gauge never went up")
-	require.GreaterOrEqual(t, gauge("keydb_replication_gap_seconds"), float64(0))
+	require.Eventually(t, func() bool { return gauge("keydb_replication_gap_seconds") >= 0 },
+		10*time.Second, 20*time.Millisecond, "the gap gauge never got a value")
 	require.Positive(t, gauge("keydb_replication_bytes_total"))
 	require.Positive(t, gauge("keydb_replication_budget_bytes_per_second"))
 
 	p.shadows.set("")
-	require.Eventually(t, func() bool { return gauge("keydb_replication_ready") == 0 },
-		10*time.Second, 20*time.Millisecond, "the ready gauge must go down once the copy stops")
-	require.EqualValues(t, -1, gauge("keydb_replication_gap_seconds"), "a stopped copy has no gap")
+	require.Eventually(t, func() bool { return gauge("keydb_replication_gap_seconds") == -1 },
+		10*time.Second, 20*time.Millisecond, "a stopped copy has no gap")
 	require.Zero(t, gauge("keydb_replication_budget_bytes_per_second"), "a stopped copy has no budget")
 }
 

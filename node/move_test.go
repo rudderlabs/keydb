@@ -122,16 +122,14 @@ func TestMoveRestartMidReplication(t *testing.T) {
 
 	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
 	c.start(node0b)
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond)
+	waitForPass(t, node0)
 
 	// the serving node restarts on the same disk
 	c.stop(node0)
 	c.start(node0)
 	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().State == "running" }, 10*time.Second,
 		10*time.Millisecond, "replication resumes on boot")
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond, "readiness must be reported again once caught up")
+	waitForPass(t, node0)
 	status := node0.service.ReplicationStatus()
 	require.Less(t, status.LastPassBytes, 100*bytesize.KB, "after a restart the passes are incremental")
 	require.True(t, hasKeys(t, node0b, keys))
@@ -172,8 +170,7 @@ func TestMoveStaleListsDuringRefresh(t *testing.T) {
 
 	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
 	c.start(node0b)
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond)
+	waitForPass(t, node0)
 
 	// the old node is gone, but neither the shadow nor node 1 picked up the new config yet: both still hand out
 	// the old list, so the client is sent back to the dead address until they refresh
@@ -300,7 +297,7 @@ func TestMoveLeftoverDisk(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return strings.Contains(slotB.service.ReplicationStatus().LastError, "leftover")
 	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse to merge into a leftover disk")
-	require.False(t, slotB.service.ReplicationStatus().Ready)
+	require.Zero(t, slotB.service.ReplicationStatus().PassesCompleted)
 }
 
 func TestMoveLeftoverDiskReusedSlot(t *testing.T) {
@@ -325,7 +322,7 @@ func TestMoveLeftoverDiskReusedSlot(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return strings.Contains(slotAAgain.service.ReplicationStatus().LastError, "leftover")
 	}, 30*time.Second, 20*time.Millisecond, "the shadow must refuse a leftover disk, even on a reused slot")
-	require.False(t, slotAAgain.service.ReplicationStatus().Ready)
+	require.Zero(t, slotAAgain.service.ReplicationStatus().PassesCompleted)
 }
 
 // TestMoveOneNodeCluster moves the only node of a cluster: once the old node is gone, the shadow is the only pod
@@ -370,8 +367,7 @@ func TestMoveOneNodeCluster(t *testing.T) {
 
 		c.setTopology([]string{node0.address}, []string{node0b.address})
 		c.start(node0b)
-		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-			20*time.Millisecond)
+		waitForPass(t, node0)
 
 		// the old node is gone and the shadow, the only pod left, still hands out the old list
 		c.stop(node0)
@@ -444,8 +440,7 @@ func TestMoveClientCreatedDuringMove(t *testing.T) {
 	c.start(node1)
 	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
 	c.start(node0b)
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond)
+	waitForPass(t, node0)
 
 	cl := c.newClient()
 	require.Equal(t, 3, cl.ClusterSize(), "the first list holds every pod behind the name, the shadow included")
@@ -529,8 +524,7 @@ func TestMovePromotionMidReceive(t *testing.T) {
 
 			c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
 			c.start(node0b)
-			require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-				20*time.Millisecond)
+			waitForPass(t, node0)
 
 			// a big write gives every range of the next pass several batches, which the budget charges one at a time
 			big := make([]string, 300_000)
@@ -581,8 +575,7 @@ func TestMoveOldNodeStopsAnswering(t *testing.T) {
 
 	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
 	c.start(node0b)
-	require.Eventually(t, func() bool { return node0.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond)
+	waitForPass(t, node0)
 
 	// PR2, but the old node stops answering instead of going away
 	proxy.pause()
@@ -948,11 +941,10 @@ func (c *moveCluster) move(
 	shadows[from.id] = to.address
 	c.setTopology(active, shadows)
 	c.start(to)
-	require.Eventually(t, func() bool { return from.service.ReplicationStatus().Ready }, 30*time.Second,
-		20*time.Millisecond, "the active node never became ready to switch")
-	// a key written after readiness reaches the shadow too, syncing goes on after the signal
-	afterReady := c.keyOf(from.id, "after-ready-"+to.address)
-	require.NoError(t, cl.Put(context.Background(), []string{afterReady}, time.Hour))
+	waitForPass(t, from)
+	// a key written after the first pass reaches the shadow too: the copy goes on until PR2
+	afterFirstPass := c.keyOf(from.id, "after-first-pass-"+to.address)
+	require.NoError(t, cl.Put(context.Background(), []string{afterFirstPass}, time.Hour))
 	passes := from.service.ReplicationStatus().PassesCompleted
 	require.Eventually(t, func() bool { return from.service.ReplicationStatus().PassesCompleted >= passes+2 },
 		10*time.Second, 10*time.Millisecond)
@@ -986,9 +978,17 @@ func (c *moveCluster) move(
 		refresh(to)
 		refresh(others...)
 	}
-	require.True(t, hasKeys(t, to, []string{afterReady}),
-		"a key written after readiness must reach the shadow")
+	require.True(t, hasKeys(t, to, []string{afterFirstPass}),
+		"a key written after the first pass must reach the shadow")
 	return lastPassStart, stopped
+}
+
+// waitForPass waits until the node has completed a pass to its shadow, after which the shadow holds every write the
+// node accepted before that pass started
+func waitForPass(t *testing.T, n *moveNode) {
+	t.Helper()
+	require.Eventually(t, func() bool { return n.service.ReplicationStatus().PassesCompleted > 0 }, 30*time.Second,
+		20*time.Millisecond, "the active node never completed a pass")
 }
 
 // runningExcept returns the running nodes other than the given ones

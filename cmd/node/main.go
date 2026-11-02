@@ -204,7 +204,6 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			MaxBytesPerSecond:  replicationMaxBytesPerSecond.Load,
 			Paused:             replicationPaused.Load,
 			PauseBetweenPasses: conf.GetDurationVar(5, time.Second, "replication.pauseBetweenPasses"),
-			GapThreshold:       conf.GetDurationVar(60, time.Second, "replication.gapThreshold"),
 			BrakeInterval:      conf.GetDurationVar(5, time.Second, "replication.brakeInterval"),
 			BrakeSchedLatencyThreshold: conf.GetDurationVar(
 				10, time.Millisecond, "replication.brake.schedLatencyThreshold",

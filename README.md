@@ -562,14 +562,14 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
 ### How it works
 
 - **Roles:** a pod listed in `shadowNodeAddresses` for its node index is a SHADOW. It refuses `Get` and `Put` with `NOT_READY` and only receives replication streams. Every other pod is ACTIVE. A pod knows its own address from `advertisedAddress`. A pod whose index the config gives to another pod, without listing it as the shadow, refuses `Get` and `Put` with `NOT_READY` too: once the second PR's config reaches the old pod, it stops acknowledging writes the new pod would never get.
-- **Replication:** an ACTIVE node with a shadow copies every hash range it owns to the shadow, then sends incremental passes back to back for as long as the shadow exists, readiness included. Expired keys are not copied. After a restart the node resumes on its own, and the shadow's since markers keep the passes incremental.
+- **Replication:** an ACTIVE node with a shadow copies every hash range it owns to the shadow, then sends incremental passes back to back for as long as the shadow exists, however long the switch takes. Expired keys are not copied. After a restart the node resumes on its own, and the shadow's since markers keep the passes incremental.
 - **Load:** the copy never starves the serving node:
   - one stream goroutine, one range at a time, and zstd level 1;
   - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s), counted on the data read from the cache, before compression;
   - an automatic brake that halves the budget, down to a pause, whenever Go scheduler latency, the node's own Get/Put latency or cgroup CPU throttling crosses its threshold, and raises it again in steps once healthy. Get/Put latency is compared with a baseline taken from the first sample with traffic of each job, and never counts below an absolute floor. Throttling is the share of CPU periods in which the pod was throttled, so it only ever fires for a pod with a CPU limit. A lower budget also spaces passes out, because an incremental pass still scans every table written since the previous one;
   - a paused or fully braked copy stops at its next batch or range, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
   - garbage collection skips its runs while a pass is in progress, and never runs on a shadow.
-- **Readiness:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends, and peaks at two pass durations plus the pause between passes, the worst-case gap. The serving node is ready to switch once a pass is done, both the gap and the worst-case gap are under `replication.gapThreshold` (default 60s), and the shadow holds a marker for every range. While it is ready, switching at any moment loses at most the threshold.
+- **Gap:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends, and peaks at two pass durations plus the pause between passes, the worst-case gap. A switch at a given moment loses at most the gap at that moment. keydb doesn't judge whether a gap is small enough: whoever merges PR2 decides, case by case.
 - **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after the start of its last completed pass, at most the gap, are lost.
 - **Leftover disks:** a shadow refuses to receive data when its disk already holds data from another source, so a disk Kubernetes didn't delete can't silently turn a move into a merge. When it records its first source, it drops any since markers left on its disk.
 
@@ -604,14 +604,14 @@ Rules for the whole move:
 
    `keydb-0-b` starts as a shadow and `keydb-0` starts copying to it. The first pass is a full copy, which takes hours for big nodes. The node keeps serving throughout.
 
-2. **Wait for readiness.** Watch `keydb_replication_ready` (1 means ready) or the `Replication ready to switch` log line from the serving pod. The node also logs `Replication no longer ready`, with the reasons, whenever readiness is lost. Then check the verdict on the serving pod itself, here `keydb-0-0` (slot `a`):
+2. **Watch the copy, then decide.** The serving pod logs `Replication pass completed` after every pass, and publishes the gap as `keydb_replication_gap_seconds`. Check the status on the serving pod itself, here `keydb-0-0` (slot `a`):
 
    ```bash
    kubectl port-forward -n <namespace> pod/keydb-0-0 8080:8080
    curl -s localhost:8080/replication/status
    ```
 
-   The status shows `ready`, `notReadyReasons`, `gapSeconds`, `worstCaseGapSeconds`, `lastPassDuration` and the progress of the current pass (`currentPassStartedAt`, `currentPassRangesDone` of `currentPassRangesTotal`, `currentPassBytes`). The shadow answers with `state: shadow`, and names the pod to ask instead.
+   The status shows `passesCompleted`, `gapSeconds`, `worstCaseGapSeconds`, `lastPassDuration`, `lastError` and the progress of the current pass (`currentPassStartedAt`, `currentPassRangesDone` of `currentPassRangesTotal`, `currentPassBytes`). A switch now loses at most `gapSeconds` of writes, and at most `worstCaseGapSeconds` until the next pass ends. Merge PR2 once that loss is acceptable. The shadow answers with `state: shadow`.
 
 3. **PR2, the switch:**
 
@@ -644,7 +644,6 @@ Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV
 | `replication.maxBytesPerSecond` | `33554432` (32 MiB) | yes |
 | `replication.paused` | `false` | yes |
 | `replication.pauseBetweenPasses` | `5s` | no |
-| `replication.gapThreshold` | `60s` | no |
 | `replication.brakeInterval` | `5s` | no |
 | `replication.brake.schedLatencyThreshold` | `10ms` | no |
 | `replication.brake.requestLatencyFactor` | `2` | no |
@@ -655,7 +654,7 @@ Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV
 
 ### Metrics
 
-- `keydb_replication_ready`, `keydb_replication_gap_seconds` (-1 while no pass is done)
+- `keydb_replication_gap_seconds` (-1 while no pass is done)
 - `keydb_replication_pass_duration_seconds`, `keydb_replication_errors_total`
 - `keydb_replication_bytes_total`, counted as the copy goes, before compression, in the budget's unit
 - `keydb_replication_budget_bytes_per_second`, `keydb_replication_brake_events_total` (by `reason`)

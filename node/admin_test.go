@@ -33,7 +33,6 @@ func TestAdminReplicationStatus(t *testing.T) {
 		require.NoError(t, jsonrs.Unmarshal(body, &status))
 		require.Equal(t, "ACTIVE", status.Role)
 		require.Equal(t, "idle", status.State)
-		require.False(t, status.Ready)
 		require.EqualValues(t, -1, status.GapSeconds)
 	})
 
@@ -56,7 +55,7 @@ func TestAdminReplicationStatusWhileRunning(t *testing.T) {
 	p := newReplicationPair(t, fastReplication(nil), stats.NOP)
 	p.put(t, testKeys(100)...)
 	p.shadows.set(p.shadowAddress)
-	require.Eventually(t, func() bool { return p.source.ReplicationStatus().Ready }, 10*time.Second,
+	require.Eventually(t, func() bool { return p.source.ReplicationStatus().PassesCompleted > 0 }, 10*time.Second,
 		20*time.Millisecond)
 	server := httptest.NewServer(p.source.AdminHandler())
 	t.Cleanup(server.Close)
@@ -72,9 +71,6 @@ func TestAdminReplicationStatusWhileRunning(t *testing.T) {
 	require.Equal(t, "ACTIVE", status["role"])
 	require.Equal(t, "running", status["state"])
 	require.Equal(t, p.shadowAddress, status["shadowAddress"])
-	require.Equal(t, true, status["ready"])
-	require.Empty(t, status["notReadyReasons"])
-	require.Equal(t, true, status["shadowAllRangesSynced"])
 	for _, key := range []string{
 		"gapSeconds", "worstCaseGapSeconds", "passesCompleted", "lastPassBytes", "budgetBytesPerSecond",
 		"currentPassRangesDone", "currentPassRangesTotal", "currentPassBytes",

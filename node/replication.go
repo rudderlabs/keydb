@@ -28,8 +28,6 @@ const (
 	replicationBatchSize = int(256 * bytesize.KB)
 	// replicationMaxRetryDelay caps the delay between attempts to send a range that failed
 	replicationMaxRetryDelay = 30 * time.Second
-	// replicationRPCTimeout bounds the small calls the job makes to the shadow
-	replicationRPCTimeout = 5 * time.Second
 	// maxPassDelay caps the pause between passes while the brake holds the budget down
 	maxPassDelay = time.Minute
 )
@@ -43,8 +41,6 @@ type ReplicationConfig struct {
 	// PauseBetweenPasses is the pause between two passes, 5s when zero
 	// A pass copies every hash range the node owns to the shadow: all of it at first, then only what changed.
 	PauseBetweenPasses time.Duration
-	// GapThreshold is the largest gap at which the node is ready to switch, 60s when zero
-	GapThreshold time.Duration
 	// BrakeInterval is how often the brake samples the node's load, 5s when zero
 	BrakeInterval time.Duration
 	// ReconcileInterval is how often the shadow list is re-read, 1s when zero
@@ -73,9 +69,6 @@ func (c *ReplicationConfig) setDefaults() {
 	}
 	if c.PauseBetweenPasses == 0 {
 		c.PauseBetweenPasses = 5 * time.Second
-	}
-	if c.GapThreshold == 0 {
-		c.GapThreshold = 60 * time.Second
 	}
 	if c.BrakeInterval == 0 {
 		c.BrakeInterval = 5 * time.Second
@@ -110,14 +103,11 @@ type ReplicationStatus struct {
 	GapSeconds float64 `json:"gapSeconds"`
 	// WorstCaseGapSeconds is the largest gap at the current pace, reached just before a pass ends: two pass
 	// durations plus the pause between passes. -1 before the first pass.
-	WorstCaseGapSeconds   float64  `json:"worstCaseGapSeconds"`
-	ShadowAllRangesSynced bool     `json:"shadowAllRangesSynced"`
-	BudgetBytesPerSecond  int64    `json:"budgetBytesPerSecond"`
-	BrakeEngaged          bool     `json:"brakeEngaged"`
-	BrakeReason           string   `json:"brakeReason"`
-	Ready                 bool     `json:"ready"`
-	NotReadyReasons       []string `json:"notReadyReasons"`
-	LastError             string   `json:"lastError"`
+	WorstCaseGapSeconds  float64 `json:"worstCaseGapSeconds"`
+	BudgetBytesPerSecond int64   `json:"budgetBytesPerSecond"`
+	BrakeEngaged         bool    `json:"brakeEngaged"`
+	BrakeReason          string  `json:"brakeReason"`
+	LastError            string  `json:"lastError"`
 }
 
 // replicator fills the node's shadow, if it has one. It re-reads the shadow list periodically and runs a job
@@ -135,11 +125,7 @@ type replicator struct {
 	done     chan struct{}
 	progress replicationProgress
 
-	// evalMu serialises readiness evaluations
-	evalMu sync.Mutex
-
 	metrics struct {
-		ready        stats.Gauge
 		gap          stats.Gauge
 		passDuration stats.Timer
 		bytes        stats.Counter
@@ -150,19 +136,16 @@ type replicator struct {
 
 // replicationProgress is the job's state for the current target
 type replicationProgress struct {
-	passesCompleted       int64
-	currentPassStart      time.Time
-	currentPassDone       int
-	currentPassTotal      int
-	currentPassBytes      int64
-	lastPassStart         time.Time
-	lastPassEnd           time.Time
-	lastPassBytes         int64
-	lastPassRanges        int
-	shadowAllRangesSynced bool
-	ready                 bool
-	notReadyReasons       []string
-	lastError             string
+	passesCompleted  int64
+	currentPassStart time.Time
+	currentPassDone  int
+	currentPassTotal int
+	currentPassBytes int64
+	lastPassStart    time.Time
+	lastPassEnd      time.Time
+	lastPassBytes    int64
+	lastPassRanges   int
+	lastError        string
 }
 
 func newReplicator(s *Service) *replicator {
@@ -185,8 +168,8 @@ func newReplicator(s *Service) *replicator {
 		r.signals = newRuntimeSignals(s.latency.meanSinceLast, defaultCgroupCPUStatFile)
 	}
 	tags := stats.Tags{"nodeID": strconv.FormatInt(s.config.NodeID, 10)}
-	r.metrics.ready = s.stats.NewTaggedStat("keydb_replication_ready", stats.GaugeType, tags)
 	r.metrics.gap = s.stats.NewTaggedStat("keydb_replication_gap_seconds", stats.GaugeType, tags)
+	r.metrics.gap.Gauge(-1) // no pass is done yet
 	r.metrics.passDuration = s.stats.NewTaggedStat("keydb_replication_pass_duration_seconds", stats.TimerType, tags)
 	r.metrics.bytes = s.stats.NewTaggedStat("keydb_replication_bytes_total", stats.CountType, tags)
 	r.metrics.errors = s.stats.NewTaggedStat("keydb_replication_errors_total", stats.CountType, tags)
@@ -233,12 +216,11 @@ func (r *replicator) switchTarget(ctx context.Context, target string) {
 	r.mu.Lock()
 	cancel, done := r.cancel, r.done
 	r.target, r.cancel, r.done = "", nil, nil
-	r.progress = replicationProgress{} // a stopped copy has no readiness to report, not even while it winds down
+	r.progress = replicationProgress{} // a stopped copy reports nothing, not even while it winds down
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
 		<-done
-		r.metrics.ready.Gauge(0)
 		r.metrics.gap.Gauge(-1)
 		r.metrics.budget.Gauge(0)
 		r.s.logger.Infon("Replication stopped")
@@ -283,19 +265,19 @@ func (r *replicator) job(ctx context.Context, target string) {
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	wg.Go(func() { r.brakeLoop(ctx, shadow, log) })
+	wg.Go(func() { r.brakeLoop(ctx, log) })
 
 	for ctx.Err() == nil {
 		r.pass(ctx, shadow, log)
-		r.evaluate(ctx, shadow, log)
+		r.recordGap()
 		if !sleepCtx(ctx, r.passDelay()) {
 			return
 		}
 	}
 }
 
-// brakeLoop samples the node's load, adjusts the byte budget and re-evaluates readiness.
-func (r *replicator) brakeLoop(ctx context.Context, shadow pb.NodeServiceClient, log logger.Logger) {
+// brakeLoop samples the node's load, adjusts the byte budget and publishes the gap.
+func (r *replicator) brakeLoop(ctx context.Context, log logger.Logger) {
 	ticker := time.NewTicker(r.cfg.BrakeInterval)
 	defer ticker.Stop()
 	for {
@@ -319,7 +301,7 @@ func (r *replicator) brakeLoop(ctx context.Context, shadow pb.NodeServiceClient,
 		}
 		bytesPerSecond, _, _ := r.budget.current()
 		r.metrics.budget.Gauge(bytesPerSecond)
-		r.evaluate(ctx, shadow, log)
+		r.recordGap()
 	}
 }
 
@@ -444,48 +426,6 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 	return charged, nil
 }
 
-// readinessCheck is the outcome of readiness.
-type readinessCheck struct {
-	reasons      []string      // why the node isn't ready, none when it is
-	gap          time.Duration // -1 before the first pass
-	worstCaseGap time.Duration // -1 before the first pass
-}
-
-// readiness decides whether the node is ready to switch to its shadow. The gap, how much the shadow may lack, is the
-// time since the start of the last completed pass: writes acknowledged before it are on the shadow. It grows until
-// the next pass ends, and peaks at two pass durations plus the pause between them. The node is ready only when that
-// peak stays under the threshold too, so readiness doesn't come and go with every pass, and a human may switch at
-// any moment while it holds. info and infoErr are the shadow's answer to GetNodeInfo.
-func readiness(
-	now time.Time, p replicationProgress, pauseBetweenPasses, threshold time.Duration,
-	info *pb.GetNodeInfoResponse, infoErr error,
-) readinessCheck {
-	var check readinessCheck
-	check.gap, check.worstCaseGap = gaps(now, p, pauseBetweenPasses)
-	if p.passesCompleted == 0 {
-		check.reasons = append(check.reasons, "first pass not completed")
-	} else {
-		if check.gap > threshold {
-			check.reasons = append(check.reasons, "gap above threshold")
-		}
-		if check.worstCaseGap > threshold {
-			check.reasons = append(check.reasons, "worst-case gap above threshold")
-		}
-	}
-	switch {
-	case infoErr != nil:
-		check.reasons = append(check.reasons, "shadow unreachable")
-	default:
-		if info.Role != pb.NodeRole_SHADOW {
-			check.reasons = append(check.reasons, "destination is not a shadow")
-		}
-		if !info.AllRangesSynced {
-			check.reasons = append(check.reasons, "shadow is missing ranges")
-		}
-	}
-	return check
-}
-
 // gaps returns the gap and the worst-case gap at the current pace, both -1 before the first pass.
 func gaps(now time.Time, p replicationProgress, pauseBetweenPasses time.Duration) (gap, worstCaseGap time.Duration) {
 	if p.passesCompleted == 0 {
@@ -502,51 +442,13 @@ func seconds(d time.Duration) float64 {
 	return d.Seconds()
 }
 
-// evaluate decides whether the node is ready to switch to its shadow, and logs every change.
-func (r *replicator) evaluate(ctx context.Context, shadow pb.NodeServiceClient, log logger.Logger) {
-	r.evalMu.Lock()
-	defer r.evalMu.Unlock()
-
+// recordGap publishes the gap at the current pace.
+func (r *replicator) recordGap() {
 	r.mu.Lock()
 	p := r.progress
 	r.mu.Unlock()
-
-	infoCtx, cancel := context.WithTimeout(ctx, replicationRPCTimeout)
-	info, err := shadow.GetNodeInfo(infoCtx, &pb.GetNodeInfoRequest{})
-	cancel()
-	check := readiness(r.s.now(), p, r.passDelay(), r.cfg.GapThreshold, info, err)
-
-	ready := len(check.reasons) == 0
-	if ctx.Err() != nil {
-		return // the job is stopping, its last evaluation means nothing
-	}
-	r.mu.Lock()
-	if r.target == "" {
-		r.mu.Unlock()
-		return // stopped after the check above
-	}
-	wasReady := r.progress.ready
-	r.progress.ready = ready
-	r.progress.notReadyReasons = check.reasons
-	r.progress.shadowAllRangesSynced = err == nil && info.AllRangesSynced
-	r.mu.Unlock()
-
-	r.metrics.gap.Gauge(seconds(check.gap))
-	if ready {
-		r.metrics.ready.Gauge(1)
-	} else {
-		r.metrics.ready.Gauge(0)
-	}
-	switch {
-	case ready && !wasReady:
-		log.Infon("Replication ready to switch",
-			logger.NewFloatField("gapSeconds", check.gap.Seconds()),
-			logger.NewFloatField("worstCaseGapSeconds", check.worstCaseGap.Seconds()),
-			logger.NewIntField("passesCompleted", p.passesCompleted),
-		)
-	case !ready && wasReady:
-		log.Warnn("Replication no longer ready", logger.NewStringField("reasons", strings.Join(check.reasons, ", ")))
-	}
+	gap, _ := gaps(r.s.now(), p, r.passDelay())
+	r.metrics.gap.Gauge(seconds(gap))
 }
 
 // passDelay is the pause before the next pass. It grows as the brake lowers the budget: an incremental pass scans
@@ -602,17 +504,11 @@ func (r *replicator) status() ReplicationStatus {
 		LastPassRanges:         p.lastPassRanges,
 		GapSeconds:             -1,
 		WorstCaseGapSeconds:    -1,
-		ShadowAllRangesSynced:  p.shadowAllRangesSynced,
-		Ready:                  p.ready,
-		NotReadyReasons:        p.notReadyReasons,
 		LastError:              p.lastError,
 	}
 	if role == pb.NodeRole_SHADOW {
-		// a shadow only receives: the copy, its budget and its readiness live on the active pod
+		// a shadow only receives: the copy and its budget live on the active pod
 		status.State = "shadow"
-		status.NotReadyReasons = []string{
-			"this pod is the shadow, the active pod " + r.s.activeAddress() + " reports readiness",
-		}
 		return status
 	}
 	if target != "" {
@@ -624,12 +520,6 @@ func (r *replicator) status() ReplicationStatus {
 	gap, worstCaseGap := gaps(r.s.now(), p, r.passDelay())
 	status.GapSeconds, status.WorstCaseGapSeconds = seconds(gap), seconds(worstCaseGap)
 	status.BudgetBytesPerSecond, status.BrakeEngaged, status.BrakeReason = r.budget.current()
-	if !p.ready && status.NotReadyReasons == nil {
-		status.NotReadyReasons = []string{"no replication running"}
-		if target != "" {
-			status.NotReadyReasons = []string{"first pass not completed"}
-		}
-	}
 	return status
 }
 
