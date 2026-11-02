@@ -41,6 +41,7 @@ type ReplicationConfig struct {
 	// Paused returns true to pause the copy without stopping the job, never paused when nil
 	Paused func() bool
 	// PauseBetweenPasses is the pause between two passes, 5s when zero
+	// A pass copies every hash range the node owns to the shadow: all of it at first, then only what changed.
 	PauseBetweenPasses time.Duration
 	// GapThreshold is the largest gap at which the node is ready to switch, 60s when zero
 	GapThreshold time.Duration
