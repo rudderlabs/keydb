@@ -566,8 +566,8 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
 - **Load:** the copy never starves the serving node:
   - one stream goroutine, one range at a time, and zstd level 1;
   - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s), counted on the data read from the cache, before compression;
-  - an automatic brake that halves the budget, down to a pause, whenever the Go scheduler latency p99 goes over 10ms or the node's own Get/Put latency over twice its baseline (and 5ms), and raises it again in steps once healthy. The baseline is taken before each job starts copying. CPU throttling shows in both. A lower budget also spaces passes out, because an incremental pass still scans every table written since the previous one;
-  - a paused or fully braked copy stops at its next batch or range, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
+  - a brake: the copy waits while the node's own Get/Put requests are slow, that is while their mean latency over the last second is above `replication.maxRequestLatency` (50ms by default), or while requests are running and none has finished for longer than that, as when one is stuck. It checks before every batch, and CPU throttling or a busy disk shows in the latency it watches;
+  - a paused or braked copy stops at its next batch or range, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
   - garbage collection skips its runs while a pass is in progress, and never runs on a shadow.
 - **Gap:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends, and peaks at two pass durations plus the pause between passes, the worst-case gap. A switch at a given moment loses at most the gap at that moment. keydb doesn't judge whether a gap is small enough: whoever merges PR2 decides, case by case.
 - **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after the start of its last completed pass, at most the gap, are lost.
@@ -642,15 +642,16 @@ Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV
 | `shadowNodeAddresses` | empty | yes |
 | `adminPort` | `8080` | no |
 | `replication.maxBytesPerSecond` | `33554432` (32 MiB) | yes |
+| `replication.maxRequestLatency` | `50ms` | yes |
 
-`replication.maxBytesPerSecond` can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. Set it to `0` to pause the copy; the status then gives `paused: maxBytesPerSecond is not positive` as the brake reason. It is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0 and pauses the copy too. The brake always works below the configured ceiling.
+Both can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. Set `maxBytesPerSecond` to `0` to pause the copy; the status then gives `paused: maxBytesPerSecond is not positive` as the brake reason. It is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0 and pauses the copy too. While the brake holds the copy, the status gives the reason, such as `request latency 61ms over 50ms`: raise `maxRequestLatency` if the node's normal latency is above it, or the copy never runs.
 
 ### Metrics
 
 - `keydb_replication_gap_seconds` (-1 while no pass is done)
 - `keydb_replication_pass_duration_seconds`, `keydb_replication_errors_total`
 - `keydb_replication_bytes_total`, counted as the copy goes, before compression, in the budget's unit
-- `keydb_replication_budget_bytes_per_second`, `keydb_replication_brake_events_total` (by `reason`)
+- `keydb_replication_budget_bytes_per_second`, 0 while the copy is paused or braked
 - `keydb_err_not_ready_count`, `keydb_shadow_leftover_disk_total`
 
 ## Performance

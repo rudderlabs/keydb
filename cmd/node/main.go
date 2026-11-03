@@ -176,10 +176,16 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		BackupFolderName:          conf.GetStringVar("", "KUBE_NAMESPACE"),
 		AdvertisedAddress:         strings.TrimSpace(conf.GetStringVar("", "advertisedAddress")),
 		ShadowAddresses:           func() []string { return splitAddresses(shadowNodeAddresses.Load()) },
-		// the replication budget can be capped, or paused with 0, at runtime, without restarting the copy
-		Replication: node.ReplicationConfig{MaxBytesPerSecond: conf.GetReloadableInt64Var(
-			node.DefaultReplicationMaxBytesPerSecond, 1, "replication.maxBytesPerSecond",
-		).Load},
+		// both change at runtime, without restarting the copy: 0 bytes per second pauses it
+		Replication: node.ReplicationConfig{
+			MaxBytesPerSecond: conf.GetReloadableInt64Var(
+				node.DefaultReplicationMaxBytesPerSecond, 1, "replication.maxBytesPerSecond",
+			).Load,
+			MaxRequestLatency: conf.GetReloadableDurationVar(
+				int64(node.DefaultReplicationMaxRequestLatency/time.Millisecond), time.Millisecond,
+				"replication.maxRequestLatency",
+			).Load,
+		},
 	}
 
 	port := conf.GetIntVar(50051, 1, "port")

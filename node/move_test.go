@@ -225,11 +225,8 @@ func TestMoveCPUBounds(t *testing.T) {
 			"a budget of 1 MiB/s must slow the first pass down")
 	})
 
-	t.Run("brake engages and releases", func(t *testing.T) {
-		signals := &switchableSignals{}
-		replication := fastMoveReplication()
-		replication.Signals = signals
-		c := newMoveCluster(t, replication)
+	t.Run("the copy waits while requests are slow", func(t *testing.T) {
+		c := newMoveCluster(t, fastMoveReplication())
 		node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
 		c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
 		c.start(node0)
@@ -238,14 +235,14 @@ func TestMoveCPUBounds(t *testing.T) {
 		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().State == "running" },
 			10*time.Second, 10*time.Millisecond)
 
-		signals.loaded.Store(true)
+		stuck := node0.service.latency.start() // a request that doesn't finish
 		require.Eventually(t, func() bool {
 			status := node0.service.ReplicationStatus()
-			return status.BrakeEngaged && strings.Contains(status.BrakeReason, "scheduler latency")
-		}, 10*time.Second, 10*time.Millisecond, "the brake never engaged")
-		signals.loaded.Store(false)
-		require.Eventually(t, func() bool { return !node0.service.ReplicationStatus().BrakeEngaged },
-			30*time.Second, 10*time.Millisecond, "the brake never released")
+			return status.BudgetBytesPerSecond == 0 && strings.Contains(status.BrakeReason, "no request finished")
+		}, 10*time.Second, 10*time.Millisecond, "the copy never waited")
+		node0.service.latency.finish(stuck)
+		require.Eventually(t, func() bool { return node0.service.ReplicationStatus().BrakeReason == "" },
+			10*time.Second, 10*time.Millisecond, "the copy never resumed")
 	})
 
 	t.Run("manual pause and resume", func(t *testing.T) {
@@ -870,9 +867,7 @@ func (c *moveCluster) keyOf(nodeID int64, prefix string) string {
 func fastMoveReplication() ReplicationConfig {
 	return ReplicationConfig{
 		PauseBetweenPasses: 20 * time.Millisecond,
-		BrakeInterval:      50 * time.Millisecond,
 		ReconcileInterval:  20 * time.Millisecond,
-		Signals:            healthySignals{},
 	}
 }
 
@@ -1026,16 +1021,6 @@ func (l *load) ackedCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return len(l.acked)
-}
-
-// switchableSignals reports load when told to
-type switchableSignals struct{ loaded atomic.Bool }
-
-func (s *switchableSignals) Sample() BrakeSample {
-	if s.loaded.Load() {
-		return BrakeSample{SchedLatencyP99: time.Second}
-	}
-	return BrakeSample{}
 }
 
 // pausableProxy forwards TCP connections to a node, like rudder-go-kit's tcpproxy, which can only forward or close

@@ -101,7 +101,7 @@ type Service struct {
 	// loadMu keeps Get and Put off the cache while a shadow loads a range: badger's Load moves the oracle without
 	// synchronisation. A shadow's receive takes it exclusively, Get and Put try to take it shared.
 	loadMu sync.RWMutex
-	// latency tracks the Get and Put latency the replication brake compares against its baseline
+	// latency follows the Get and Put requests: replication waits while they are slow
 	latency latencyTracker
 
 	closeOnce sync.Once
@@ -703,7 +703,7 @@ func (s *Service) listSnapshots(ctx context.Context, selectedHashRanges ...int64
 
 // Get implements the Get RPC method
 func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
-	defer func(start time.Time) { s.latency.observe(time.Since(start)) }(time.Now())
+	defer s.latency.finish(s.latency.start())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -764,7 +764,7 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 
 // Put implements the Put RPC method
 func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
-	defer func(start time.Time) { s.latency.observe(time.Since(start)) }(time.Now())
+	defer s.latency.finish(s.latency.start())
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

@@ -2,7 +2,7 @@ package node
 
 import (
 	"context"
-	"runtime/metrics"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,131 +10,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
+
+	pb "github.com/rudderlabs/keydb/proto"
 )
-
-func TestBudgetHalvesOnBreach(t *testing.T) {
-	b := newTestBudget(32 * bytesize.MB)
-	b.tick(BrakeSample{RequestLatency: time.Millisecond}) // baseline
-
-	rate, engaged, _ := b.current()
-	require.EqualValues(t, 32*bytesize.MB, rate)
-	require.False(t, engaged)
-
-	b.tick(BrakeSample{RequestLatency: time.Millisecond, SchedLatencyP99: 20 * time.Millisecond})
-	rate, engaged, reason := b.current()
-	require.EqualValues(t, 16*bytesize.MB, rate)
-	require.True(t, engaged)
-	require.Contains(t, reason, "scheduler latency")
-
-	for range 10 {
-		b.tick(BrakeSample{RequestLatency: 6 * time.Millisecond, SchedLatencyP99: 20 * time.Millisecond})
-	}
-	rate, engaged, reason = b.current()
-	require.Zero(t, rate, "below the minimum budget the copy pauses")
-	require.True(t, engaged)
-	require.Equal(t, "scheduler latency, request latency", reason)
-}
-
-func TestBudgetRequestLatencyAgainstBaseline(t *testing.T) {
-	b := newTestBudget(32 * bytesize.MB)
-	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond}) // baseline
-
-	b.tick(BrakeSample{RequestLatency: 15 * time.Millisecond})
-	rate, _, _ := b.current()
-	require.EqualValues(t, 32*bytesize.MB, rate, "1.5x the baseline is healthy")
-
-	b.tick(BrakeSample{RequestLatency: 30 * time.Millisecond})
-	rate, _, reason := b.current()
-	require.EqualValues(t, 16*bytesize.MB, rate)
-	require.Contains(t, reason, "request latency")
-}
-
-func TestBudgetBaselineSkipsIdleSamples(t *testing.T) {
-	b := newTestBudget(32 * bytesize.MB)
-	b.tick(BrakeSample{}) // no traffic yet, no baseline
-	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond})
-	b.tick(BrakeSample{RequestLatency: 30 * time.Millisecond})
-	_, engaged, reason := b.current()
-	require.True(t, engaged, "the baseline must come from the first sample with traffic")
-	require.Contains(t, reason, "request latency")
-}
-
-func TestBudgetRequestLatencyFloor(t *testing.T) {
-	b := newTestBudget(32 * bytesize.MB)
-	b.tick(BrakeSample{RequestLatency: 100 * time.Microsecond}) // a quiet-hour baseline
-	b.tick(BrakeSample{RequestLatency: time.Millisecond})
-	_, engaged, _ := b.current()
-	require.False(t, engaged, "10x a tiny baseline is still below the floor")
-
-	b.tick(BrakeSample{RequestLatency: 6 * time.Millisecond})
-	_, engaged, reason := b.current()
-	require.True(t, engaged)
-	require.Contains(t, reason, "request latency")
-}
-
-func TestBudgetResetBaseline(t *testing.T) {
-	b := newTestBudget(32 * bytesize.MB)
-	b.tick(BrakeSample{RequestLatency: 10 * time.Millisecond})
-	b.resetBaseline()
-	b.tick(BrakeSample{RequestLatency: 50 * time.Millisecond}) // the new job's baseline
-	_, engaged, _ := b.current()
-	require.False(t, engaged, "after a reset the next sample with traffic is the new baseline")
-}
-
-func TestBudgetRecoversAfterHealthySamples(t *testing.T) {
-	b := newTestBudget(32 * bytesize.MB)
-	b.tick(BrakeSample{}) // baseline
-	for range 10 {
-		b.tick(BrakeSample{SchedLatencyP99: time.Second})
-	}
-	rate, _, _ := b.current()
-	require.Zero(t, rate)
-
-	healthy := func(n int) {
-		for range n {
-			b.tick(BrakeSample{})
-		}
-	}
-	healthy(2)
-	rate, _, _ = b.current()
-	require.Zero(t, rate, "two healthy samples are not enough")
-	healthy(1)
-	rate, _, _ = b.current()
-	require.EqualValues(t, minBudgetBytesPerSecond, rate)
-	healthy(3)
-	rate, _, _ = b.current()
-	require.EqualValues(t, minBudgetBytesPerSecond+4*bytesize.MB, rate, "grows by an eighth of the max")
-
-	healthy(30)
-	rate, engaged, _ := b.current()
-	require.EqualValues(t, 32*bytesize.MB, rate, "capped at the max")
-	require.False(t, engaged)
-}
-
-func TestBudgetCappedByMax(t *testing.T) {
-	var maxBytes atomic.Int64
-	maxBytes.Store(32 * bytesize.MB)
-	b := newBudget(maxBytes.Load)
-	b.tick(BrakeSample{})
-
-	maxBytes.Store(2 * bytesize.MB)
-	rate, _, _ := b.current()
-	require.EqualValues(t, 2*bytesize.MB, rate, "a lower max applies at once")
-	b.tick(BrakeSample{})
-	maxBytes.Store(32 * bytesize.MB)
-	rate, _, _ = b.current()
-	require.EqualValues(t, 2*bytesize.MB, rate, "a higher max is reached by growing, not at once")
-}
 
 func TestBudgetPausedBlocksWait(t *testing.T) {
 	var maxBytes atomic.Int64
-	b := newBudget(maxBytes.Load) // a ceiling of 0 pauses the copy
+	b := newBudget(maxBytes.Load, notSlow) // a ceiling of 0 pauses the copy
 
-	rate, engaged, reason := b.current()
+	rate, reason := b.current()
 	require.Zero(t, rate)
-	require.True(t, engaged)
 	require.Equal(t, "paused: maxBytesPerSecond is not positive", reason)
-	b.tick(BrakeSample{})
 
 	done := make(chan error, 1)
 	go func() { done <- b.Wait(context.Background(), 1024) }()
@@ -145,8 +31,9 @@ func TestBudgetPausedBlocksWait(t *testing.T) {
 	require.Eventually(t, func() bool { return len(done) > 0 }, 3*time.Second, 50*time.Millisecond,
 		"Wait must resume once unpaused")
 	require.NoError(t, <-done)
-	rate, _, _ = b.current()
-	require.EqualValues(t, 32*bytesize.MB, rate, "a pause doesn't brake the budget")
+	rate, reason = b.current()
+	require.EqualValues(t, 32*bytesize.MB, rate)
+	require.Empty(t, reason)
 
 	t.Run("cancelled context", func(t *testing.T) {
 		maxBytes.Store(0)
@@ -159,6 +46,30 @@ func TestBudgetPausedBlocksWait(t *testing.T) {
 	})
 }
 
+func TestBudgetWaitsWhileSlow(t *testing.T) {
+	var slow atomic.Bool
+	slow.Store(true)
+	b := newBudget(func() int64 { return 32 * bytesize.MB }, func() string {
+		if slow.Load() {
+			return "request latency 80ms over 50ms"
+		}
+		return ""
+	})
+
+	rate, reason := b.current()
+	require.Zero(t, rate)
+	require.Equal(t, "request latency 80ms over 50ms", reason)
+
+	done := make(chan error, 1)
+	go func() { done <- b.waitNonZero(context.Background()) }()
+	require.Never(t, func() bool { return len(done) > 0 }, 300*time.Millisecond, 50*time.Millisecond,
+		"the copy must wait while the node's requests are slow")
+	slow.Store(false)
+	require.Eventually(t, func() bool { return len(done) > 0 }, 3*time.Second, 50*time.Millisecond,
+		"the copy must resume once they are fast again")
+	require.NoError(t, <-done)
+}
+
 func TestBudgetWaitLargerThanBurst(t *testing.T) {
 	b := newTestBudget(bytesize.MB)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -166,32 +77,9 @@ func TestBudgetWaitLargerThanBurst(t *testing.T) {
 	require.NoError(t, b.Wait(ctx, int(bytesize.MB+bytesize.MB/2)), "a batch bigger than a second's budget waits")
 }
 
-func TestRuntimeSignals(t *testing.T) {
-	s := newRuntimeSignals(func() time.Duration { return 7 * time.Millisecond })
-	require.Equal(t, 7*time.Millisecond, s.Sample().RequestLatency, "request latency comes from the tracker")
-}
-
-func TestHistogramP99(t *testing.T) {
-	prev := &metrics.Float64Histogram{Counts: []uint64{10, 0, 0}, Buckets: []float64{0, 0.001, 0.01, 0.1}}
-	cur := &metrics.Float64Histogram{Counts: []uint64{10, 98, 2}, Buckets: []float64{0, 0.001, 0.01, 0.1}}
-	// 100 new samples: 98 under 10ms, 2 under 100ms, so the 99th percentile falls in the last bucket
-	require.Equal(t, 100*time.Millisecond, histogramP99(prev, cur))
-	require.Zero(t, histogramP99(cur, cur), "no new samples")
-	require.Equal(t, 100*time.Millisecond, histogramP99(nil, cur), "no previous sample counts everything")
-}
-
-func TestLatencyTracker(t *testing.T) {
-	var l latencyTracker
-	require.Zero(t, l.meanSinceLast())
-	l.observe(2 * time.Millisecond)
-	l.observe(4 * time.Millisecond)
-	require.Equal(t, 3*time.Millisecond, l.meanSinceLast())
-	require.Zero(t, l.meanSinceLast(), "the window resets")
-}
-
 func TestBudgetAbandonsLongPause(t *testing.T) {
 	var maxBytes atomic.Int64
-	b := newBudget(maxBytes.Load)
+	b := newBudget(maxBytes.Load, notSlow)
 	b.maxPausedWait = 200 * time.Millisecond
 	start := time.Now()
 	err := b.Wait(context.Background(), 1024)
@@ -208,6 +96,65 @@ func TestBudgetAbandonsLongPause(t *testing.T) {
 	})
 }
 
-func newTestBudget(maxBytes int64) *budget {
-	return newBudget(func() int64 { return maxBytes })
+func TestLatencyTracker(t *testing.T) {
+	const maxLatency = 50 * time.Millisecond
+	var l latencyTracker
+	now := time.Now()
+	require.Empty(t, l.slow(now, maxLatency), "an idle node is never slow")
+
+	l.finish(l.start().Add(-80 * time.Millisecond)) // a request that took 80ms
+	require.Empty(t, l.slow(now.Add(500*time.Millisecond), maxLatency), "the mean is taken once a second")
+	require.Contains(t, l.slow(now.Add(time.Second), maxLatency), "request latency 80")
+	require.Empty(t, l.slow(now.Add(2*time.Second), maxLatency), "only the last second counts")
+
+	t.Run("a request that doesn't finish", func(t *testing.T) {
+		var l latencyTracker
+		start := l.start()
+		require.Empty(t, l.slow(start.Add(maxLatency/2), maxLatency))
+		require.Equal(t, "no request finished for over 50ms", l.slow(start.Add(2*maxLatency), maxLatency))
+		l.finish(start)
+		require.Empty(t, l.slow(start.Add(2*maxLatency), maxLatency))
+	})
+
+	t.Run("the first request after an idle spell", func(t *testing.T) {
+		var l latencyTracker
+		l.progress.Store(time.Now().Add(-time.Hour).UnixNano()) // the last request finished an hour ago
+		start := l.start()
+		require.Empty(t, l.slow(start.Add(maxLatency/2), maxLatency), "it isn't stuck for running on an idle node")
+	})
 }
+
+func TestRequestsFeedTheBrake(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(ctx, t, Config{NodeID: 0, Addresses: staticList("a:1")}, newTestConf(t))
+	for _, tc := range []struct {
+		name string
+		call func()
+	}{
+		{"get", func() { _, _ = s.Get(ctx, &pb.GetRequest{Keys: []string{"k"}}) }},
+		{"put", func() { _, _ = s.Put(ctx, &pb.PutRequest{Keys: []string{"k"}, TtlSeconds: 60}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s.mu.Lock() // the request waits for the lock, as it would behind garbage collection
+			unlock := sync.OnceFunc(s.mu.Unlock)
+			defer unlock()
+			done := make(chan struct{})
+			go func() {
+				tc.call()
+				close(done)
+			}()
+			require.Eventually(t, func() bool { return s.latency.inFlight.Load() == 1 }, 5*time.Second,
+				10*time.Millisecond, "a request counts from the moment it arrives")
+			unlock()
+			<-done
+			require.Zero(t, s.latency.inFlight.Load())
+		})
+	}
+}
+
+func newTestBudget(maxBytes int64) *budget {
+	return newBudget(func() int64 { return maxBytes }, notSlow)
+}
+
+// notSlow is the request latency check of a node whose requests are never slow
+func notSlow() string { return "" }

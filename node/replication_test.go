@@ -199,20 +199,6 @@ func TestReplicationPausedStopsScanning(t *testing.T) {
 		10*time.Second, 10*time.Millisecond, "the copy must resume once unpaused")
 }
 
-func TestPassDelayStretchesWithBrake(t *testing.T) {
-	r := &replicator{cfg: ReplicationConfig{PauseBetweenPasses: time.Second}, budget: newTestBudget(32 * bytesize.MB)}
-	require.Equal(t, time.Second, r.passDelay(), "at full budget the pause is the configured one")
-
-	r.budget.tick(BrakeSample{})
-	r.budget.tick(BrakeSample{SchedLatencyP99: time.Second}) // halves the budget
-	require.Equal(t, 2*time.Second, r.passDelay(), "at half the budget the pause doubles")
-
-	for range 20 {
-		r.budget.tick(BrakeSample{SchedLatencyP99: time.Second})
-	}
-	require.Equal(t, maxPassDelay, r.passDelay(), "the stretched pause is capped")
-}
-
 func TestReplicationStatusGap(t *testing.T) {
 	start := time.Unix(1000, 0)
 	now := start
@@ -309,11 +295,6 @@ func TestGCSkippedOnShadow(t *testing.T) {
 	}, 300*time.Millisecond, 20*time.Millisecond, "a shadow must not run garbage collection, even between receives")
 }
 
-// healthySignals reports a node under no load
-type healthySignals struct{}
-
-func (healthySignals) Sample() BrakeSample { return BrakeSample{} }
-
 // shadowList is a shadow address list that tests can change while the nodes run
 type shadowList struct{ v atomic.Pointer[[]string] }
 
@@ -330,9 +311,7 @@ func (l *shadowList) load() []string {
 func fastReplication(paused *atomic.Bool) ReplicationConfig {
 	cfg := ReplicationConfig{
 		PauseBetweenPasses: 20 * time.Millisecond,
-		BrakeInterval:      50 * time.Millisecond,
 		ReconcileInterval:  20 * time.Millisecond,
-		Signals:            healthySignals{},
 	}
 	if paused != nil {
 		cfg.MaxBytesPerSecond = pausable(paused, DefaultReplicationMaxBytesPerSecond)

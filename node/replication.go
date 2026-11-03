@@ -8,7 +8,6 @@ import (
 	"maps"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -24,14 +23,14 @@ import (
 const (
 	// DefaultReplicationMaxBytesPerSecond is the default byte budget ceiling of the replication job
 	DefaultReplicationMaxBytesPerSecond = 32 * bytesize.MB
+	// DefaultReplicationMaxRequestLatency is the default Get/Put latency above which the replication job waits
+	DefaultReplicationMaxRequestLatency = 50 * time.Millisecond
 	// replicationCompressionLevel is the zstd level used to stream ranges to a shadow, the cheapest one
 	replicationCompressionLevel = 1
 	// replicationBatchSize is the size of the batches streamed to a shadow
 	replicationBatchSize = int(256 * bytesize.KB)
 	// replicationMaxRetryDelay caps the delay between attempts to send a range that failed
 	replicationMaxRetryDelay = 30 * time.Second
-	// maxPassDelay caps the pause between passes while the brake holds the budget down
-	maxPassDelay = time.Minute
 )
 
 // ReplicationConfig configures how an active node fills its shadow.
@@ -39,26 +38,25 @@ type ReplicationConfig struct {
 	// MaxBytesPerSecond returns the byte budget ceiling, DefaultReplicationMaxBytesPerSecond when nil.
 	// 0 or less pauses the copy without stopping the job.
 	MaxBytesPerSecond func() int64
+	// MaxRequestLatency returns the Get/Put latency above which the copy waits, so that it never slows the node's
+	// requests down for long. DefaultReplicationMaxRequestLatency when nil.
+	MaxRequestLatency func() time.Duration
 	// PauseBetweenPasses is the pause between two passes, 5s when zero
 	// A pass copies every hash range the node owns to the shadow: all of it at first, then only what changed.
 	PauseBetweenPasses time.Duration
-	// BrakeInterval is how often the brake samples the node's load, 5s when zero
-	BrakeInterval time.Duration
-	// ReconcileInterval is how often the shadow list is re-read, 1s when zero
+	// ReconcileInterval is how often the shadow list is re-read and the gauges published, 1s when zero
 	ReconcileInterval time.Duration
-	// Signals measures the node's load, the Go runtime, request latency and cgroup throttling when nil
-	Signals BrakeSignals
 }
 
 func (c *ReplicationConfig) setDefaults() {
 	if c.MaxBytesPerSecond == nil {
 		c.MaxBytesPerSecond = func() int64 { return DefaultReplicationMaxBytesPerSecond }
 	}
+	if c.MaxRequestLatency == nil {
+		c.MaxRequestLatency = func() time.Duration { return DefaultReplicationMaxRequestLatency }
+	}
 	if c.PauseBetweenPasses == 0 {
 		c.PauseBetweenPasses = 5 * time.Second
-	}
-	if c.BrakeInterval == 0 {
-		c.BrakeInterval = 5 * time.Second
 	}
 	if c.ReconcileInterval == 0 {
 		c.ReconcileInterval = time.Second
@@ -87,9 +85,9 @@ type ReplicationStatus struct {
 	// durations plus the pause between passes. -1 before the first pass.
 	WorstCaseGapSeconds  float64 `json:"worstCaseGapSeconds"`
 	BudgetBytesPerSecond int64   `json:"budgetBytesPerSecond"`
-	BrakeEngaged         bool    `json:"brakeEngaged"`
-	BrakeReason          string  `json:"brakeReason"`
-	LastError            string  `json:"lastError"`
+	// BrakeReason says why the copy waits, with a budget of 0: paused, or the node's requests are slow
+	BrakeReason string `json:"brakeReason"`
+	LastError   string `json:"lastError"`
 }
 
 // replicator fills the node's shadow, if it has one. It re-reads the shadow list periodically and runs a job
@@ -121,10 +119,8 @@ type replicator struct {
 func newReplicator(s *Service) *replicator {
 	cfg := s.config.Replication
 	cfg.setDefaults()
-	if cfg.Signals == nil {
-		cfg.Signals = newRuntimeSignals(s.latency.meanSinceLast)
-	}
-	r := &replicator{s: s, cfg: cfg, budget: newBudget(cfg.MaxBytesPerSecond)}
+	slow := func() string { return s.latency.slow(time.Now(), cfg.MaxRequestLatency()) }
+	r := &replicator{s: s, cfg: cfg, budget: newBudget(cfg.MaxBytesPerSecond, slow)}
 	tags := stats.Tags{"nodeID": strconv.FormatInt(s.config.NodeID, 10)}
 	r.metrics.gap = s.stats.NewTaggedStat("keydb_replication_gap_seconds", stats.GaugeType, tags)
 	r.metrics.gap.Gauge(-1) // no pass is done yet
@@ -135,12 +131,16 @@ func newReplicator(s *Service) *replicator {
 	return r
 }
 
-// run re-reads the shadow list until ctx is done, starting and stopping the job to match it.
+// run re-reads the shadow list until ctx is done, starting and stopping the job to match it, and publishes the
+// budget and the gap.
 func (r *replicator) run(ctx context.Context) {
 	ticker := time.NewTicker(r.cfg.ReconcileInterval)
 	defer ticker.Stop()
 	for {
 		r.reconcile(ctx)
+		status := r.status()
+		r.metrics.budget.Gauge(status.BudgetBytesPerSecond)
+		r.metrics.gap.Gauge(status.GapSeconds)
 		select {
 		case <-ctx.Done():
 			r.switchTarget(ctx, "")
@@ -178,8 +178,6 @@ func (r *replicator) switchTarget(ctx context.Context, target string) {
 	if cancel != nil {
 		cancel()
 		<-done
-		r.metrics.gap.Gauge(-1)
-		r.metrics.budget.Gauge(0)
 		r.s.logger.Infon("Replication stopped")
 	}
 	if target == "" || ctx.Err() != nil {
@@ -209,56 +207,12 @@ func (r *replicator) job(ctx context.Context, target string) {
 	}
 	defer r.s.closeNodeConnection(conn)
 
-	// take the request latency baseline before copying anything, from this job's own window
-	r.budget.resetBaseline()
-	_ = r.cfg.Signals.Sample()
-	if !sleepCtx(ctx, r.cfg.BrakeInterval) {
-		return
-	}
-	r.brake(log)
-
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	wg.Go(func() {
-		ticker := time.NewTicker(r.cfg.BrakeInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				r.brake(log)
-			}
-		}
-	})
-
 	for ctx.Err() == nil {
 		r.pass(ctx, shadow, log)
-		if !sleepCtx(ctx, r.passDelay()) {
+		if !sleepCtx(ctx, r.cfg.PauseBetweenPasses) {
 			return
 		}
 	}
-}
-
-// brake samples the node's load, adjusts the byte budget, and publishes the budget and the gap.
-func (r *replicator) brake(log logger.Logger) {
-	reasons := r.budget.tick(r.cfg.Signals.Sample())
-	status := r.status()
-	r.metrics.budget.Gauge(status.BudgetBytesPerSecond)
-	r.metrics.gap.Gauge(status.GapSeconds)
-	if len(reasons) == 0 {
-		return
-	}
-	for _, reason := range reasons {
-		r.s.stats.NewTaggedStat("keydb_replication_brake_events_total", stats.CountType, stats.Tags{
-			"nodeID": strconv.FormatInt(r.s.config.NodeID, 10),
-			"reason": reason,
-		}).Increment()
-	}
-	log.Warnn("Replication brake engaged",
-		logger.NewStringField("reason", strings.Join(reasons, ", ")),
-		logger.NewIntField("budgetBytesPerSecond", status.BudgetBytesPerSecond),
-	)
 }
 
 // pass sends every hash range the node owns, retrying a range until it is sent or ctx is done.
@@ -278,7 +232,7 @@ func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log 
 	var passBytes int64
 	for i, hashRange := range ranges {
 		for failures := 0; ; {
-			// a paused or fully braked copy must not even scan: wait before opening the range
+			// a paused copy must not even scan: wait before opening the range
 			if err := r.budget.waitNonZero(ctx); err != nil {
 				return
 			}
@@ -378,21 +332,6 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 	return charged, nil
 }
 
-// passDelay is the pause before the next pass. It grows as the brake lowers the budget: an incremental pass scans
-// every table written since the last one even when it sends little, so the brake has to space passes out too.
-func (r *replicator) passDelay() time.Duration {
-	bytesPerSecond, _, _ := r.budget.current()
-	maxBytes := r.budget.max()
-	if bytesPerSecond <= 0 {
-		return maxPassDelay
-	}
-	if bytesPerSecond >= maxBytes {
-		return r.cfg.PauseBetweenPasses
-	}
-	delay := time.Duration(float64(r.cfg.PauseBetweenPasses) * float64(maxBytes) / float64(bytesPerSecond))
-	return min(delay, maxPassDelay)
-}
-
 // update changes the progress of the running job. A job that is stopping changes nothing: its target is already
 // cleared, and the next job only starts once it has ended.
 func (r *replicator) update(f func(p *ReplicationStatus)) {
@@ -424,14 +363,14 @@ func (r *replicator) status() ReplicationStatus {
 	}
 	if status.ShadowAddress != "" {
 		status.State = "running"
+		status.BudgetBytesPerSecond, status.BrakeReason = r.budget.current()
 	}
 	if status.PassesCompleted > 0 {
 		lastPass := status.LastPassEndedAt.Sub(status.LastPassStartedAt)
 		status.LastPassDuration = lastPass.String()
 		status.GapSeconds = r.s.now().Sub(status.LastPassStartedAt).Seconds()
-		status.WorstCaseGapSeconds = (2*lastPass + r.passDelay()).Seconds()
+		status.WorstCaseGapSeconds = (2*lastPass + r.cfg.PauseBetweenPasses).Seconds()
 	}
-	status.BudgetBytesPerSecond, status.BrakeEngaged, status.BrakeReason = r.budget.current()
 	return status
 }
 
