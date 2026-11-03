@@ -24,7 +24,7 @@ const (
 	// DefaultReplicationMaxBytesPerSecond is the default byte budget ceiling of the replication job
 	DefaultReplicationMaxBytesPerSecond = 32 * bytesize.MB
 	// DefaultReplicationMaxRequestLatency is the default Get/Put latency above which the replication job waits
-	DefaultReplicationMaxRequestLatency = 50 * time.Millisecond
+	DefaultReplicationMaxRequestLatency = 30 * time.Millisecond
 	// replicationCompressionLevel is the zstd level used to stream ranges to a shadow, the cheapest one
 	replicationCompressionLevel = 1
 	// replicationBatchSize is the size of the batches streamed to a shadow
@@ -35,8 +35,8 @@ const (
 
 // ReplicationConfig configures how an active node fills its shadow.
 type ReplicationConfig struct {
-	// MaxBytesPerSecond returns the byte budget ceiling, DefaultReplicationMaxBytesPerSecond when nil.
-	// 0 or less pauses the copy without stopping the job.
+	// MaxBytesPerSecond throttles the copy while requests are fast; MaxRequestLatency stops it when they are slow.
+	// DefaultReplicationMaxBytesPerSecond when nil, and 0 or less pauses the copy without stopping the job.
 	MaxBytesPerSecond func() int64
 	// MaxRequestLatency returns the Get/Put latency above which the copy waits, so that it never slows the node's
 	// requests down for long. DefaultReplicationMaxRequestLatency when nil.
@@ -304,13 +304,13 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 	maxVersion, err := r.s.cache.StreamSnapshot(ctx, hashRange, since.SinceTimestamp, send, badger.StreamOptions{
 		CompressionLevel: replicationCompressionLevel,
 		BatchSize:        replicationBatchSize,
-		Wait: func(ctx context.Context, n int) error {
-			if err := r.budget.Wait(ctx, n); err != nil {
+		Wait: func(ctx context.Context, bytes int) error {
+			if err := r.budget.Wait(ctx, bytes); err != nil {
 				return err
 			}
-			charged += int64(n)
-			r.metrics.bytes.Count(n)
-			r.update(func(p *ReplicationStatus) { p.CurrentPassBytes += int64(n) })
+			charged += int64(bytes)
+			r.metrics.bytes.Count(bytes)
+			r.update(func(p *ReplicationStatus) { p.CurrentPassBytes += int64(bytes) })
 			return nil
 		},
 	})

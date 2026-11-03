@@ -62,7 +62,7 @@ type StreamOptions struct {
 	BatchSize int
 	// Wait is called with the size of each batch before it is written, so callers can apply a byte budget.
 	// An error stops the stream. Nil means no budget.
-	Wait func(ctx context.Context, n int) error
+	Wait func(ctx context.Context, bytes int) error
 }
 
 type Cache struct {
@@ -567,7 +567,7 @@ func (c *Cache) StreamSnapshot(
 
 func (c *Cache) streamRange(
 	ctx context.Context, hashRange int64, since uint64, w *lockedWriter, batchSize int,
-	wait func(ctx context.Context, n int) error,
+	wait func(ctx context.Context, bytes int) error,
 ) (uint64, error) {
 	txn := c.cache.NewTransaction(false)
 	defer txn.Discard()

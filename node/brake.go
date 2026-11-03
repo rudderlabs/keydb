@@ -57,11 +57,11 @@ func (b *budget) current() (bytesPerSecond int64, reason string) {
 	return maxBytes, ""
 }
 
-// Wait blocks until n bytes fit in the budget. While the budget is 0 it waits for it to come back, and gives up with
-// errBudgetPaused after maxPausedWait.
-func (b *budget) Wait(ctx context.Context, n int) error {
+// Wait blocks until bytes, a batch's size before compression, fit in the budget. While the budget is 0 it waits for
+// it to come back, and gives up with errBudgetPaused after maxPausedWait.
+func (b *budget) Wait(ctx context.Context, bytes int) error {
 	var pausedSince time.Time
-	for n > 0 {
+	for bytes > 0 {
 		bytesPerSecond, _ := b.current()
 		if bytesPerSecond <= 0 {
 			if pausedSince.IsZero() {
@@ -83,7 +83,7 @@ func (b *budget) Wait(ctx context.Context, n int) error {
 			b.limiter.SetLimit(rate.Limit(bytesPerSecond))
 			b.limiter.SetBurst(int(bytesPerSecond))
 		}
-		step := min(n, b.limiter.Burst())
+		step := min(bytes, b.limiter.Burst())
 		b.mu.Unlock()
 
 		if err := b.limiter.WaitN(ctx, step); err != nil {
@@ -92,7 +92,7 @@ func (b *budget) Wait(ctx context.Context, n int) error {
 			}
 			continue // the budget changed under us, retry with the new one
 		}
-		n -= step
+		bytes -= step
 	}
 	return nil
 }

@@ -565,8 +565,8 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
 - **Replication:** an ACTIVE node with a shadow copies every hash range it owns to the shadow, then sends incremental passes back to back for as long as the shadow exists, however long the switch takes. Expired keys are not copied. After a restart the node resumes on its own, and the shadow's since markers keep the passes incremental.
 - **Load:** the copy never starves the serving node:
   - one stream goroutine, one range at a time, and zstd level 1;
-  - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s), counted on the data read from the cache, before compression;
-  - a brake: the copy waits while the node's own Get/Put requests are slow, that is while their mean latency over the last second is above `replication.maxRequestLatency` (50ms by default), or while requests are running and none has finished for longer than that, as when one is stuck. It checks before every batch, and CPU throttling or a busy disk shows in the latency it watches;
+  - a byte budget (`replication.maxBytesPerSecond`, default 32 MiB/s), counted on the data read from the cache, before compression. It throttles the copy while requests are fast, so the copy takes a bounded share of the node's disk, CPU and network and doesn't push latency up to the brake's threshold on its own. It is a fixed cap that latency doesn't change: the copy runs at the cap or waits;
+  - a brake: the copy waits while the node's own Get/Put requests are slow, that is while their mean latency over the last second is above `replication.maxRequestLatency` (30ms by default), or while requests are running and none has finished for longer than that, as when one is stuck. It checks before every batch, and CPU throttling or a busy disk shows in the latency it watches;
   - a paused or braked copy stops at its next batch or range, and a range paused for more than 30s is given up and started over later, so no read transaction stays open;
   - garbage collection skips its runs while a pass is in progress, and never runs on a shadow.
 - **Gap:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends, and peaks at two pass durations plus the pause between passes, the worst-case gap. A switch at a given moment loses at most the gap at that moment. keydb doesn't judge whether a gap is small enough: whoever merges PR2 decides, case by case.
@@ -642,9 +642,9 @@ Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV
 | `shadowNodeAddresses` | empty | yes |
 | `adminPort` | `8080` | no |
 | `replication.maxBytesPerSecond` | `33554432` (32 MiB) | yes |
-| `replication.maxRequestLatency` | `50ms` | yes |
+| `replication.maxRequestLatency` | `30ms` | yes |
 
-Both can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. Set `maxBytesPerSecond` to `0` to pause the copy; the status then gives `paused: maxBytesPerSecond is not positive` as the brake reason. It is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0 and pauses the copy too. While the brake holds the copy, the status gives the reason, such as `request latency 61ms over 50ms`: raise `maxRequestLatency` if the node's normal latency is above it, or the copy never runs.
+Both can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. Set `maxBytesPerSecond` to `0` to pause the copy; the status then gives `paused: maxBytesPerSecond is not positive` as the brake reason. It is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0 and pauses the copy too. While the brake holds the copy, the status gives the reason, such as `request latency 41ms over 30ms`: raise `maxRequestLatency` if the node's normal latency is above it, or the copy never runs.
 
 ### Metrics
 
