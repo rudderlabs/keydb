@@ -552,7 +552,7 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
 
 ### How it works
 
-- **Roles:** a pod listed in `shadowNodeAddresses` for its node index is a SHADOW. It refuses `Get` and `Put` with `NOT_READY` and only receives the copy from the serving node. Every other pod is ACTIVE. A pod knows its own address from `advertisedAddress`. A pod whose index the config gives to another pod, without listing it as the shadow, refuses `Get` and `Put` with `NOT_READY` too: once the second PR's config reaches the old pod, it stops acknowledging writes the new pod would never get.
+- **Roles:** a pod listed in `shadowNodeAddresses` for its node index is a SHADOW. It refuses `Get` and `Put` with `NOT_READY` and only receives the copy from the serving node. Every other pod is ACTIVE. A pod knows its own address from `advertisedAddress`. Once PR2's config reaches the old pod, if it's still running, it refuses `Get` and `Put` with `NOT_READY`, so it stops acknowledging writes the new pod would never get.
 - **Replication:** an ACTIVE node with a shadow copies every hash range it owns to the shadow, then sends incremental passes back to back for as long as the shadow exists, however long the switch takes. Expired keys are not copied. After a restart of either pod the copy resumes on its own, from where the shadow got to rather than from scratch.
 - **Load:** the copy never starves the serving node. It sends one hash range at a time, compressed cheaply, and:
   - a byte cap, `replication.maxBytesPerSecond` (32 MiB/s by default, counted before compression), throttles it while requests are fast, so the copy takes a bounded share of the node's disk, CPU and network and doesn't slow requests down on its own;
