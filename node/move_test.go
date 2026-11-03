@@ -594,6 +594,21 @@ func TestMoveOldNodeStopsAnswering(t *testing.T) {
 
 const moveTestHashRanges = int64(8)
 
+// moveTestHeadless is the name of the headless Service the clients are given. Nothing can dial it, so a data request
+// sent to it would fail.
+const moveTestHeadless = "keydb-headless.move.invalid:50051"
+
+type switchOrder int
+
+const (
+	// oldNodeStopsFirst: the old node gets SIGTERM before any pod picks up the new config
+	oldNodeStopsFirst switchOrder = iota
+	// newNodeRefreshesFirst: the shadow picks up the new config before the old node gets SIGTERM
+	newNodeRefreshesFirst
+	// oldNodeRefreshesFirst: the old node picks up the new config a while before it gets SIGTERM
+	oldNodeRefreshesFirst
+)
+
 // topology is a node's view of nodeAddresses and shadowNodeAddresses
 type topology struct {
 	active, shadows []string
@@ -665,6 +680,15 @@ func (c *moveCluster) addNodeAt(id int64, address, dir string) *moveNode {
 	return n
 }
 
+// addNodeBehindProxy creates a node for the given index whose address is a proxy in front of it, without starting it
+func (c *moveCluster) addNodeBehindProxy(id int64) (*moveNode, *pausableProxy) {
+	c.t.Helper()
+	n := c.addNode(id)
+	n.listen = freeAddress(c.t)
+	n.proxy = startPausableProxy(c.t, n.address, n.listen)
+	return n, n.proxy
+}
+
 // start opens the node's disk and serves it
 func (c *moveCluster) start(n *moveNode) {
 	c.t.Helper()
@@ -725,9 +749,75 @@ func (c *moveCluster) setTopology(active, shadows []string, nodes ...*moveNode) 
 	}
 }
 
-// moveTestHeadless is the name of the headless Service the clients are given. Nothing can dial it, so a data request
-// sent to it would fail.
-const moveTestHeadless = "keydb-headless.move.invalid:50051"
+// move moves a node from the from node onto the to node, which must be a fresh node for the same index, the way PR1
+// and PR2 would, while the other running nodes keep serving. It returns the start of the old node's last completed
+// pass and when the old node stopped acknowledging writes.
+func (c *moveCluster) move(
+	t *testing.T, from, to *moveNode, cl *client.Client, order switchOrder,
+) (lastPassStart, stopped time.Time) {
+	t.Helper()
+	others := c.runningExcept(from)
+
+	// PR1: the shadow appears, and the active node starts filling it
+	active := from.view.Load().active
+	shadows := make([]string, len(active))
+	shadows[from.id] = to.address
+	c.setTopology(active, shadows)
+	c.start(to)
+	waitForPass(t, from)
+	// a key written after the first pass reaches the shadow too: the copy goes on until PR2
+	afterFirstPass := c.keyOf(from.id, "after-first-pass-"+to.address)
+	require.NoError(t, cl.Put(context.Background(), []string{afterFirstPass}, time.Hour))
+	passes := from.service.ReplicationStatus().PassesCompleted
+	require.Eventually(t, func() bool { return from.service.ReplicationStatus().PassesCompleted >= passes+2 },
+		10*time.Second, 10*time.Millisecond)
+
+	// PR2: the shadow becomes active and the old node is removed
+	after := slices.Clone(active)
+	after[from.id] = to.address
+	noShadows := make([]string, len(active))
+	refresh := func(nodes ...*moveNode) {
+		for _, n := range nodes {
+			c.setTopology(after, noShadows, n)
+		}
+	}
+	lastPassStart = from.service.ReplicationStatus().LastPassStartedAt
+	switch order {
+	case oldNodeStopsFirst:
+		c.stop(from)
+		stopped = time.Now()
+		refresh(to)
+		refresh(others...)
+	case newNodeRefreshesFirst:
+		refresh(to)
+		c.stop(from)
+		stopped = time.Now()
+		refresh(others...)
+	case oldNodeRefreshesFirst:
+		refresh(from)
+		stopped = time.Now()
+		time.Sleep(500 * time.Millisecond) // the client keeps sending the node's keys to the old node meanwhile
+		c.stop(from)
+		refresh(to)
+		refresh(others...)
+	}
+	require.True(t, hasKeys(t, to, []string{afterFirstPass}),
+		"a key written after the first pass must reach the shadow")
+	return lastPassStart, stopped
+}
+
+// runningExcept returns the running nodes other than the given ones
+func (c *moveCluster) runningExcept(except ...*moveNode) []*moveNode {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var running []*moveNode
+	for _, n := range c.nodes {
+		if n.running.Load() && !slices.Contains(except, n) {
+			running = append(running, n)
+		}
+	}
+	return running
+}
 
 // resolveHeadless stands in for the DNS of the headless Service: its name resolves to every running node, the
 // shadows included, the way it resolves to every ready pod
@@ -768,6 +858,24 @@ func (c *moveCluster) newClient(adjust ...func(*client.Config)) *client.Client {
 	return cl
 }
 
+// keyOf returns a key with the given prefix that belongs to the given node
+func (c *moveCluster) keyOf(nodeID int64, prefix string) string {
+	for i := 0; ; i++ {
+		if k := prefix + "-" + strconv.Itoa(i); c.hash.GetNodeNumber(k) == nodeID {
+			return k
+		}
+	}
+}
+
+func fastMoveReplication() ReplicationConfig {
+	return ReplicationConfig{
+		PauseBetweenPasses: 20 * time.Millisecond,
+		BrakeInterval:      50 * time.Millisecond,
+		ReconcileInterval:  20 * time.Millisecond,
+		Signals:            healthySignals{},
+	}
+}
+
 // ownedBy returns the keys that belong to the given node when h spreads them
 func ownedBy(h *hash.Hash, nodeID int64, keys []string) []string {
 	var owned []string
@@ -777,15 +885,6 @@ func ownedBy(h *hash.Hash, nodeID int64, keys []string) []string {
 		}
 	}
 	return owned
-}
-
-// keyOf returns a key with the given prefix that belongs to the given node
-func (c *moveCluster) keyOf(nodeID int64, prefix string) string {
-	for i := 0; ; i++ {
-		if k := prefix + "-" + strconv.Itoa(i); c.hash.GetNodeNumber(k) == nodeID {
-			return k
-		}
-	}
 }
 
 // hasKeys returns true when every key among keys that belongs to the node exists on the node's disk
@@ -805,6 +904,31 @@ func hasKeys(t *testing.T, n *moveNode, keys []string) bool {
 		}
 	}
 	return true
+}
+
+// waitForPass waits until the node has completed a pass to its shadow, after which the shadow holds every write the
+// node accepted before that pass started
+func waitForPass(t *testing.T, n *moveNode) {
+	t.Helper()
+	require.Eventually(t, func() bool { return n.service.ReplicationStatus().PassesCompleted > 0 }, 30*time.Second,
+		20*time.Millisecond, "the active node never completed a pass")
+}
+
+// pauseMidRange pauses the copy while the shadow is receiving a range, so that the range's stream stays open with part
+// of it loaded. A pause that lands between two ranges is lifted and tried again.
+func pauseMidRange(t *testing.T, shadow *moveNode, paused *atomic.Bool) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		paused.Store(false)
+		for start := time.Now(); !shadow.service.receiving.Load(); time.Sleep(time.Millisecond) {
+			if time.Since(start) > 5*time.Second {
+				return false
+			}
+		}
+		paused.Store(true)
+		time.Sleep(500 * time.Millisecond) // longer than a paused budget waits before checking again
+		return shadow.service.receiving.Load()
+	}, time.Minute, 10*time.Millisecond, "the copy never paused in the middle of a range")
 }
 
 // load writes batches of unique keys through the client until stopped, recording when each batch was acknowledged
@@ -904,104 +1028,6 @@ func (l *load) ackedCount() int {
 	return len(l.acked)
 }
 
-func fastMoveReplication() ReplicationConfig {
-	return ReplicationConfig{
-		PauseBetweenPasses: 20 * time.Millisecond,
-		BrakeInterval:      50 * time.Millisecond,
-		ReconcileInterval:  20 * time.Millisecond,
-		Signals:            healthySignals{},
-	}
-}
-
-type switchOrder int
-
-const (
-	// oldNodeStopsFirst: the old node gets SIGTERM before any pod picks up the new config
-	oldNodeStopsFirst switchOrder = iota
-	// newNodeRefreshesFirst: the shadow picks up the new config before the old node gets SIGTERM
-	newNodeRefreshesFirst
-	// oldNodeRefreshesFirst: the old node picks up the new config a while before it gets SIGTERM
-	oldNodeRefreshesFirst
-)
-
-// move moves a node from the from node onto the to node, which must be a fresh node for the same index, the way PR1
-// and PR2 would, while the other running nodes keep serving. It returns the start of the old node's last completed
-// pass and when the old node stopped acknowledging writes.
-func (c *moveCluster) move(
-	t *testing.T, from, to *moveNode, cl *client.Client, order switchOrder,
-) (lastPassStart, stopped time.Time) {
-	t.Helper()
-	others := c.runningExcept(from)
-
-	// PR1: the shadow appears, and the active node starts filling it
-	active := from.view.Load().active
-	shadows := make([]string, len(active))
-	shadows[from.id] = to.address
-	c.setTopology(active, shadows)
-	c.start(to)
-	waitForPass(t, from)
-	// a key written after the first pass reaches the shadow too: the copy goes on until PR2
-	afterFirstPass := c.keyOf(from.id, "after-first-pass-"+to.address)
-	require.NoError(t, cl.Put(context.Background(), []string{afterFirstPass}, time.Hour))
-	passes := from.service.ReplicationStatus().PassesCompleted
-	require.Eventually(t, func() bool { return from.service.ReplicationStatus().PassesCompleted >= passes+2 },
-		10*time.Second, 10*time.Millisecond)
-
-	// PR2: the shadow becomes active and the old node is removed
-	after := slices.Clone(active)
-	after[from.id] = to.address
-	noShadows := make([]string, len(active))
-	refresh := func(nodes ...*moveNode) {
-		for _, n := range nodes {
-			c.setTopology(after, noShadows, n)
-		}
-	}
-	lastPassStart = from.service.ReplicationStatus().LastPassStartedAt
-	switch order {
-	case oldNodeStopsFirst:
-		c.stop(from)
-		stopped = time.Now()
-		refresh(to)
-		refresh(others...)
-	case newNodeRefreshesFirst:
-		refresh(to)
-		c.stop(from)
-		stopped = time.Now()
-		refresh(others...)
-	case oldNodeRefreshesFirst:
-		refresh(from)
-		stopped = time.Now()
-		time.Sleep(500 * time.Millisecond) // the client keeps sending the node's keys to the old node meanwhile
-		c.stop(from)
-		refresh(to)
-		refresh(others...)
-	}
-	require.True(t, hasKeys(t, to, []string{afterFirstPass}),
-		"a key written after the first pass must reach the shadow")
-	return lastPassStart, stopped
-}
-
-// waitForPass waits until the node has completed a pass to its shadow, after which the shadow holds every write the
-// node accepted before that pass started
-func waitForPass(t *testing.T, n *moveNode) {
-	t.Helper()
-	require.Eventually(t, func() bool { return n.service.ReplicationStatus().PassesCompleted > 0 }, 30*time.Second,
-		20*time.Millisecond, "the active node never completed a pass")
-}
-
-// runningExcept returns the running nodes other than the given ones
-func (c *moveCluster) runningExcept(except ...*moveNode) []*moveNode {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var running []*moveNode
-	for _, n := range c.nodes {
-		if n.running.Load() && !slices.Contains(except, n) {
-			running = append(running, n)
-		}
-	}
-	return running
-}
-
 // switchableSignals reports load when told to
 type switchableSignals struct{ loaded atomic.Bool }
 
@@ -1010,32 +1036,6 @@ func (s *switchableSignals) Sample() BrakeSample {
 		return BrakeSample{SchedLatencyP99: time.Second}
 	}
 	return BrakeSample{}
-}
-
-// pauseMidRange pauses the copy while the shadow is receiving a range, so that the range's stream stays open with part
-// of it loaded. A pause that lands between two ranges is lifted and tried again.
-func pauseMidRange(t *testing.T, shadow *moveNode, paused *atomic.Bool) {
-	t.Helper()
-	require.Eventually(t, func() bool {
-		paused.Store(false)
-		for start := time.Now(); !shadow.service.receiving.Load(); time.Sleep(time.Millisecond) {
-			if time.Since(start) > 5*time.Second {
-				return false
-			}
-		}
-		paused.Store(true)
-		time.Sleep(500 * time.Millisecond) // longer than a paused budget waits before checking again
-		return shadow.service.receiving.Load()
-	}, time.Minute, 10*time.Millisecond, "the copy never paused in the middle of a range")
-}
-
-// addNodeBehindProxy creates a node for the given index whose address is a proxy in front of it, without starting it
-func (c *moveCluster) addNodeBehindProxy(id int64) (*moveNode, *pausableProxy) {
-	c.t.Helper()
-	n := c.addNode(id)
-	n.listen = freeAddress(c.t)
-	n.proxy = startPausableProxy(c.t, n.address, n.listen)
-	return n, n.proxy
 }
 
 // pausableProxy forwards TCP connections to a node, like rudder-go-kit's tcpproxy, which can only forward or close

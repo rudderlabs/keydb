@@ -39,6 +39,9 @@ const (
 	// maxTxnMarkerSize is the length of the largest commit timestamp, a uint64, as a decimal string.
 	// Badger stores it as the value of each transaction finish marker.
 	maxTxnMarkerSize = 20
+
+	// defaultStreamBatchSize is the size at which StreamSnapshot writes a batch of entries
+	defaultStreamBatchSize = 256 << 10
 )
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
@@ -49,6 +52,17 @@ type LevelInfo struct {
 	NumTables int
 	Size      int64
 	Score     float64
+}
+
+// StreamOptions configures StreamSnapshot
+type StreamOptions struct {
+	// CompressionLevel is the zstd level used when compression is enabled, the configured level when zero
+	CompressionLevel int
+	// BatchSize is the size in bytes at which a batch of entries is written, 256 KiB when zero
+	BatchSize int
+	// Wait is called with the size of each batch before it is written, so callers can apply a byte budget.
+	// An error stops the stream. Nil means no budget.
+	Wait func(ctx context.Context, n int) error
 }
 
 type Cache struct {
@@ -501,20 +515,6 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 	}
 
 	return stream, func() (uint64, bool) { return maxVersion, hasData }
-}
-
-// defaultStreamBatchSize is the size at which StreamSnapshot writes a batch of entries
-const defaultStreamBatchSize = 256 << 10
-
-// StreamOptions configures StreamSnapshot
-type StreamOptions struct {
-	// CompressionLevel is the zstd level used when compression is enabled, the configured level when zero
-	CompressionLevel int
-	// BatchSize is the size in bytes at which a batch of entries is written, 256 KiB when zero
-	BatchSize int
-	// Wait is called with the size of each batch before it is written, so callers can apply a byte budget.
-	// An error stops the stream. Nil means no budget.
-	Wait func(ctx context.Context, n int) error
 }
 
 // StreamSnapshot writes the entries of one hash range with a version above since to w, as LoadSnapshot reads them.
