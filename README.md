@@ -579,7 +579,7 @@ Every values snippet is the full `nodes` state after the PR, not a diff. The exa
 
 Rules for the whole move:
 
-- A slot's `diskSize` must never change while the slot exists, because `volumeClaimTemplates` are immutable.
+- A slot's `diskSize` is the size its disk was created with, not its current size. Keep it as it is for as long as the slot exists, even after growing the disk with kubectl as usual: `volumeClaimTemplates` are immutable, so a changed value makes the operator's upgrade of `rudderstack-aux` fail, which holds back every other change to it until the value is put back.
 - Don't set or change the serving slot's `resources` in either PR: it restarts the serving pod. The shadow slot's `resources` must be the same in both PRs, or PR2 restarts the pod it promotes.
 - While a shadow exists, deleting either StatefulSet, the customer object or the release deletes that slot's PVC too, the serving one included. Don't delete them during a move. If a StatefulSet must be recreated, delete it with `--cascade=orphan`.
 
@@ -616,7 +616,7 @@ Rules for the whole move:
 
 4. **Afterwards, delete the old volume.** Check that the old slot's PVC is gone: here `data-keydb-0-0`, since the move left slot `a`. If it isn't, delete it with `kubectl delete pvc -n <namespace> data-keydb-0-0`. Never delete the PVC of the slot that now serves. Deleting the PVC doesn't delete the volume when its StorageClass retains volumes, as in production: the PV stays `Released` and the EBS volume keeps costing. Find it with `kubectl get pv | grep <namespace>/data-keydb-0-0`, then `kubectl patch pv <name> -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'`, which makes Kubernetes delete the PV and the EBS volume, and check that the PV is gone.
 
-The next move of node 0 goes back to slot `a`: `{active: b, shadow: a, slots: {a: {diskSize: 15Gi}, b: {diskSize: 20Gi}}}`, then `{active: a, slots: {a: {diskSize: 15Gi}}}`. Slot `a` needs its size stated from then on. On that move the serving pod is `keydb-0-b-0`, and the PVC to delete afterwards is `data-keydb-0-b-0`.
+The next move of node 0 goes back to slot `a`: `{active: b, shadow: a, slots: {a: {diskSize: 15Gi}, b: {diskSize: 20Gi}}}`, then `{active: a, slots: {a: {diskSize: 15Gi}}}`. Slot `a` keeps its `diskSize` from then on, for the same reason. On that move the serving pod is `keydb-0-b-0`, and the PVC to delete afterwards is `data-keydb-0-b-0`.
 
 Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV as in step 4. After PR2 the old disk is gone, and going back means another move.
 
