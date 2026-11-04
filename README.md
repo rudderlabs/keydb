@@ -626,13 +626,13 @@ Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV
 
 ### Configuration
 
-| Key | Default | Reloadable |
-|-----|---------|------------|
-| `advertisedAddress` | empty | no |
-| `shadowNodeAddresses` | empty | yes |
-| `adminPort` | `8080` | no |
-| `replication.maxBytesPerSecond` | `33554432` (32 MiB) | yes |
-| `replication.maxRequestLatency` | `30ms` | yes |
+| Key                             | Default             | Reloadable |
+|---------------------------------|---------------------|------------|
+| `advertisedAddress`             | empty               | no         |
+| `shadowNodeAddresses`           | empty               | yes        |
+| `adminPort`                     | `8080`              | no         |
+| `replication.maxBytesPerSecond` | `33554432` (32 MiB) | yes        |
+| `replication.maxRequestLatency` | `30ms`              | yes        |
 
 Both can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. Set `maxBytesPerSecond` to `0` to pause the copy; the status then gives `paused: maxBytesPerSecond is not positive` as the brake reason. It is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0 and pauses the copy too. While the brake holds the copy, the status gives the reason, such as `request latency 41ms over 30ms`: raise `maxRequestLatency` if the node's normal latency is above it, or the copy never runs.
 
