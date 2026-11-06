@@ -559,7 +559,7 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
   - a brake stops it while the node's own Get and Put requests are slow: while their mean latency over the last second is above `replication.maxRequestLatency` (30ms by default), or while requests are running and none has finished for longer than that, as when one is stuck;
   - latency doesn't change the cap: the copy runs at the cap or waits;
   - garbage collection doesn't run while a pass is in progress, and never runs on a shadow.
-- **Gap:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends, and peaks at two pass durations plus the pause between passes, the worst-case gap. A switch at a given moment loses at most the gap at that moment. keydb doesn't judge whether a gap is small enough: whoever merges PR2 decides, case by case.
+- **Gap:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends and, if that pass takes as long as the last, peaks at two pass durations plus the pause between passes, the worst-case gap. A switch at a given moment loses at most the gap at that moment. keydb doesn't judge whether a gap is small enough: whoever merges PR2 decides, case by case.
 - **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after the start of its last completed pass, at most the gap, are lost.
 - **Leftover disks:** a shadow refuses to receive data when its disk already holds data from another source, so a disk Kubernetes didn't delete can't silently turn a move into a merge.
 
@@ -601,7 +601,7 @@ Rules for the whole move:
    curl -s localhost:8080/replication/status
    ```
 
-   The status shows `passesCompleted`, `gapSeconds`, `worstCaseGapSeconds`, `lastPassDuration`, `lastError` and the progress of the current pass (`currentPassStartedAt`, `currentPassRangesDone` of `currentPassRangesTotal`, `currentPassBytes`). A switch now loses at most `gapSeconds` of writes, and at most `worstCaseGapSeconds` until the next pass ends. Merge PR2 once that loss is acceptable. The shadow answers with `state: shadow`.
+   The status shows `passesCompleted`, `gapSeconds`, `worstCaseGapSeconds`, `lastPassDuration`, `lastError` and the progress of the current pass (`currentPassStartedAt`, `currentPassRangesDone` of `currentPassRangesTotal`, `currentPassBytes`). A switch loses what the gap is when the old pod stops, which is after the merge. `worstCaseGapSeconds` is where the gap peaks if the next pass takes as long as the last: a slower pass goes past it, and a held copy has no limit. Merge PR2 once that loss is acceptable. The shadow answers with `state: shadow`.
 
 3. **PR2, the switch:**
 
