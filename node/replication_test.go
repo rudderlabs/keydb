@@ -369,16 +369,6 @@ func TestReplicationUnchangedRangeLoadsNothing(t *testing.T) {
 	}
 }
 
-type loadCountingCache struct {
-	Cache
-	loads atomic.Int64
-}
-
-func (c *loadCountingCache) LoadSnapshot(ctx context.Context, r io.Reader) error {
-	c.loads.Add(1)
-	return c.Cache.LoadSnapshot(ctx, r)
-}
-
 func TestGCSkippedOnShadow(t *testing.T) {
 	store, err := memstats.New()
 	require.NoError(t, err)
@@ -491,4 +481,15 @@ func (p *replicationPair) onShadow(t *testing.T, keys ...string) bool {
 		}
 	}
 	return true
+}
+
+// loadCountingCache counts the loads the service starts on its cache
+type loadCountingCache struct {
+	Cache
+	loads atomic.Int64
+}
+
+func (c *loadCountingCache) LoadSnapshot(ctx context.Context, r io.Reader) error {
+	c.loads.Add(1)
+	return c.Cache.LoadSnapshot(ctx, r)
 }
