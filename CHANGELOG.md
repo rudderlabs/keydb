@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.2](https://github.com/rudderlabs/keydb/compare/v1.5.1...v1.5.2) (2026-11-05)
+
+
+### Miscellaneous
+
+* **deps:** bump the go-deps group across 1 directory with 3 updates ([#263](https://github.com/rudderlabs/keydb/issues/263)) ([cf2bda5](https://github.com/rudderlabs/keydb/commit/cf2bda5c395d49931d91a075ba5376f0877b8a04))
+* stop publishing images to docker hub ([#255](https://github.com/rudderlabs/keydb/issues/255)) ([8e96a26](https://github.com/rudderlabs/keydb/commit/8e96a2630a502557b71b8b4ee0b7e164b46c5a28))
+
 ## [1.5.1](https://github.com/rudderlabs/keydb/compare/v1.5.0...v1.5.1) (2026-10-26)
 
 
