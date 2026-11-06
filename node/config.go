@@ -45,6 +45,20 @@ type Config struct {
 
 	// GrpcConfig holds gRPC connection configuration for node-to-node communication
 	GrpcConfig client.GrpcConfig
+
+	// AdvertisedAddress is this pod's own address, as it appears in Addresses or ShadowAddresses.
+	// When empty the node is always ACTIVE, which keeps the behaviour of deployments that don't use node moves.
+	AdvertisedAddress string
+
+	// ShadowAddresses returns, per node index, the address of the shadow being filled for that node, or an empty
+	// string when the node has no shadow. The function allows the list to be updated dynamically via configuration.
+	ShadowAddresses func() []string
+
+	// Replication configures how this node fills its shadow when it has one
+	Replication ReplicationConfig
+
+	// wrapCache lets tests observe the calls the service makes to its cache
+	wrapCache func(Cache) Cache
 }
 
 func (c *Config) getClusterSize() int64 {

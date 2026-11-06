@@ -71,6 +71,10 @@ enum ErrorCode {
   WRONG_NODE = 1; // Key should be handled by a different node
   SCALING = 2; // There is a scaling operation in progress, the client should retry with an exponential backoff
   INTERNAL_ERROR = 3;
+  // The node can't serve yet: it is a shadow being filled, a shadow just promoted that is finishing its last load, or
+  // a pod whose index the config gave to another pod. The client should retry with an exponential backoff, using the
+  // addresses in the response.
+  NOT_READY = 4;
 }
 
 // GetNodeInfoRequest to retrieve information about a node
@@ -141,6 +145,7 @@ message SnapshotChunk {
   bytes data = 2;                  // Chunk of snapshot data
   bool is_last = 3;                // Whether this is the final chunk
   uint64 timestamp = 4;            // Snapshot timestamp (for tracking)
+  string source_address = 5;       // Advertised address of the sending node, empty for senders that predate it
 }
 
 // ReceiveSnapshotResponse contains the result of receiving a streamed snapshot

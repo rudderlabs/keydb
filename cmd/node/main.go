@@ -25,6 +25,7 @@ import (
 
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
+	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	_ "github.com/rudderlabs/rudder-go-kit/maxprocs"
 	"github.com/rudderlabs/rudder-go-kit/profiler"
@@ -42,8 +43,9 @@ var (
 	// legacyPodNameRegex matches single statefulset pod names like keydb-0, keydb-1, etc.
 	legacyPodNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
 
-	// podNameRegex matches multi-statefulset pod names with fixed -0 suffix like keydb-0-0, keydb-1-0, etc.
-	podNameRegex = regexp.MustCompile(`^keydb-(\d+)-0$`)
+	// podNameRegex matches multi-statefulset pod names with fixed -0 suffix like keydb-0-0, keydb-1-0, etc., and
+	// those of a node's second slot, used by node moves, like keydb-0-b-0
+	podNameRegex = regexp.MustCompile(`^keydb-(\d+)(?:-b)?-0$`)
 )
 
 const (
@@ -139,6 +141,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return fmt.Errorf("no node addresses provided")
 	}
 	degradedNodes := conf.GetReloadableStringVar("", degradedNodesConfKey)
+	// shadowNodeAddresses is reloadable so that a shadow becomes active without a restart when a move is completed
+	shadowNodeAddresses := conf.GetReloadableStringVar("", "shadowNodeAddresses")
 
 	nodeConfig := node.Config{
 		NodeID:          nodeID,
@@ -150,13 +154,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		GarbageCollectionInterval: conf.GetDurationVar( // node.DefaultGarbageCollectionInterval will be used
 			0, time.Nanosecond, "gcInterval",
 		),
-		Addresses: func() []string {
-			raw := strings.TrimSpace(nodeAddresses.Load())
-			if raw == "" {
-				return nil
-			}
-			return strings.Split(raw, ",")
-		},
+		Addresses: func() []string { return splitAddresses(nodeAddresses.Load()) },
 		DegradedNodes: func() []bool {
 			raw := strings.TrimSpace(degradedNodes.Load())
 			if raw == "" {
@@ -176,13 +174,27 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		CheckL0StallInterval:      conf.GetDurationVar(5, time.Second, "checkL0StallInterval"),
 		LogTableStructureDuration: conf.GetDurationVar(10, time.Minute, "logTableStructureDuration"),
 		BackupFolderName:          conf.GetStringVar("", "KUBE_NAMESPACE"),
+		AdvertisedAddress:         strings.TrimSpace(conf.GetStringVar("", "advertisedAddress")),
+		ShadowAddresses:           func() []string { return splitAddresses(shadowNodeAddresses.Load()) },
+		// both change at runtime, without restarting the copy: 0 bytes per second pauses it
+		Replication: node.ReplicationConfig{
+			MaxBytesPerSecond: conf.GetReloadableInt64Var(
+				node.DefaultReplicationMaxBytesPerSecond, 1, "replication.maxBytesPerSecond",
+			).Load,
+			MaxRequestLatency: conf.GetReloadableDurationVar(
+				int64(node.DefaultReplicationMaxRequestLatency/time.Millisecond), time.Millisecond,
+				"replication.maxRequestLatency",
+			).Load,
+		},
 	}
 
 	port := conf.GetIntVar(50051, 1, "port")
 	healthPort := conf.GetIntVar(50052, 1, "healthPort")
+	adminPort := conf.GetIntVar(8080, 1, "adminPort")
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
 		logger.NewIntField("healthPort", int64(healthPort)),
+		logger.NewIntField("adminPort", int64(adminPort)),
 		logger.NewIntField("nodeId", nodeConfig.NodeID),
 		logger.NewIntField("totalHashRanges", nodeConfig.TotalHashRanges),
 	)
@@ -317,6 +329,18 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewStringField("degradedNodes", degradedNodes.Load()),
 	)
 
+	adminServer := &http.Server{
+		Addr:              fmt.Sprintf(":%d", adminPort),
+		Handler:           service.AdminHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	wg.Go(func() {
+		defer log.Infon("Admin server terminated")
+		if err := httputil.ListenAndServe(ctx, adminServer); err != nil {
+			log.Warnn("Admin server failed", obskit.Error(err))
+		}
+	})
+
 	wg.Go(func() {
 		defer log.Infon("Profiler server terminated")
 		if err := profiler.StartServer(ctx, conf.GetIntVar(7777, 1, "Profiler.Port")); err != nil {
@@ -338,9 +362,11 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		// Flip health status to NOT_SERVING first so readiness probes fail and
 		// Kubernetes removes this pod from Service endpoints before we stop serving.
 		healthServer.Shutdown()
-		service.Close()
-		server.GracefulStop()
+		// Stop cancels in-flight calls instead of waiting for them: clients retry them, and after a node move the
+		// retries land on the node that replaced this one. Badger is closed only once no handler is running.
+		server.Stop()
 		_ = lis.Close()
+		service.Close()
 		// Stop the dedicated health server last so probes can still be answered
 		// (with NOT_SERVING) while the main server is draining.
 		healthGrpcServer.GracefulStop()
@@ -363,7 +389,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 }
 
 // getNodeID extracts the node ID from a pod name.
-// Supports both multi-statefulset format (keydb-{nodeId}-0) and legacy format (keydb-{nodeId}).
+// Supports the multi-statefulset format (keydb-{nodeId}-0 or, for the second slot used by node moves,
+// keydb-{nodeId}-b-0) and the legacy format (keydb-{nodeId}).
 func getNodeID(podName string) (int64, error) {
 	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
 	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
@@ -384,7 +411,19 @@ func getNodeID(podName string) (int64, error) {
 		return nodeID, nil
 	}
 
-	return 0, fmt.Errorf("invalid pod name %q, expected format: keydb-<nodeId>-0 or keydb-<nodeId>", podName)
+	return 0, fmt.Errorf(
+		"invalid pod name %q, expected format: keydb-<nodeId>-0, keydb-<nodeId>-b-0 or keydb-<nodeId>", podName,
+	)
+}
+
+// splitAddresses splits a comma-separated address list, keeping empty entries so that indexes match node IDs.
+// It returns nil when the list is empty.
+func splitAddresses(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
 }
 
 type configObserver struct {

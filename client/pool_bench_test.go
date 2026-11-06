@@ -227,6 +227,7 @@ func BenchmarkPoolExhaustion(b *testing.B) {
 // mockNodeServer is a mock gRPC server that simulates work
 type mockNodeServer struct {
 	proto.UnimplementedNodeServiceServer
+	address         string
 	processingDelay time.Duration
 	requestCount    atomic.Uint64
 }
@@ -275,6 +276,10 @@ func (m *mockNodeServer) Put(ctx context.Context, _ *proto.PutRequest) (*proto.P
 	}, nil
 }
 
+func (m *mockNodeServer) GetNodeInfo(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
+	return &proto.GetNodeInfoResponse{ClusterSize: 1, NodesAddresses: []string{m.address}}, nil
+}
+
 func (m *mockNodeServer) GetRequestCount() uint64 { return m.requestCount.Load() }
 
 // setupBenchmarkServer creates a mock gRPC server with specified processing delay
@@ -287,6 +292,7 @@ func setupBenchmarkServer(processingDelay time.Duration) (*grpc.Server, net.List
 
 	server := grpc.NewServer()
 	mockServer := &mockNodeServer{
+		address:         listener.Addr().String(),
 		processingDelay: processingDelay,
 	}
 	proto.RegisterNodeServiceServer(server, mockServer)
@@ -301,7 +307,7 @@ func createBenchmarkClient(b *testing.B, poolSize int, address string) *Client {
 	b.Helper()
 
 	// Create client using NewClient with the actual address
-	client, err := NewClient(Config{
+	client, err := NewClient(b.Context(), Config{
 		Addresses:          []string{address},
 		ConnectionPoolSize: poolSize,
 		RetryPolicy:        RetryPolicy{Disabled: true},
