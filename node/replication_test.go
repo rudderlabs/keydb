@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"io"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -315,6 +316,67 @@ func TestReplicationProgressDuringPass(t *testing.T) {
 	status := p.source.ReplicationStatus()
 	require.False(t, status.CurrentPassStartedAt.IsZero())
 	require.Equal(t, "running", status.State)
+}
+
+// An unchanged range must not start a load on the shadow, or every range of every pass costs a Load and a Sync
+func TestReplicationUnchangedRangeLoadsNothing(t *testing.T) {
+	for _, compress := range []bool{true, false} {
+		t.Run("compress="+strconv.FormatBool(compress), func(t *testing.T) {
+			ctx := context.Background()
+			sourceAddress, shadowAddress := freeAddress(t), freeAddress(t)
+			newConf := func() *config.Config {
+				conf := newTestConf(t)
+				conf.Set("BadgerDB.Dedup.Compress", compress)
+				return conf
+			}
+			source := newTestService(ctx, t, Config{
+				NodeID:            0,
+				Addresses:         staticList(sourceAddress),
+				AdvertisedAddress: sourceAddress,
+				ShadowAddresses:   staticList(""),
+			}, newConf())
+			var counter *loadCountingCache
+			shadow := newTestService(ctx, t, Config{
+				NodeID:            0,
+				Addresses:         staticList(sourceAddress),
+				AdvertisedAddress: shadowAddress,
+				ShadowAddresses:   staticList(shadowAddress),
+				wrapCache: func(c Cache) Cache {
+					counter = &loadCountingCache{Cache: c}
+					return counter
+				},
+			}, newConf())
+			serveTestService(t, shadow, shadowAddress)
+			client := nodeClient(t, shadowAddress)
+
+			keysByHashRange, err := source.GetKeysByHashRange(testKeys(100))
+			require.NoError(t, err)
+			require.NoError(t, source.cache.Put(keysByHashRange, time.Hour))
+			pass := func() {
+				for hashRange := range int64(4) {
+					_, err := source.replication.sendRange(ctx, client, hashRange)
+					require.NoError(t, err)
+				}
+			}
+
+			pass()
+			loads := counter.loads.Load()
+			require.Positive(t, loads, "the first pass loads the data")
+			pass()
+			pass() // a marker that the idle pass moved back would load again here
+			require.Equal(t, loads, counter.loads.Load(), "nothing changed, so nothing loads")
+		})
+	}
+}
+
+type loadCountingCache struct {
+	Cache
+	loads atomic.Int64
+}
+
+func (c *loadCountingCache) LoadSnapshot(ctx context.Context, r io.Reader) error {
+	c.loads.Add(1)
+	return c.Cache.LoadSnapshot(ctx, r)
 }
 
 func TestGCSkippedOnShadow(t *testing.T) {

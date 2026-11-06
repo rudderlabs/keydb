@@ -520,7 +520,8 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 // StreamSnapshot writes the entries of one hash range with a version above since to w, as LoadSnapshot reads them.
 // Unlike CreateSnapshots it reads the range with a single iterator and writes small batches as it goes, so it never
 // holds more than a batch in memory, and a pass over unchanged data allocates next to nothing.
-// Expired keys are skipped. It returns the highest version written, 0 when nothing was.
+// Expired keys are skipped. It returns the highest version written. With nothing to write, w gets no bytes and it
+// returns 0.
 func (c *Cache) StreamSnapshot(
 	ctx context.Context, hashRange int64, since uint64, w io.Writer, opts StreamOptions,
 ) (uint64, error) {
@@ -541,18 +542,21 @@ func (c *Cache) StreamSnapshot(
 	if batchSize <= 0 {
 		batchSize = defaultStreamBatchSize
 	}
+	level := opts.CompressionLevel
+	if level <= 0 {
+		level = c.compressionLevel
+	}
 	lw := &lockedWriter{writer: w}
-	if c.compress {
-		level := opts.CompressionLevel
-		if level <= 0 {
-			level = c.compressionLevel
+	write := func(batch *pb.KVList) error {
+		// the zstd frame starts with the first batch: an empty frame would make the receiver start a load
+		if c.compress && lw.closer == nil {
+			zw := zstd.NewWriterLevel(w, level)
+			lw.writer, lw.closer = zw, zw
 		}
-		zw := zstd.NewWriterLevel(w, level)
-		lw.writer = zw
-		lw.closer = zw
+		return c.writeTo(batch, lw)
 	}
 
-	maxVersion, err := c.streamRange(ctx, hashRange, since, lw, batchSize, opts.Wait)
+	maxVersion, err := c.streamRange(ctx, hashRange, since, write, batchSize, opts.Wait)
 	if lw.closer != nil {
 		// flushes the zstd frame, the caller's writer is left open
 		if closeErr := lw.closer.Close(); err == nil && closeErr != nil {
@@ -566,7 +570,7 @@ func (c *Cache) StreamSnapshot(
 }
 
 func (c *Cache) streamRange(
-	ctx context.Context, hashRange int64, since uint64, w *lockedWriter, batchSize int,
+	ctx context.Context, hashRange int64, since uint64, write func(*pb.KVList) error, batchSize int,
 	wait func(ctx context.Context, bytes int) error,
 ) (uint64, error) {
 	txn := c.cache.NewTransaction(false)
@@ -594,7 +598,7 @@ func (c *Cache) streamRange(
 				return err
 			}
 		}
-		if err := c.writeTo(batch, w); err != nil {
+		if err := write(batch); err != nil {
 			return fmt.Errorf("writing a batch: %w", err)
 		}
 		batch, batchBytes = &pb.KVList{}, 0
@@ -642,7 +646,9 @@ func (c *Cache) LoadSnapshot(_ context.Context, reader io.Reader) error {
 
 	// The Load() method is not race safe so we have to load data sequentially
 	if c.compress {
-		reader = zstd.NewReader(reader)
+		zr := zstd.NewReader(reader)
+		defer func() { _ = zr.Close() }() // the decompressor lives in C, nothing else ever frees it
+		reader = zr
 	}
 	if err := c.cache.Load(reader, maxPendingWrites); err != nil {
 		// Load moves the oracle's next timestamp forward for every key it sets, but marks those timestamps done

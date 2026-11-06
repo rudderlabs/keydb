@@ -475,6 +475,51 @@ func TestStreamSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStreamSnapshotUnchangedRangeWritesNothing(t *testing.T) {
+	for _, compress := range []bool{false, true} {
+		t.Run("compress="+strconv.FormatBool(compress), func(t *testing.T) {
+			cache := newStreamTestCache(t, compress)
+			require.NoError(t, cache.Put(map[int64][]string{0: {"k1"}}, time.Hour))
+			var first bytes.Buffer
+			since, err := cache.StreamSnapshot(context.Background(), 0, 0, &first, StreamOptions{})
+			require.NoError(t, err)
+			require.Positive(t, first.Len())
+
+			var second bytes.Buffer
+			maxVersion, err := cache.StreamSnapshot(context.Background(), 0, since, &second, StreamOptions{})
+			require.NoError(t, err)
+			require.Zero(t, maxVersion)
+			require.Zero(t, second.Len(), "the receiver starts a load for any bytes, even an empty zstd frame")
+		})
+	}
+}
+
+// TestLoadSnapshotClosesDecompressor protects the decompressor's C memory, which only Close frees. Go can't read that
+// memory and the process's resident size swings by more than it. But Close also gives the reader's two 128 KiB buffers
+// back to zstd's pool, so a reader that isn't closed allocates them again on every load.
+func TestLoadSnapshotClosesDecompressor(t *testing.T) {
+	allocatedPerLoad := func(compress bool) int64 {
+		source := newStreamTestCache(t, compress)
+		require.NoError(t, source.Put(map[int64][]string{0: {"k1"}}, time.Hour))
+		var snapshot bytes.Buffer
+		_, err := source.StreamSnapshot(context.Background(), 0, 0, &snapshot, StreamOptions{})
+		require.NoError(t, err)
+		destination := newStreamTestCache(t, compress)
+
+		const loads = 100
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for range loads {
+			require.NoError(t, destination.LoadSnapshot(context.Background(), bytes.NewReader(snapshot.Bytes())))
+		}
+		runtime.ReadMemStats(&after)
+		return int64(after.TotalAlloc-before.TotalAlloc) / loads
+	}
+
+	extra := allocatedPerLoad(true) - allocatedPerLoad(false)
+	require.Less(t, extra, int64(128<<10), "the pool hands out the same buffers, with -race it drops a quarter of them")
+}
+
 func TestInterruptedLoadSnapshot(t *testing.T) {
 	for _, compress := range []bool{false, true} {
 		t.Run("compress="+strconv.FormatBool(compress), func(t *testing.T) {
