@@ -429,6 +429,55 @@ func TestMoveMiddleNodeOfThree(t *testing.T) {
 // TestMoveClientCreatedDuringMove starts a client, as a processor does, while a shadow exists: the name resolves to
 // the shadow too, so the client's first list has three entries for a two-node cluster, and the first answers correct
 // it without a write ever landing on the shadow.
+// A scale-up starts the new pods degraded. A client created meanwhile finds them behind the name, and when the serving
+// pod tells it the list is wrong it asks every pod for the addresses, so the degraded ones have to answer.
+func TestClientCreatedDuringScaleUp(t *testing.T) {
+	const totalHashRanges = 4
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	addresses := []string{freeAddress(t), freeAddress(t), freeAddress(t)}
+	for id, address := range addresses {
+		service := newTestService(ctx, t, Config{
+			NodeID:            int64(id),
+			TotalHashRanges:   totalHashRanges,
+			Addresses:         staticList(addresses...),
+			AdvertisedAddress: address,
+			DegradedNodes:     func() []bool { return []bool{false, true, true} },
+		}, newTestConf(t))
+		serveTestService(t, service, address)
+	}
+
+	cl, err := client.NewClient(ctx, client.Config{
+		Addresses:       []string{moveTestHeadless},
+		TotalHashRanges: totalHashRanges,
+		RetryPolicy: client.RetryPolicy{
+			InitialInterval: 20 * time.Millisecond,
+			Multiplier:      1.5,
+			MaxInterval:     300 * time.Millisecond,
+		},
+	}, logger.NOP, client.WithAddressResolver(func(context.Context, string) ([]string, error) {
+		return addresses, nil
+	}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cl.Close() })
+	require.Equal(t, 3, cl.ClusterSize(), "the first list holds every pod behind the name, the degraded ones included")
+
+	keys := testKeys(50)
+	require.NoError(t, cl.Put(ctx, keys, time.Hour))
+	require.Equal(t, 1, cl.ClusterSize(), "only the pod that isn't degraded serves")
+	exists, err := cl.Get(ctx, keys)
+	require.NoError(t, err)
+	for _, e := range exists {
+		require.True(t, e)
+	}
+
+	info, err := nodeClient(t, addresses[1]).GetNodeInfo(ctx, &pb.GetNodeInfoRequest{})
+	require.NoError(t, err)
+	require.Equal(t, addresses[:1], info.NodesAddresses)
+	require.ElementsMatch(t, hash.New(3, totalHashRanges).GetNodeHashRangesList(1), info.HashRanges,
+		"a degraded pod reports the ranges it holds once the scale-up ends")
+}
+
 func TestMoveClientCreatedDuringMove(t *testing.T) {
 	c := newMoveCluster(t, fastMoveReplication())
 	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)

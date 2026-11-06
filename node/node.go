@@ -433,7 +433,12 @@ func (s *Service) recordLevelMetrics(ctx context.Context) {
 	}
 }
 
+// getCurrentRanges returns the hash ranges of this node. A degraded node holds the ranges it gets once it stops being
+// degraded: the hasher only counts the nodes that aren't, and may not even know this one.
 func (s *Service) getCurrentRanges() map[int64]struct{} {
+	if isDegraded, clusterSize := s.isDegraded(); isDegraded {
+		return hash.New(clusterSize, s.config.TotalHashRanges).GetNodeHashRanges(s.config.NodeID)
+	}
 	return s.hasher.GetNodeHashRanges(s.config.NodeID)
 }
 
@@ -441,13 +446,7 @@ func (s *Service) getCurrentRanges() map[int64]struct{} {
 func (s *Service) initCaches(
 	ctx context.Context, download bool, selectedHashRanges ...int64,
 ) error {
-	var currentRanges map[int64]struct{}
-	if isDegraded, degradedClusterSize := s.isDegraded(); isDegraded {
-		h := hash.New(degradedClusterSize, s.config.TotalHashRanges)
-		currentRanges = h.GetNodeHashRanges(s.config.NodeID)
-	} else {
-		currentRanges = s.getCurrentRanges() // gets the hash ranges for this node
-	}
+	currentRanges := s.getCurrentRanges()
 
 	// Remove caches and key maps for ranges this node no longer handles
 	for r := range s.metrics.getKeysCounters {
@@ -838,7 +837,7 @@ func (s *Service) GetNodeInfo(_ context.Context, req *pb.GetNodeInfoRequest) (*p
 	}
 
 	// Get hash ranges for this node
-	ranges := s.hasher.GetNodeHashRanges(s.config.NodeID)
+	ranges := s.getCurrentRanges()
 
 	// Convert to proto hash ranges
 	hashRanges := make([]int64, 0, len(ranges))
