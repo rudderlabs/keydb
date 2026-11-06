@@ -123,7 +123,7 @@ func newReplicator(s *Service) *replicator {
 	r := &replicator{s: s, cfg: cfg, budget: newBudget(cfg.MaxBytesPerSecond, slow)}
 	tags := stats.Tags{"nodeID": strconv.FormatInt(s.config.NodeID, 10)}
 	r.metrics.gap = s.stats.NewTaggedStat("keydb_replication_gap_seconds", stats.GaugeType, tags)
-	r.metrics.gap.Gauge(-1) // no pass is done yet
+	r.metrics.gap.Gauge(float64(-1)) // no pass is done yet; float64 like in run, a gauge panics if its type changes
 	r.metrics.passDuration = s.stats.NewTaggedStat("keydb_replication_pass_duration_seconds", stats.TimerType, tags)
 	r.metrics.bytes = s.stats.NewTaggedStat("keydb_replication_bytes_total", stats.CountType, tags)
 	r.metrics.errors = s.stats.NewTaggedStat("keydb_replication_errors_total", stats.CountType, tags)

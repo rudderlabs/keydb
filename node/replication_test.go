@@ -7,11 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
 	"github.com/rudderlabs/rudder-go-kit/bytesize"
+	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/stats/memstats"
+	svcMetric "github.com/rudderlabs/rudder-go-kit/stats/metric"
 )
 
 func TestReplicationStartsFromConfig(t *testing.T) {
@@ -251,6 +255,41 @@ func TestReplicationMetrics(t *testing.T) {
 	require.Eventually(t, func() bool { return gauge("keydb_replication_gap_seconds") == -1 },
 		10*time.Second, 20*time.Millisecond, "a stopped copy has no gap")
 	require.Zero(t, gauge("keydb_replication_budget_bytes_per_second"), "a stopped copy has no budget")
+}
+
+// TestReplicationMetricsOnOpenTelemetry uses the stats production runs on. An OpenTelemetry gauge panics when a store
+// changes the type of its value, which stats.NOP and memstats accept.
+func TestReplicationMetricsOnOpenTelemetry(t *testing.T) {
+	conf := config.New()
+	conf.Set("OpenTelemetry.enabled", true)
+	conf.Set("OpenTelemetry.metrics.prometheus.enabled", true)
+	conf.Set("RuntimeStats.enabled", false)
+	registry := prometheus.NewRegistry()
+	stat := stats.NewStats(conf, logger.NewFactory(conf), svcMetric.NewManager(),
+		stats.WithServiceName(t.Name()), stats.WithPrometheusRegistry(registry, registry))
+	require.NoError(t, stat.Start(context.Background(), stats.DefaultGoRoutineFactory))
+	t.Cleanup(stat.Stop)
+
+	gap := func() float64 {
+		families, err := registry.Gather()
+		if err != nil {
+			return -100
+		}
+		for _, family := range families {
+			if family.GetName() == "keydb_replication_gap_seconds" && len(family.GetMetric()) > 0 {
+				return family.GetMetric()[0].GetGauge().GetValue()
+			}
+		}
+		return -100 // never exported
+	}
+
+	p := newReplicationPair(t, fastReplication(nil), stat)
+	require.Eventually(t, func() bool { return gap() == -1 },
+		10*time.Second, 20*time.Millisecond, "no pass is done yet")
+	p.put(t, testKeys(100)...)
+	p.shadows.set(p.shadowAddress)
+	require.Eventually(t, func() bool { return gap() >= 0 },
+		10*time.Second, 20*time.Millisecond, "the gap gauge never got a value")
 }
 
 func TestReplicationProgressDuringPass(t *testing.T) {
