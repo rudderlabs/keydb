@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
@@ -78,6 +79,7 @@ func TestNotReadyMakesTheClientDiscover(t *testing.T) {
 	c.mu.RUnlock()
 	require.Same(t, pool0, newPool0, "the connections to a node whose address didn't change must be kept")
 	require.NotSame(t, oldPool1, newPool1)
+	requirePoolClosed(t, oldPool1)
 }
 
 // TestWrongNodeMakesTheClientDiscover has the name resolve to as many pods as there are nodes, in the wrong order:
@@ -233,10 +235,14 @@ func TestCallNodeAfterConcurrentShrink(t *testing.T) {
 		newMockNode(t, address).setList(addresses...)
 	}
 	c := newDiscoveryClient(t, addresses...)
+	c.mu.RLock()
+	removedPool := c.pools[2]
+	c.mu.RUnlock()
 
 	// another request learnt that the cluster shrank to 2 nodes while this one was routed to node 2
 	_, err := c.applyAddresses(addresses[:2])
 	require.NoError(t, err)
+	requirePoolClosed(t, removedPool)
 	_, err = callNode(context.Background(), c, 2, 3, "get", stats.NOP.NewStat("retries", stats.CountType),
 		func(ctx context.Context, client proto.NodeServiceClient) (*proto.GetResponse, error) {
 			return client.Get(ctx, &proto.GetRequest{Keys: []string{"k"}})
@@ -270,6 +276,36 @@ func TestCloseStopsInFlightRetries(t *testing.T) {
 	pools := len(c.pools)
 	c.mu.RUnlock()
 	require.Zero(t, pools, "a request must not reopen connections after Close")
+}
+
+// TestCloseDuringDiscovery has a node answer a request's discovery after the client was closed
+func TestCloseDuringDiscovery(t *testing.T) {
+	a0 := freeMockAddress(t)
+	node0 := newMockNode(t, a0)
+	node0.notReady.Store(true) // the request discovers
+	hold := make(chan struct{})
+	node0.holdNodeInfo.Store(&hold)
+
+	c := newDiscoveryClient(t, a0)
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Get(context.Background(), []string{"k"})
+		done <- err
+	}()
+	require.Eventually(t, func() bool { return node0.nodeInfos.Load() > 0 }, 5*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, c.Close())
+	close(hold)
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, errClientClosed)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request kept going after Close")
+	}
+	c.mu.RLock()
+	pools := len(c.pools)
+	c.mu.RUnlock()
+	require.Zero(t, pools, "an answer that arrives after Close must not reopen connections")
 }
 
 func TestShortRequestsMoveOffADeadNode(t *testing.T) {
@@ -443,6 +479,19 @@ func TestDiscoveryAsksEveryPodAtOnce(t *testing.T) {
 	require.Less(t, time.Since(start), getNodeInfoTimeout/2, "a pod that doesn't answer must not hold up the others")
 }
 
+// TestUnresolvedNameDoesNotHideTheOthers configures two names, the first of which doesn't resolve
+func TestUnresolvedNameDoesNotHideTheOthers(t *testing.T) {
+	a0 := freeMockAddress(t)
+	newMockNode(t, a0)
+	c := newTestClientWith(t, nil, []string{"unknown.test.invalid:50051", headlessName},
+		WithAddressResolver(newHeadless(a0).resolve))
+	require.Equal(t, 1, c.ClusterSize())
+
+	exists, err := c.Get(context.Background(), []string{"k"})
+	require.NoError(t, err)
+	require.Equal(t, []bool{true}, exists)
+}
+
 func TestNoDiscoveryOnOtherErrors(t *testing.T) {
 	a0 := freeMockAddress(t)
 	var gets atomic.Int64
@@ -549,6 +598,10 @@ type mockNode struct {
 	list atomic.Pointer[[]string]
 	// notReady makes Get and Put answer NOT_READY with the node's list
 	notReady atomic.Bool
+	// nodeInfos counts the GetNodeInfo calls
+	nodeInfos atomic.Int64
+	// holdNodeInfo, when set, makes GetNodeInfo wait until the channel is closed
+	holdNodeInfo atomic.Pointer[chan struct{}]
 	// stop shuts the node down, after which its address refuses connections
 	stop func()
 }
@@ -624,6 +677,10 @@ func newMockNode(t *testing.T, address string) *mockNode {
 			return resp, nil
 		},
 		getNodeInfoFunc: func(context.Context, *proto.GetNodeInfoRequest) (*proto.GetNodeInfoResponse, error) {
+			n.nodeInfos.Add(1)
+			if hold := n.holdNodeInfo.Load(); hold != nil {
+				<-*hold
+			}
 			list := n.currentList()
 			return &proto.GetNodeInfoResponse{ClusterSize: int64(len(list)), NodesAddresses: list}, nil
 		},
@@ -736,4 +793,13 @@ func startStuckNode(t *testing.T) string {
 		},
 	}, address))
 	return address
+}
+
+// requirePoolClosed fails unless every connection of the pool is shut down: a client that drops a pool without
+// closing it leaks its connections.
+func requirePoolClosed(t *testing.T, pool *connectionPool) {
+	t.Helper()
+	for _, conn := range pool.connections {
+		require.Equal(t, connectivity.Shutdown, conn.GetState())
+	}
 }
