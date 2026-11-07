@@ -97,6 +97,44 @@ func TestLeftoverDiskGuard(t *testing.T) {
 	})
 }
 
+// A disk whose data expired keeps the markers of the node that filled it. The first range must not be streamed from
+// one of them: the shadow would then store a higher marker, and never get the keys of that range below the old one.
+func TestFirstRangeIgnoresLeftoverMarkers(t *testing.T) {
+	ctx := context.Background()
+	sourceAddress, shadowAddress := freeAddress(t), freeAddress(t)
+	source := newTestService(ctx, t, Config{
+		NodeID:            0,
+		TotalHashRanges:   1,
+		Addresses:         staticList(sourceAddress),
+		AdvertisedAddress: sourceAddress,
+		ShadowAddresses:   staticList(""),
+	}, newTestConf(t))
+	shadow := newTestService(ctx, t, Config{
+		NodeID:            0,
+		TotalHashRanges:   1,
+		Addresses:         staticList(sourceAddress),
+		AdvertisedAddress: shadowAddress,
+		ShadowAddresses:   staticList(shadowAddress),
+	}, newTestConf(t))
+	serveTestService(t, shadow, shadowAddress)
+
+	require.NoError(t, source.cache.Put(map[int64][]string{0: {"below"}}, time.Hour))
+	var snapshot bytes.Buffer
+	leftover, err := source.cache.StreamSnapshot(ctx, 0, 0, &snapshot, badger.StreamOptions{})
+	require.NoError(t, err)
+	require.NoError(t, shadow.setSnapshotTimestamp(0, leftover))
+	require.NoError(t, source.cache.Put(map[int64][]string{0: {"above"}}, time.Hour))
+
+	_, err = source.replication.sendRange(ctx, nodeClient(t, shadowAddress), 0)
+	require.NoError(t, err)
+
+	keysByHashRange, indexes, err := shadow.GetKeysByHashRangeWithIndexes([]string{"below", "above"})
+	require.NoError(t, err)
+	exists, err := shadow.cache.Get(keysByHashRange, indexes)
+	require.NoError(t, err)
+	require.Equal(t, []bool{true, true}, exists, "keys below the leftover marker must reach the shadow")
+}
+
 func TestReceiveMultiChunk(t *testing.T) {
 	ctx := context.Background()
 	newConf := func() *config.Config {

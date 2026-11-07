@@ -19,6 +19,18 @@ func (s *Service) advanceSnapshotTimestamp(hashRange int64, timestamp uint64) er
 	return s.setSnapshotTimestamp(hashRange, timestamp)
 }
 
+// sinceMarker returns the marker a sender must stream a hash range from. A shadow that has no source yet answers 0:
+// any marker on its disk is a version of an earlier source, which checkShadowSource only drops once a chunk arrives.
+func (s *Service) sinceMarker(hashRange int64) (uint64, error) {
+	if s.isShadow() {
+		_, found, err := s.cache.GetValue(shadowSourceKey, internalKeysHashRange)
+		if err != nil || !found {
+			return 0, err
+		}
+	}
+	return s.getSnapshotTimestamp(hashRange)
+}
+
 // checkShadowSource makes sure a shadow only ever receives data from one source.
 // The first time it receives data it remembers the source. If it already holds data without remembering a source,
 // or remembers a different one, its disk is a leftover from an earlier move and it must not merge into it.

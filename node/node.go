@@ -1221,7 +1221,7 @@ func (s *Service) GetSnapshotSince(
 		logger.NewIntField("hashRange", req.HashRange),
 	)
 
-	timestamp, err := s.getSnapshotTimestamp(req.HashRange)
+	timestamp, err := s.sinceMarker(req.HashRange)
 	if err != nil {
 		s.logger.Warnn("Getting snapshot timestamp",
 			logger.NewIntField("hashRange", req.HashRange), obskit.Error(err),
