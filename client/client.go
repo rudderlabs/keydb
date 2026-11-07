@@ -157,7 +157,8 @@ func WithAddressResolver(resolve func(ctx context.Context, address string) ([]st
 
 // NewClient creates a new KeyDB client. It resolves config.Addresses and uses what they resolve to as the node list.
 // It doesn't wait for a node: when they resolve to none, as a headless Service with no ready pod does, the client
-// starts without a node list and its first request waits for the nodes instead.
+// starts without a node list and its first request waits for the nodes instead. It does the same when they resolve to
+// more pods than hash ranges: shadows are among them, and the hash can't be built on that list.
 func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Opts) (*Client, error) {
 	if len(config.Addresses) == 0 {
 		return nil, fmt.Errorf("no addresses provided")
@@ -229,7 +230,8 @@ func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Op
 
 	client.initMetrics()
 
-	if addresses := client.resolveNodes(ctx); len(addresses) > 0 {
+	addresses := client.resolveNodes(ctx)
+	if n := int64(len(addresses)); n > 0 && n <= config.TotalHashRanges {
 		if _, err := client.applyAddresses(addresses); err != nil {
 			_ = client.Close()
 			return nil, err

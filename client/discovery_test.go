@@ -358,6 +358,24 @@ func TestNewClientDoesNotWaitForTheNodes(t *testing.T) {
 	}
 }
 
+// TestMorePodsThanHashRanges has the name resolve to more pods than there are hash ranges, which a valid cluster does
+// with a shadow when it has as many nodes as ranges: the client must not make a hash out of that list.
+func TestMorePodsThanHashRanges(t *testing.T) {
+	a0, s0 := freeMockAddress(t), freeMockAddress(t)
+	newMockNode(t, a0)
+	shadow := newMockNode(t, s0)
+	shadow.setList(a0)
+	shadow.notReady.Store(true)
+
+	c := newTestClientWith(t, func(conf *Config) { conf.TotalHashRanges = 1 }, []string{headlessName},
+		WithAddressResolver(newHeadless(a0, s0).resolve),
+	)
+	exists, err := c.Get(t.Context(), []string{"k"})
+	require.NoError(t, err)
+	require.Equal(t, []bool{true}, exists)
+	require.Equal(t, 1, c.ClusterSize())
+}
+
 func TestNotReadyRetryDelayIsCapped(t *testing.T) {
 	a0 := freeMockAddress(t)
 	node0 := newMockNode(t, a0)
