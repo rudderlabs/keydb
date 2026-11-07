@@ -30,7 +30,8 @@ const (
 
 	// notReadyMaxRetryDelay caps the wait before retrying a node that answered NOT_READY. A shadow becomes ACTIVE
 	// as soon as its kubelet refreshes the config and a NOT_READY answer is cheap, so this bounds how long a request
-	// that kept retrying waits once the node is promoted, instead of a full backoff of up to 1.5×MaxInterval.
+	// that kept retrying waits once the node is promoted, instead of a full backoff of up to 1.5×MaxInterval. It caps
+	// the wait before a re-route too: the same promotion can make the nodes hand out different lists meanwhile.
 	notReadyMaxRetryDelay = 2 * time.Second
 )
 
@@ -155,7 +156,7 @@ func (c *Client) routeUntilStable(ctx context.Context, send func() error) error 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(nextBackoff()):
+		case <-time.After(min(nextBackoff(), notReadyMaxRetryDelay)):
 		}
 	}
 }

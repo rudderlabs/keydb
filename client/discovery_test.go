@@ -386,6 +386,31 @@ func TestNewClientDoesNotWaitForTheNodes(t *testing.T) {
 	}
 }
 
+// TestRerouteDelayIsCapped has the pods hand out different lists while they aren't ready, as during a promotion: the
+// request re-routes instead of retrying, and must still be served soon after the pods turn ready.
+func TestRerouteDelayIsCapped(t *testing.T) {
+	x, y, resolve := flappingNodes(t)
+	c := newTestClientWith(t, func(conf *Config) {
+		conf.RetryPolicy = RetryPolicy{
+			InitialInterval: 20 * time.Second, Multiplier: 1.5, MaxInterval: 30 * time.Second,
+		}
+	}, []string{headlessName}, WithAddressResolver(resolve))
+
+	var readyAt atomic.Pointer[time.Time]
+	time.AfterFunc(500*time.Millisecond, func() {
+		now := time.Now()
+		readyAt.Store(&now)
+		x.notReady.Store(false)
+		y.notReady.Store(false)
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	_, err := c.Get(ctx, keysFor(1, 2, 1))
+	require.NoError(t, err)
+	require.Less(t, time.Since(*readyAt.Load()), 3*time.Second,
+		"a request must be served within notReadyMaxRetryDelay of the nodes turning ready")
+}
+
 // TestMorePodsThanHashRanges has the name resolve to more pods than there are hash ranges, which a valid cluster does
 // with a shadow when it has as many nodes as ranges: the client must not make a hash out of that list.
 func TestMorePodsThanHashRanges(t *testing.T) {
