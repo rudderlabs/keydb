@@ -132,7 +132,7 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 // routeUntilStable sends a request with the client's current routing until it no longer fails because the client
 // adopted another node list. A client without a node list waits for the nodes first (see waitForNodes). The first
 // re-route goes at once, every later one waits for the request's backoff first, so that nodes that hand out different
-// lists don't make the request spin.
+// lists don't make the request spin. With retries disabled there is no later one: the next request uses the new list.
 func (c *Client) routeUntilStable(ctx context.Context, send func() error) error {
 	if c.ClusterSize() == 0 {
 		if err := c.waitForNodes(ctx); err != nil {
@@ -148,6 +148,9 @@ func (c *Client) routeUntilStable(ctx context.Context, send func() error) error 
 		if nextBackoff == nil {
 			nextBackoff = c.getNextBackoffFunc()
 			continue
+		}
+		if c.config.RetryPolicy.Disabled {
+			return err
 		}
 		select {
 		case <-ctx.Done():

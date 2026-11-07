@@ -194,6 +194,34 @@ func TestConflictingListsNoHotLoop(t *testing.T) {
 		"nodes handing out different lists must not make the client spin")
 }
 
+func TestListChangeWithRetriesDisabled(t *testing.T) {
+	disabled := func(conf *Config) { conf.RetryPolicy.Disabled = true }
+
+	t.Run("a request follows one change", func(t *testing.T) {
+		a0, old1, new1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
+		newMockNode(t, a0).setList(a0, new1)
+		oldNode1 := newMockNode(t, old1)
+		oldNode1.setList(a0, new1)
+		oldNode1.notReady.Store(true)
+		newMockNode(t, new1).setList(a0, new1)
+
+		c := newTestClient(t, disabled, a0, old1)
+		exists, err := c.Get(t.Context(), keysFor(1, 2, 1))
+		require.NoError(t, err)
+		require.Equal(t, []bool{true}, exists)
+	})
+
+	t.Run("a request doesn't keep following conflicting lists", func(t *testing.T) {
+		_, _, resolve := flappingNodes(t)
+		c := newTestClientWith(t, disabled, []string{headlessName}, WithAddressResolver(resolve))
+
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		_, err := c.Get(ctx, keysFor(1, 2, 1))
+		require.ErrorIs(t, err, errClusterChanged)
+	})
+}
+
 func TestNoLockAcrossBackoff(t *testing.T) {
 	x0, y0, a1 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
 	nodeX := newMockNode(t, x0)
@@ -819,5 +847,25 @@ func requirePoolClosed(t *testing.T, pool *connectionPool) {
 	t.Helper()
 	for _, conn := range pool.connections {
 		require.Equal(t, connectivity.Shutdown, conn.GetState())
+	}
+}
+
+// flappingNodes starts two pods that aren't ready and list each other as node 1, with a resolver that has the client
+// ask them in turn: every discovery changes the client's list, as while the nodes refresh their config at different
+// times. Requests for keysFor(1, 2, n) only ever reach these two pods.
+func flappingNodes(t *testing.T) (x, y *mockNode, resolve func(context.Context, string) ([]string, error)) {
+	t.Helper()
+	a0, addressX, addressY := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
+	x, y = newMockNode(t, addressX), newMockNode(t, addressY)
+	x.setList(a0, addressY)
+	y.setList(a0, addressX)
+	x.notReady.Store(true)
+	y.notReady.Store(true)
+	var lookups atomic.Int64
+	return x, y, func(context.Context, string) ([]string, error) {
+		if lookups.Add(1)%2 == 0 {
+			return []string{addressX}, nil
+		}
+		return []string{addressY}, nil
 	}
 }

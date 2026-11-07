@@ -116,7 +116,7 @@ for i, key := range keys {
 - **Moved nodes**: When a node moves to a new pod, the client notices on its own, from answers that show its node list is out of date, from a node it can't reach, or from one that doesn't answer within `CallTimeout` (10s by default), and fetches the new node list. Requests in flight follow the new list instead of failing. While the nodes reload their config, some may still hand out the old list and a request may go back and forth; it settles once they all agree. A request waiting on a shadow retries at least every 2s, so it's served soon after the shadow is promoted.
 - **Key Distribution**: Automatically routes keys to the correct node based on hash
 - **Parallel Operations**: Sends requests to multiple nodes in parallel for better performance
-- **Automatic retries**: Failed requests are retried with an exponential backoff until they succeed or their context ends, however long the nodes take to agree on the node list during a move. `RetryPolicy` configures the backoff, and with `RetryPolicy.Disabled` a request returns after its first failed attempt. See the client [Config](./client/client.go) `struct`.
+- **Automatic retries**: Failed requests are retried with an exponential backoff until they succeed or their context ends, however long the nodes take to agree on the node list during a move. `RetryPolicy` configures the backoff, and with `RetryPolicy.Disabled` a request returns after its first failed attempt, unless that attempt changed the node list, when it's sent once more on the new list. See the client [Config](./client/client.go) `struct`.
 
 ## Node Configuration
 
