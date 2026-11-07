@@ -387,6 +387,61 @@ func TestShadowPromotedMidRange(t *testing.T) {
 	require.Equal(t, []bool{true}, getResp.Exists)
 }
 
+// TestShadowPromotedWaitingForTheLocks has a replication stream pass the role check and wait for the locks behind a
+// request in flight, while the node is promoted: it must not load into a node that now serves.
+func TestShadowPromotedWaitingForTheLocks(t *testing.T) {
+	ctx := context.Background()
+	conf := newTestConf(t)
+	conf.Set("BadgerDB.Dedup.Compress", false)
+	address := freeAddress(t)
+	actives, shadows := &shadowList{}, &shadowList{}
+	actives.set("active:1")
+	shadows.set(address)
+	s := newTestService(ctx, t, Config{
+		NodeID:            0,
+		TotalHashRanges:   1,
+		Addresses:         actives.load,
+		AdvertisedAddress: address,
+		ShadowAddresses:   shadows.load,
+		Replication:       ReplicationConfig{ReconcileInterval: time.Hour},
+	}, conf)
+	serveTestService(t, s, address)
+	c := nodeClient(t, address)
+	resp := sendChunks(t, c, &pb.SnapshotChunk{HashRange: 0, IsLast: true, Timestamp: 1, SourceAddress: "active:1"})
+	require.True(t, resp.Success, resp.ErrorMessage)
+	snapshot, keys := rangeSnapshot(t)
+
+	s.loadMu.RLock() // the request in flight
+	release := sync.OnceFunc(s.loadMu.RUnlock)
+	defer release()
+	stream, err := c.ReceiveSnapshot(ctx)
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{
+		HashRange: 0, Timestamp: 2, SourceAddress: "active:1", Data: snapshot, IsLast: true,
+	}))
+	require.Eventually(t, func() bool {
+		if s.loadMu.TryRLock() { // fails once a writer waits
+			s.loadMu.RUnlock()
+			return false
+		}
+		return true
+	}, 5*time.Second, time.Millisecond, "the stream never reached the locks")
+
+	actives.set(address)
+	shadows.set("")
+	release()
+
+	resp, err = stream.CloseAndRecv()
+	require.NoError(t, err)
+	require.False(t, resp.Success, "a promoted node must refuse the stream")
+	require.EqualValues(t, 1, marker(t, s, 0))
+	keysByHashRange, indexes, err := s.GetKeysByHashRangeWithIndexes(keys)
+	require.NoError(t, err)
+	exists, err := s.cache.Get(keysByHashRange, indexes)
+	require.NoError(t, err)
+	require.NotContains(t, exists, true, "nothing of the stream may reach a node that serves")
+}
+
 func TestShadowMetadataReadsDuringLoad(t *testing.T) {
 	ctx := context.Background()
 	source := newTestService(ctx, t, Config{NodeID: 0, Addresses: staticList("active:1")}, newTestConf(t))

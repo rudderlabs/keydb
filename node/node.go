@@ -1290,6 +1290,12 @@ func (s *Service) ReceiveSnapshot(
 	defer s.mu.RUnlock()
 	s.loadMu.Lock()
 	defer s.loadMu.Unlock()
+	if !s.isShadow() { // promoted while waiting for the locks: the node may be serving already
+		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{
+			Success:      false,
+			ErrorMessage: "the shadow became active before the receive",
+		})
+	}
 	if err := s.checkShadowSource(first.SourceAddress); err != nil {
 		s.metrics.shadowLeftoverDisk.Increment()
 		s.logger.Errorn("Refusing snapshot on a shadow",
