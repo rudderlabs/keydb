@@ -579,7 +579,7 @@ Every values snippet is the full `nodes` state after the PR, not a diff. The exa
 
 Rules for the whole move:
 
-- `diskSize` only goes in PR1, for the disk that PR creates. Leave it out from PR2 on: an existing StatefulSet keeps the disk size it was created with, so growing a disk with kubectl as usual never needs a config change.
+- `diskSize` only goes in PR1, for the disk that PR creates. Leave it out from PR2 on: an existing StatefulSet keeps the disk size it was created with, so growing a disk with kubectl as usual never needs a config change. The exception is an operator built on helm-operator older than v1.35, which decides whether to upgrade with a render that can't read StatefulSets back. With such an operator, keep the node's entry and each of its slots' `diskSize`, set to the disk's size, for as long as the slot exists. Without them that render fails for slot `b`, which blocks every later update of the release, and gives slot `a` `keydb.persistence.size`, which makes the operator upgrade the release on every reconcile if the disk differs.
 - Don't set or change the serving slot's `resources` in either PR: it restarts the serving pod. The shadow slot's `resources` must be the same in both PRs, or PR2 restarts the pod it promotes.
 - While a shadow exists, deleting either StatefulSet, the customer object or the release deletes that slot's PVC too, the serving one included. Don't delete them during a move. If a StatefulSet must be recreated, delete it with `--cascade=orphan`.
 
