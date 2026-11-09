@@ -468,11 +468,14 @@ func (p *replicationPair) put(t *testing.T, keys ...string) {
 	require.NoError(t, p.source.cache.Put(keysByHashRange, time.Hour))
 }
 
-// onShadow returns true when every key exists on the shadow
+// onShadow returns true when every key exists on the shadow. It waits for a load in progress, as a read during one
+// races with it (see loadMu).
 func (p *replicationPair) onShadow(t *testing.T, keys ...string) bool {
 	t.Helper()
 	keysByHashRange, indexes, err := p.shadow.GetKeysByHashRangeWithIndexes(keys)
 	require.NoError(t, err)
+	p.shadow.loadMu.RLock()
+	defer p.shadow.loadMu.RUnlock()
 	exists, err := p.shadow.cache.Get(keysByHashRange, indexes)
 	require.NoError(t, err)
 	for _, e := range exists {
