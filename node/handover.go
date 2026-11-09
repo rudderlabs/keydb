@@ -20,13 +20,33 @@ const (
 	// predecessorMaxWait bounds the wait of a promoted shadow for the node it was filled from, which normally ends
 	// within its handover timeout of getting SIGTERM
 	predecessorMaxWait = time.Minute
+	// restoredPredecessorWait is how long a node that restarted promoted waits for a stream from the node it was
+	// filled from before serving: longer than that node's handover timeout, 10s by default
+	restoredPredecessorWait = 15 * time.Second
 )
 
 // predecessor is a node this one was filled from as a shadow: its advertised address, and the address it sent from
 // with the advertised port. A terminating pod leaves the headless Service at once, so its name stops resolving while
-// it still sends its handover, and only the direct address reaches it then.
+// it still sends its handover, and only the direct address reaches it then. Both are empty when the node restarted
+// promoted and hasn't heard from it since (see restorePredecessor).
 type predecessor struct {
 	address, direct string
+}
+
+// restorePredecessor runs at startup. A node that comes up already promoted, with the source marker of the node it
+// was filled from still on its disk, forgot that node when it restarted, and that node may still be handing its index
+// over: the node stays a shadow until a stream from it tells where it is, or for restoredPredecessorWait. A promoted
+// node drops the marker once its predecessor is gone, so this only happens when it restarts around the switch.
+func (s *Service) restorePredecessor() {
+	if s.config.AdvertisedAddress == "" || s.activeAddress() != s.config.AdvertisedAddress {
+		return
+	}
+	_, found, err := s.cache.GetValue(shadowSourceKey, internalKeysHashRange)
+	if err != nil || !found {
+		return
+	}
+	s.predecessor.Store(&predecessor{})
+	s.logger.Infon("Restarted promoted before the node it was filled from was gone, waiting for its handover")
 }
 
 // Handover hands the node's index over when it shuts down during a move, so that the move loses no write: to the
@@ -71,15 +91,20 @@ func (s *Service) awaitPredecessor(ctx context.Context) {
 	}
 	s.waitGroup.Go(func() {
 		defer s.awaitingPredecessor.Store(false)
+		if p.address == "" {
+			s.awaitRestoredPredecessor(ctx, p)
+			return
+		}
 		log := s.logger.Withn(
 			logger.NewStringField("predecessor", p.address),
 			logger.NewStringField("predecessorDirect", p.direct),
 		)
+		addresses := []string{p.address}
+		if p.direct != "" && p.direct != p.address {
+			addresses = append(addresses, p.direct)
+		}
 		var nodes []pb.NodeServiceClient
-		for _, address := range []string{p.address, p.direct} {
-			if address == "" || (address == p.direct && p.direct == p.address) {
-				continue
-			}
+		for _, address := range addresses {
 			conn, node, err := s.connectToNode(address)
 			if err != nil {
 				continue
@@ -108,6 +133,21 @@ func (s *Service) awaitPredecessor(ctx context.Context) {
 			log.Infon("The node this one was filled from is gone, serving")
 		}
 	})
+}
+
+// awaitRestoredPredecessor waits for a stream from the node a restarted node was filled from, which replaces p with
+// where that node is, for the next reconcile to wait for. Without one within restoredPredecessorWait, no handover is
+// coming, and it clears p.
+func (s *Service) awaitRestoredPredecessor(ctx context.Context, p *predecessor) {
+	deadline := s.now().Add(restoredPredecessorWait)
+	for s.predecessor.Load() == p && s.shadowAddress() == "" && s.now().Before(deadline) {
+		if !sleepCtx(ctx, predecessorPollInterval) {
+			return
+		}
+	}
+	if s.predecessor.CompareAndSwap(p, nil) {
+		s.logger.Infon("No handover came from the node this one was filled from, serving")
+	}
 }
 
 // anyAnswers tells whether one of nodes answers a GetNodeInfo within predecessorPollTimeout

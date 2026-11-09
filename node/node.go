@@ -314,6 +314,7 @@ func NewService(
 	service.waitGroup.Add(1)
 	go service.recordLevelMetrics(ctx)
 
+	service.restorePredecessor() // before anything serves
 	service.replication = newReplicator(service)
 	service.waitGroup.Go(func() { service.replication.run(ctx) })
 
