@@ -656,6 +656,138 @@ func TestDefaultResolveAddress(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestConcurrentSubrequestsShareOneDiscovery starts with a shadow in the headless Service's list: every per-node
+// sub-request of one batch sees a cluster-size mismatch at once. They must share one discovery, not probe every pod
+// each.
+func TestConcurrentSubrequestsShareOneDiscovery(t *testing.T) {
+	a0, a1, s0 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
+	pods := []*mockNode{newMockNode(t, a1), newMockNode(t, s0), newMockNode(t, a0)}
+	for _, n := range pods {
+		n.setList(a0, a1)
+	}
+	pods[1].notReady.Store(true) // the shadow
+
+	hold := make(chan struct{})
+	for _, n := range pods {
+		n.holdNodeInfo.Store(&hold) // keeps the list wrong until every sub-request has asked for a discovery
+	}
+	h := newHeadless(a1, s0, a0)
+	c := newHeadlessClient(t, h)
+	require.Equal(t, 3, c.ClusterSize())
+	lookupsBefore := h.lookups.Load()
+
+	var keys []string
+	for nodeID := range int64(3) {
+		keys = append(keys, keysFor(nodeID, 3, 3)...)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Get(t.Context(), keys)
+		done <- err
+	}()
+	require.Eventually(t, func() bool {
+		for _, n := range pods {
+			if n.gets.Load() == 0 {
+				return false
+			}
+		}
+		return h.lookups.Load() > lookupsBefore
+	}, 5*time.Second, 10*time.Millisecond, "every node must have been asked and a discovery started")
+	time.Sleep(200 * time.Millisecond) // let the other sub-requests reach their discovery too
+	close(hold)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request did not finish")
+	}
+
+	require.Equal(t, 2, c.ClusterSize())
+	require.EqualValues(t, 1, h.lookups.Load()-lookupsBefore, "name lookups of the discoveries")
+	for i, n := range pods {
+		require.EqualValues(t, 1, n.nodeInfos.Load(), "GetNodeInfo calls to pod %d", i)
+	}
+}
+
+// TestSharedDiscoveryIgnoresCallerCancellation has two callers share one discovery that is held up. The one that
+// started it gives up: it returns at once, while the other still gets the list.
+func TestSharedDiscoveryIgnoresCallerCancellation(t *testing.T) {
+	a0 := freeMockAddress(t)
+	node := newMockNode(t, a0)
+	hold := make(chan struct{})
+	node.holdNodeInfo.Store(&hold)
+	c := newDiscoveryClient(t, a0)
+
+	leaderCtx, cancelLeader := context.WithCancel(t.Context())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := c.discover(leaderCtx)
+		leaderDone <- err
+	}()
+	require.Eventually(t, func() bool { return node.nodeInfos.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+
+	type result struct {
+		addresses []string
+		err       error
+	}
+	waiterDone := make(chan result, 1)
+	go func() {
+		addresses, err := c.discover(t.Context())
+		waiterDone <- result{addresses, err}
+	}()
+	time.Sleep(100 * time.Millisecond) // let the waiter join the discovery
+
+	cancelLeader()
+	select {
+	case err := <-leaderDone:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a caller whose context ended kept waiting")
+	}
+	select {
+	case <-waiterDone:
+		t.Fatal("the other caller must still wait for the discovery")
+	default:
+	}
+
+	close(hold)
+	select {
+	case r := <-waiterDone:
+		require.NoError(t, r.err)
+		require.Equal(t, []string{a0}, r.addresses)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the other caller did not get the list")
+	}
+	require.EqualValues(t, 1, node.nodeInfos.Load(), "GetNodeInfo calls")
+}
+
+// TestDiscoveryStopsOnClose makes sure that a discovery nobody waits for any more ends with the client
+func TestDiscoveryStopsOnClose(t *testing.T) {
+	a0 := freeMockAddress(t)
+	node := newMockNode(t, a0)
+	hold := make(chan struct{})
+	t.Cleanup(func() { close(hold) })
+	node.holdNodeInfo.Store(&hold)
+	c := newDiscoveryClient(t, a0)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.discover(ctx)
+		done <- err
+	}()
+	require.Eventually(t, func() bool { return node.nodeInfos.Load() == 1 }, 5*time.Second, 10*time.Millisecond)
+	cancel()
+	require.ErrorIs(t, <-done, context.Canceled)
+
+	require.NoError(t, c.Close())
+	require.Eventually(t, func() bool {
+		c.discoveryMu.Lock()
+		defer c.discoveryMu.Unlock()
+		return c.discovering == nil
+	}, 5*time.Second, 10*time.Millisecond, "the discovery must stop once the client is closed")
+}
+
 const discoveryTestHashRanges = 128
 
 // mockNode is a mock keydb node whose behaviour tests can change while it runs

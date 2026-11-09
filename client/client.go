@@ -116,6 +116,14 @@ type Client struct {
 	resolve func(ctx context.Context, address string) ([]string, error)
 	// closed is true once Close was called, requests still retrying then stop
 	closed atomic.Bool
+	// lifetime ends when the client is closed, and stops the discovery in progress
+	lifetime context.Context
+	stop     context.CancelFunc
+
+	// discoveryMu protects discovering
+	discoveryMu sync.Mutex
+	// discovering is the discovery in progress, if any
+	discovering *discoveryFlight
 
 	logger logger.Logger
 
@@ -213,11 +221,14 @@ func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Op
 	// read without the lock, so a caller's later edits to its slice mustn't reach it
 	config.Addresses = slices.Clone(config.Addresses)
 
+	lifetime, stop := context.WithCancel(context.Background())
 	client := &Client{
-		resolve: defaultResolveAddress,
-		config:  config,
-		pools:   make(map[int]*connectionPool),
-		logger:  log,
+		resolve:  defaultResolveAddress,
+		config:   config,
+		pools:    make(map[int]*connectionPool),
+		logger:   log,
+		lifetime: lifetime,
+		stop:     stop,
 	}
 
 	for _, opt := range opts {
@@ -276,6 +287,7 @@ func (c *Client) initMetrics() {
 // Close will terminate all connection pools
 func (c *Client) Close() error {
 	c.closed.Store(true)
+	c.stop()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

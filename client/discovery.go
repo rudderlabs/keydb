@@ -192,10 +192,48 @@ func (c *Client) waitForNodes(ctx context.Context) error {
 	}
 }
 
-// discover resolves config.Addresses and asks every node behind them for the cluster's addresses at once. It
+// discoveryFlight is a discovery in progress, whose result every caller that arrives meanwhile shares
+type discoveryFlight struct {
+	done      chan struct{} // closed once addresses and err are set
+	addresses []string
+	err       error
+}
+
+// discover finds the cluster's addresses (see findAddresses). Callers that arrive while a discovery runs share it,
+// so that the sub-requests of a batch, which all see the same wrong list at once, don't each resolve the name and
+// open a connection to every pod. The discovery doesn't run on a caller's context, otherwise the cancellation of the
+// caller that happened to start it would fail the others: it is bounded by its own timeouts and by Close, and each
+// caller only waits for it until its own ctx ends.
+func (c *Client) discover(ctx context.Context) ([]string, error) {
+	c.discoveryMu.Lock()
+	flight := c.discovering
+	if flight == nil {
+		flight = &discoveryFlight{done: make(chan struct{})}
+		c.discovering = flight
+		go func() {
+			ctx, cancel := context.WithTimeout(c.lifetime, resolveAddressTimeout+getNodeInfoTimeout)
+			defer cancel()
+			flight.addresses, flight.err = c.findAddresses(ctx)
+			c.discoveryMu.Lock()
+			c.discovering = nil // later callers need a fresh answer
+			c.discoveryMu.Unlock()
+			close(flight.done)
+		}()
+	}
+	c.discoveryMu.Unlock()
+
+	select {
+	case <-flight.done:
+		return slices.Clone(flight.addresses), flight.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// findAddresses resolves config.Addresses and asks every node behind them for the cluster's addresses at once. It
 // returns the first list a node answers with. A node that hasn't reloaded its config yet may answer first with an
 // old list: requests then fail again, and the next discovery may hear from another node first.
-func (c *Client) discover(ctx context.Context) ([]string, error) {
+func (c *Client) findAddresses(ctx context.Context) ([]string, error) {
 	nodes := c.resolveNodes(ctx)
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("no node behind %s", strings.Join(c.config.Addresses, ","))
