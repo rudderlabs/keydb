@@ -68,16 +68,16 @@ func (c *Client) resolveNodes(ctx context.Context) []string {
 }
 
 // applyAddresses adopts a new list of node addresses. Only the connection pools whose address changed are
-// replaced. It returns true when the list changed.
-func (c *Client) applyAddresses(addresses []string) (bool, error) {
+// replaced, and listVersion moves on when the list changed.
+func (c *Client) applyAddresses(addresses []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.closed.Load() {
-		return false, errClientClosed // never reopen connections after Close
+		return errClientClosed // never reopen connections after Close
 	}
 	if slices.Equal(addresses, c.nodeAddresses) && len(c.pools) == len(addresses) {
-		return false, nil
+		return nil
 	}
 
 	dialOpts := c.getGrpcDialOptions()
@@ -89,7 +89,7 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 		}
 		pool, err := newConnectionPool(addr, c.config.ConnectionPoolSize, dialOpts...)
 		if err != nil {
-			return false, fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
+			return fmt.Errorf("creating gRPC connection pool for node %d at %s: %w", i, addr, err)
 		}
 		if old, ok := c.pools[i]; ok {
 			_ = old.close() // requests still using it fail and retry on the new pool
@@ -118,6 +118,7 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 	oldClusterSize := int64(len(c.nodeAddresses))
 	newClusterSize := int64(len(addresses))
 	c.nodeAddresses = slices.Clone(addresses)
+	c.listVersion++
 	if newClusterSize != oldClusterSize {
 		c.hash = hash.New(newClusterSize, c.config.TotalHashRanges)
 	}
@@ -127,7 +128,14 @@ func (c *Client) applyAddresses(addresses []string) (bool, error) {
 		logger.NewIntField("newClusterSize", newClusterSize),
 		logger.NewStringField("nodesAddresses", strings.Join(addresses, ",")),
 	)
-	return true, nil
+	return nil
+}
+
+// listChangedSince tells whether the client adopted another node list since listVersion was version
+func (c *Client) listChangedSince(version uint64) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.listVersion != version
 }
 
 // routeUntilStable sends a request with the client's current routing until it no longer fails because the client
@@ -173,8 +181,7 @@ func (c *Client) waitForNodes(ctx context.Context) error {
 		}
 		addresses, err := c.discover(ctx)
 		if err == nil {
-			_, err = c.applyAddresses(addresses)
-			return err
+			return c.applyAddresses(addresses)
 		}
 		if c.config.RetryPolicy.Disabled {
 			return err
@@ -289,25 +296,26 @@ func (c *Client) routingInfo() (*hash.Hash, int64) {
 	return c.hash, int64(len(c.nodeAddresses))
 }
 
-// nodeClient returns the next pooled connection to a node, counting the operation. It returns errClusterChanged when
-// the client adopted a list of another size since the request was routed with clusterSize.
-func (c *Client) nodeClient(nodeID, clusterSize int64) (pb.NodeServiceClient, *grpc.ClientConn, error) {
+// nodeClient returns the next pooled connection to a node, counting the operation, and the listVersion it belongs
+// to. It returns errClusterChanged when the client adopted a list of another size since the request was routed with
+// clusterSize.
+func (c *Client) nodeClient(nodeID, clusterSize int64) (pb.NodeServiceClient, *grpc.ClientConn, uint64, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if int64(len(c.nodeAddresses)) != clusterSize {
-		return nil, nil, errClusterChanged
+		return nil, nil, 0, errClusterChanged
 	}
 	pool, ok := c.pools[int(nodeID)]
 	if !ok {
 		// this should never happen unless clusterSize is updated and the pools map isn't
 		// or if there is a bug in the hashing function
-		return nil, nil, fmt.Errorf("no connection pool for node %d", nodeID)
+		return nil, nil, 0, fmt.Errorf("no connection pool for node %d", nodeID)
 	}
 	client, conn, connID := pool.getClient()
 	if counter, ok := c.metrics.connectionOps[int(nodeID)][connID]; ok {
 		counter.Increment()
 	}
-	return client, conn, nil
+	return client, conn, c.listVersion, nil
 }
 
 // defaultResolveAddress is the client's resolver unless WithAddressResolver replaces it. It looks the host of address
@@ -334,7 +342,8 @@ func defaultResolveAddress(ctx context.Context, address string) ([]string, error
 
 // callNode sends a request to a node until it succeeds, the context is done, or the client adopts another node list.
 //   - When the answer shows that the client's node list is wrong (see listIsWrong), the client asks every node behind
-//     config.Addresses for the list and adopts the first answer. A changed list re-routes the keys at once.
+//     config.Addresses for the list and adopts the first answer. A list that changed since the attempt, whichever
+//     request adopted it, re-routes the keys at once.
 //   - Every attempt is bounded by config.CallTimeout, so that a node that accepts the call but never answers doesn't
 //     hold the request until its context ends.
 //   - Every retry takes the next pooled connection and waits for the backoff, without holding the client's lock.
@@ -355,7 +364,7 @@ func callNode[R nodeResponse](
 		if attempt > 1 {
 			retries.Increment()
 		}
-		client, conn, err := c.nodeClient(nodeID, clusterSize)
+		client, conn, listVersion, err := c.nodeClient(nodeID, clusterSize)
 		if err != nil {
 			return zero, err
 		}
@@ -373,9 +382,10 @@ func callNode[R nodeResponse](
 			addresses, err := c.discover(ctx)
 			if err != nil {
 				c.logger.Warnn("Discovering the node addresses", obskit.Error(err))
-			} else if changed, err := c.applyAddresses(addresses); err != nil {
+			} else if err := c.applyAddresses(addresses); err != nil {
 				return zero, err
-			} else if changed {
+			} else if c.listChangedSince(listVersion) {
+				// the attempt used an older list, whether this request or another one adopted the new list
 				return zero, errClusterChanged
 			}
 		}

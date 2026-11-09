@@ -268,10 +268,9 @@ func TestCallNodeAfterConcurrentShrink(t *testing.T) {
 	c.mu.RUnlock()
 
 	// another request learnt that the cluster shrank to 2 nodes while this one was routed to node 2
-	_, err := c.applyAddresses(addresses[:2])
-	require.NoError(t, err)
+	require.NoError(t, c.applyAddresses(addresses[:2]))
 	requirePoolClosed(t, removedPool)
-	_, err = callNode(context.Background(), c, 2, 3, "get", stats.NOP.NewStat("retries", stats.CountType),
+	_, err := callNode(context.Background(), c, 2, 3, "get", stats.NOP.NewStat("retries", stats.CountType),
 		func(ctx context.Context, client proto.NodeServiceClient) (*proto.GetResponse, error) {
 			return client.Get(ctx, &proto.GetRequest{Keys: []string{"k"}})
 		},
@@ -707,6 +706,47 @@ func TestConcurrentSubrequestsShareOneDiscovery(t *testing.T) {
 	for i, n := range pods {
 		require.EqualValues(t, 1, n.nodeInfos.Load(), "GetNodeInfo calls to pod %d", i)
 	}
+}
+
+// TestIndependentRequestsFollowASharedDiscovery has two separate requests fail on the same wrong list and share one
+// discovery. Only one of them installs the new list, but both were routed with the old one, so both must follow the
+// new list at once: with retries disabled, the other would otherwise fail with its stale error.
+func TestIndependentRequestsFollowASharedDiscovery(t *testing.T) {
+	a0, a1, s0 := freeMockAddress(t), freeMockAddress(t), freeMockAddress(t)
+	pods := []*mockNode{newMockNode(t, a1), newMockNode(t, s0), newMockNode(t, a0)}
+	for _, n := range pods {
+		n.setList(a0, a1)
+	}
+	pods[1].notReady.Store(true) // the shadow
+	hold := make(chan struct{})
+	for _, n := range pods {
+		n.holdNodeInfo.Store(&hold) // keeps the list wrong until both requests have asked for a discovery
+	}
+	h := newHeadless(a1, s0, a0)
+	c := newTestClientWith(t, func(config *Config) { config.RetryPolicy.Disabled = true },
+		[]string{headlessName}, WithAddressResolver(h.resolve))
+	require.Equal(t, 3, c.ClusterSize())
+
+	done := make(chan error, 2)
+	for _, nodeID := range []int64{0, 2} { // served by a1 and a0, which both see a cluster of another size
+		go func() {
+			_, err := c.Get(t.Context(), keysFor(nodeID, 3, 3))
+			done <- err
+		}()
+	}
+	require.Eventually(t, func() bool { return pods[0].gets.Load() > 0 && pods[2].gets.Load() > 0 },
+		5*time.Second, 10*time.Millisecond, "both requests must have reached a node")
+	time.Sleep(200 * time.Millisecond) // let both reach the discovery
+	close(hold)
+	for range 2 {
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("a request did not finish")
+		}
+	}
+	require.Equal(t, 2, c.ClusterSize())
 }
 
 // TestSharedDiscoveryIgnoresCallerCancellation has two callers share one discovery that is held up. The one that

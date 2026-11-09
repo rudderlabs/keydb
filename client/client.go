@@ -102,6 +102,9 @@ type Client struct {
 	// nodeAddresses is the node list, indexed by node ID: what config.Addresses resolved to, then the list the nodes
 	// answered with. Its length is the cluster size.
 	nodeAddresses []string
+	// listVersion counts the node lists the client adopted, so that a request can tell whether the list changed since
+	// it was sent, whichever request adopted the new one
+	listVersion uint64
 
 	// hash is the hash instance used for consistent hashing
 	hash *hash.Hash
@@ -243,7 +246,7 @@ func NewClient(ctx context.Context, config Config, log logger.Logger, opts ...Op
 
 	addresses := client.resolveNodes(ctx)
 	if n := int64(len(addresses)); n > 0 && n <= config.TotalHashRanges {
-		if _, err := client.applyAddresses(addresses); err != nil {
+		if err := client.applyAddresses(addresses); err != nil {
 			_ = client.Close()
 			return nil, err
 		}
