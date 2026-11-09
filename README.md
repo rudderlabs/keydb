@@ -559,8 +559,8 @@ A move takes two config PRs. The first adds a **shadow**: a second StatefulSet f
   - a brake stops it while the node's own Get and Put requests are slow: while their mean latency over the last second is above `replication.maxRequestLatency` (30ms by default), or while requests are running and none has finished for longer than that, as when one is stuck;
   - latency doesn't change the cap: the copy runs at the cap or waits;
   - garbage collection doesn't run while a pass is in progress, and never runs on a shadow.
-- **Gap:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends and, if that pass takes as long as the last, peaks at two pass durations plus the pause between passes, the worst-case gap. A switch at a given moment loses at most the gap at that moment. keydb doesn't judge whether a gap is small enough: whoever merges PR2 decides, case by case.
-- **Shutdown:** on SIGTERM a node cancels in-flight calls, which clients retry, then closes its disk. There is no final pass: writes the old node acknowledged after the start of its last completed pass, at most the gap, are lost.
+- **Gap:** the gap is how far behind the shadow can be: it holds every write the node accepted before the start of the last completed pass. The gap grows until the next pass ends and, if that pass takes as long as the last, peaks at two pass durations plus the pause between passes, the worst-case gap. At the switch the old node sends what the gap holds before it stops (see Shutdown), so the gap decides how long that takes rather than what the switch loses.
+- **Shutdown:** on SIGTERM a node that is being moved hands its index over first. It refuses `Get` and `Put` with `NOT_READY`, waits for those in flight, then sends what changed since its last pass to the node taking over, ignoring the byte cap and the brake since it serves nothing anymore. `handoverTimeout` (10s) bounds the handover, which fits within the 15s `shutdownTimeout` and Kubernetes' 30s grace period: what it can't send by then is lost, and so is what it would send while the copy is paused. The node taking over doesn't serve before it's done: once its config promotes it, it stays a shadow, refusing `Get` and `Put` and taking the old node's copy, until the old node stops answering, or for a minute at most. Then the old node cancels in-flight calls, which clients retry, and closes its disk, which is all a node that isn't being moved does.
 - **Leftover disks:** a shadow refuses to receive data when its disk already holds data from another source, so a disk Kubernetes didn't delete can't silently turn a move into a merge.
 
 ### Prerequisites
@@ -601,7 +601,7 @@ Rules for the whole move:
    curl -s localhost:8080/replication/status
    ```
 
-   The status shows `passesCompleted`, `gapSeconds`, `worstCaseGapSeconds`, `lastPassDuration`, `lastError` and the progress of the current pass (`currentPassStartedAt`, `currentPassRangesDone` of `currentPassRangesTotal`, `currentPassBytes`). A switch loses what the gap is when the old pod stops, which is after the merge. `worstCaseGapSeconds` is where the gap peaks if the next pass takes as long as the last: a slower pass goes past it, and a held copy has no limit. Merge PR2 once that loss is acceptable. The shadow answers with `state: shadow`.
+   The status shows `passesCompleted`, `gapSeconds`, `worstCaseGapSeconds`, `lastPassDuration`, `lastError` and the progress of the current pass (`currentPassStartedAt`, `currentPassRangesDone` of `currentPassRangesTotal`, `currentPassBytes`). At the switch the old pod sends what the gap holds before it stops, within `handoverTimeout` (10s), unthrottled. `worstCaseGapSeconds` is where the gap peaks if the next pass takes as long as the last: a slower pass goes past it, and a held copy has no limit. Merge PR2 once the first pass is done and `lastPassDuration` is well under `handoverTimeout`: the old pod's last pass then fits, and the switch loses nothing. The shadow answers with `state: shadow`.
 
 3. **PR2, the switch:**
 
@@ -612,7 +612,7 @@ Rules for the whole move:
          "0": {active: b}
    ```
 
-   `keydb-0` is deleted, cancels its in-flight calls and exits, and Kubernetes deletes its PVC. `keydb-0-b` starts serving as soon as its configmap refreshes. Clients see node 0 fail, fetch the new node list and move to `keydb-0-b`. Until every pod has reloaded its config, some still hand out the old list and clients may go back and forth; they settle once all of them have. Every request that includes node 0's keys waits meanwhile, for about a minute or two. A processor batch holds keys of every node, so in practice every batch waits.
+   `keydb-0` is deleted: it stops acknowledging writes, sends what changed since its last pass to `keydb-0-b`, cancels its in-flight calls and exits, and Kubernetes deletes its PVC. `keydb-0-b` starts serving once its configmap refreshes and `keydb-0` is gone, with every write `keydb-0` acknowledged. Clients see node 0 fail, fetch the new node list and move to `keydb-0-b`. Until every pod has reloaded its config, some still hand out the old list and clients may go back and forth; they settle once all of them have. Every request that includes node 0's keys waits meanwhile, for about a minute or two. A processor batch holds keys of every node, so in practice every batch waits.
 
 4. **Afterwards, delete the old volume.** Check that the old slot's PVC is gone: here `data-keydb-0-0`, since the move left slot `a`. If it isn't, delete it with `kubectl delete pvc -n <namespace> data-keydb-0-0`. Never delete the PVC of the slot that now serves. Deleting the PVC doesn't delete the volume when its StorageClass retains volumes, as in production: the PV stays `Released` and the EBS volume keeps costing. Find it with `kubectl get pv | grep <namespace>/data-keydb-0-0`, then `kubectl patch pv <name> -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'`, which makes Kubernetes delete the PV and the EBS volume, and check that the PV is gone.
 
@@ -633,6 +633,7 @@ Before PR2, reverting PR1 removes the shadow and its PVC; delete its Released PV
 | `adminPort`                     | `8080`              | no         |
 | `replication.maxBytesPerSecond` | `33554432` (32 MiB) | yes        |
 | `replication.maxRequestLatency` | `30ms`              | yes        |
+| `handoverTimeout`               | `10s`               | no         |
 
 Both can be changed while a copy runs, without restarting it, through the customer object's `configOverrides`, for example `global.keydb.configOverrides.replication.maxBytesPerSecond: 16777216`. Set `maxBytesPerSecond` to `0` to pause the copy; the status then gives `paused: maxBytesPerSecond is not positive` as the brake reason. It is a plain number of bytes: a value with a unit, such as `16MiB`, reads as 0 and pauses the copy too. While the brake holds the copy, the status gives the reason, such as `request latency 41ms over 30ms`: raise `maxRequestLatency` if the node's normal latency is above it, or the copy never runs.
 

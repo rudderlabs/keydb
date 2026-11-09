@@ -354,7 +354,7 @@ func TestReplicationUnchangedRangeLoadsNothing(t *testing.T) {
 			require.NoError(t, source.cache.Put(keysByHashRange, time.Hour))
 			pass := func() {
 				for hashRange := range int64(4) {
-					_, err := source.replication.sendRange(ctx, client, hashRange)
+					_, err := source.replication.sendRange(ctx, client, hashRange, true)
 					require.NoError(t, err)
 				}
 			}

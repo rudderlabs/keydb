@@ -316,6 +316,12 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		// Flip health status to NOT_SERVING first so readiness probes fail and
 		// Kubernetes removes this pod from Service endpoints before we stop serving.
 		healthServer.Shutdown()
+		// A node being moved hands its index over first, while it still answers: it stops acknowledging writes and
+		// sends what changed since its last pass to the node taking over, which waits for it before serving.
+		handoverCtx, cancelHandover := context.WithTimeout(context.Background(),
+			conf.GetDurationVar(10, time.Second, "handoverTimeout"))
+		service.Handover(handoverCtx)
+		cancelHandover()
 		// Stop cancels in-flight calls instead of waiting for them: clients retry them, and after a node move the
 		// retries land on the node that replaced this one. It waits for their handlers to return, so Badger is
 		// closed only once no handler is running.

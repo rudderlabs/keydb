@@ -103,6 +103,13 @@ type Service struct {
 	loadMu sync.RWMutex
 	// latency follows the Get and Put requests: replication waits while they are slow
 	latency latencyTracker
+	// handingOver is true once the node hands its index over at shutdown (see Handover): it refuses Get and Put
+	handingOver atomic.Bool
+	// predecessor is the node this one was last filled from as a shadow, until a promotion finds it gone: the node
+	// stays a shadow meanwhile (see awaitPredecessor)
+	predecessor atomic.Pointer[predecessor]
+	// awaitingPredecessor is true while awaitPredecessor waits
+	awaitingPredecessor atomic.Bool
 
 	closeOnce sync.Once
 
@@ -711,9 +718,9 @@ func (s *Service) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, e
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.isShadow() || s.replaced() || !s.loadMu.TryRLock() {
-		// a shadow that just became active may still be loading the last range it received, and a replaced pod
-		// must leave its index to the pod that took it over
+	if s.isShadow() || s.replaced() || s.handingOver.Load() || !s.loadMu.TryRLock() {
+		// a shadow that just became active may still be loading the last range it received, and a replaced pod or
+		// one handing its index over must leave it to the pod that takes it over
 		s.metrics.errNotReadyCounter.Increment()
 		response.ErrorCode = pb.ErrorCode_NOT_READY
 		return response, nil
@@ -773,9 +780,9 @@ func (s *Service) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, e
 		NodesAddresses: s.getNonDegradedAddresses(),
 	}
 
-	if s.isShadow() || s.replaced() || !s.loadMu.TryRLock() {
-		// a shadow that just became active may still be loading the last range it received, and a replaced pod
-		// must leave its index to the pod that took it over
+	if s.isShadow() || s.replaced() || s.handingOver.Load() || !s.loadMu.TryRLock() {
+		// a shadow that just became active may still be loading the last range it received, and a replaced pod or
+		// one handing its index over must leave it to the pod that takes it over
 		s.metrics.errNotReadyCounter.Increment()
 		resp.ErrorCode = pb.ErrorCode_NOT_READY
 		return resp, nil
@@ -1304,6 +1311,11 @@ func (s *Service) ReceiveSnapshot(
 			obskit.Error(err),
 		)
 		return stream.SendAndClose(&pb.ReceiveSnapshotResponse{Success: false, ErrorMessage: err.Error()})
+	}
+	// once promoted, the node waits for its source to go (see awaitPredecessor), which compares the pointer
+	source := predecessor{address: first.SourceAddress, direct: directAddress(stream.Context(), first.SourceAddress)}
+	if p := s.predecessor.Load(); p == nil || *p != source {
+		s.predecessor.Store(&source)
 	}
 	return s.receive(stream, first)
 }

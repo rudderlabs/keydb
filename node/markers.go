@@ -82,7 +82,8 @@ func (s *Service) forgetShadowSource() bool {
 		return true
 	}
 	// a load must not run under a transaction: when one holds the locks, the next reconcile tick tries again
-	if s.activeAddress() != s.config.AdvertisedAddress || !s.mu.TryRLock() {
+	// a promoted node still waiting for its predecessor's handover needs the marker to accept it (see isShadow)
+	if s.activeAddress() != s.config.AdvertisedAddress || s.isShadow() || !s.mu.TryRLock() {
 		return false
 	}
 	defer s.mu.RUnlock()

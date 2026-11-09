@@ -46,7 +46,7 @@ func TestMoveHappyPath(t *testing.T) {
 			l := startLoad(t, cl)
 			require.Eventually(t, func() bool { return l.ackedCount() > 20 }, 10*time.Second, 10*time.Millisecond)
 
-			lastPassStart, stopped := c.move(t, node0, node0b, cl, order)
+			c.move(t, node0, node0b, cl, order)
 
 			// the client keeps writing through the switch and lands on the new node
 			acked := l.ackedCount()
@@ -56,10 +56,8 @@ func TestMoveHappyPath(t *testing.T) {
 
 			require.Empty(t, l.errors(), "the client must not surface errors during a move")
 			require.Less(t, l.maxStall, 10*time.Second, "the switch stalled the client for too long")
-			require.True(t, hasKeys(t, node0b, l.keysAckedBetween(time.Time{}, lastPassStart)),
-				"keys acknowledged before the last completed pass must be on the new node")
-			require.True(t, hasKeys(t, node0b, l.keysStartedAfter(stopped)),
-				"keys written after the old node stopped must be on the new node")
+			require.True(t, hasKeys(t, node0b, l.keysAckedBetween(time.Time{}, time.Now())),
+				"a move must lose no acknowledged write, the most recent ones included")
 			require.True(t, hasKeys(t, node1, l.keysAckedBetween(time.Time{}, time.Now())),
 				"the node that didn't move keeps all its keys")
 		})
@@ -539,68 +537,55 @@ func TestClientCreatedBeforeAnyNode(t *testing.T) {
 }
 
 // TestMovePromotionMidReceive promotes the shadow while part of a range is loaded and the rest hasn't arrived. The
-// receive ends when the old node's SIGTERM cuts the stream, or at the next chunk: the shadow then drops the partial
-// range and serves what the completed passes copied.
+// old node may still hand its index over, so the promoted shadow keeps receiving, and doesn't serve, while the old node
+// answers. Once the old node has handed over and stopped, the new node serves every write the old node acknowledged.
 func TestMovePromotionMidReceive(t *testing.T) {
-	cases := []struct {
-		name string
-		// cut ends the paused receive
-		cut func(c *moveCluster, from *moveNode, paused *atomic.Bool)
-	}{
-		{"the old node stops", func(c *moveCluster, from *moveNode, _ *atomic.Bool) { c.stop(from) }},
-		{"the next chunk arrives", func(_ *moveCluster, _ *moveNode, paused *atomic.Bool) { paused.Store(false) }},
+	var paused atomic.Bool
+	replication := fastMoveReplication()
+	replication.MaxBytesPerSecond = pausable(&paused, 256*bytesize.KB)
+	c := newMoveCluster(t, replication)
+	node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
+	c.setTopology([]string{node0.address, node1.address}, nil)
+	c.start(node0)
+	c.start(node1)
+	cl := c.newClient()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	before := testKeys(200)
+	require.NoError(t, cl.Put(ctx, before, time.Hour))
+
+	c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
+	c.start(node0b)
+	waitForPass(t, node0)
+
+	// a big write gives every range of the next pass several batches, which the budget charges one at a time
+	big := make([]string, 300_000)
+	for i := range big {
+		big[i] = "big-" + strconv.Itoa(i)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var paused atomic.Bool
-			replication := fastMoveReplication()
-			replication.MaxBytesPerSecond = pausable(&paused, 256*bytesize.KB)
-			c := newMoveCluster(t, replication)
-			node0, node1, node0b := c.addNode(0), c.addNode(1), c.addNode(0)
-			c.setTopology([]string{node0.address, node1.address}, nil)
-			c.start(node0)
-			c.start(node1)
-			cl := c.newClient()
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			before := testKeys(200)
-			require.NoError(t, cl.Put(ctx, before, time.Hour))
+	keysByHashRange, err := c.hash.GetKeysByHashRange(ownedBy(c.hash, 0, big), 0)
+	require.NoError(t, err)
+	require.NoError(t, node0.service.cache.Put(keysByHashRange, time.Hour))
+	pauseMidRange(t, node0b, &paused)
 
-			c.setTopology([]string{node0.address, node1.address}, []string{node0b.address, ""})
-			c.start(node0b)
-			waitForPass(t, node0)
+	// PR2 reaches the shadow while it holds part of a range
+	after := []string{node0b.address, node1.address}
+	c.setTopology(after, []string{"", ""}, node0b)
+	require.Never(t, func() bool { return !node0b.service.isShadow() }, 500*time.Millisecond, 10*time.Millisecond,
+		"the promoted shadow must not serve while the old node answers")
+	paused.Store(false)
 
-			// a big write gives every range of the next pass several batches, which the budget charges one at a time
-			big := make([]string, 300_000)
-			for i := range big {
-				big[i] = "big-" + strconv.Itoa(i)
-			}
-			keysByHashRange, err := c.hash.GetKeysByHashRange(ownedBy(c.hash, 0, big), 0)
-			require.NoError(t, err)
-			require.NoError(t, node0.service.cache.Put(keysByHashRange, time.Hour))
-			pauseMidRange(t, node0b, &paused)
-
-			// PR2 reaches the shadow while it holds part of a range
-			after := []string{node0b.address, node1.address}
-			c.setTopology(after, []string{"", ""}, node0b)
-			cut := time.Now()
-			tc.cut(c, node0, &paused)
-			require.Eventually(t, func() bool { return !node0b.service.receiving.Load() }, time.Second,
-				time.Millisecond, "the promoted shadow must drop the partial range")
-			require.Less(t, time.Since(cut), time.Second)
-
-			c.stop(node0)
-			c.setTopology(after, []string{"", ""}, node1)
-			exists, err := cl.Get(ctx, before)
-			require.NoError(t, err, "the promoted shadow must serve")
-			for _, e := range exists {
-				require.True(t, e, "keys copied by the completed passes must be on the new node")
-			}
-			afterPromotion := c.keyOf(0, "after-promotion")
-			require.NoError(t, cl.Put(ctx, []string{afterPromotion}, time.Hour))
-			require.True(t, hasKeys(t, node0b, []string{afterPromotion}))
-		})
+	c.stop(node0) // SIGTERM: the old node hands its index over first
+	c.setTopology(after, []string{"", ""}, node1)
+	exists, err := cl.Get(ctx, before)
+	require.NoError(t, err, "the promoted shadow must serve once the old node is gone")
+	for _, e := range exists {
+		require.True(t, e, "keys copied by the completed passes must be on the new node")
 	}
+	require.True(t, hasKeys(t, node0b, big), "the write the old node acknowledged last must reach the new node")
+	afterPromotion := c.keyOf(0, "after-promotion")
+	require.NoError(t, cl.Put(ctx, []string{afterPromotion}, time.Hour))
+	require.True(t, hasKeys(t, node0b, []string{afterPromotion}))
 }
 
 // TestMoveOldNodeStopsAnswering has the old node stop answering at the switch instead of going away, like a pod that
@@ -769,17 +754,20 @@ func (c *moveCluster) start(n *moveNode) {
 	c.t.Cleanup(func() { c.stop(n) })
 }
 
-// stop shuts the node down the way the node's main does on SIGTERM: in-flight calls are cancelled, then the
-// service and its disk are closed
+// stop shuts the node down the way the node's main does on SIGTERM: the node hands its index over if it is being
+// moved, in-flight calls are cancelled, then the service and its disk are closed
 func (c *moveCluster) stop(n *moveNode) {
 	if !n.running.CompareAndSwap(true, false) {
 		return
 	}
+	n.cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	n.service.Handover(ctx)
+	cancel()
 	if n.proxy != nil {
 		n.proxy.close() // the server would wait for handshakes the paused proxy holds
 	}
 	n.server.Stop()
-	n.cancel()
 	n.service.Close()
 }
 

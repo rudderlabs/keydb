@@ -151,6 +151,7 @@ func (r *replicator) run(ctx context.Context) {
 }
 
 func (r *replicator) reconcile(ctx context.Context) {
+	r.s.awaitPredecessor(ctx)
 	if !r.sourceForgotten {
 		r.sourceForgotten = r.s.forgetShadowSource()
 	}
@@ -168,8 +169,12 @@ func (r *replicator) reconcile(ctx context.Context) {
 	}
 }
 
-// switchTarget stops the running job, if any, and starts one for target unless it is empty.
+// switchTarget stops the running job, if any, and starts one for target unless it is empty or the node hands its
+// index over, which sends its own pass (see handover).
 func (r *replicator) switchTarget(ctx context.Context, target string) {
+	if r.s.handingOver.Load() {
+		target = ""
+	}
 	r.mu.Lock()
 	cancel, done := r.cancel, r.done
 	r.target, r.cancel, r.done = "", nil, nil
@@ -208,15 +213,16 @@ func (r *replicator) job(ctx context.Context, target string) {
 	defer r.s.closeNodeConnection(conn)
 
 	for ctx.Err() == nil {
-		r.pass(ctx, shadow, log)
+		r.pass(ctx, shadow, log, true)
 		if !sleepCtx(ctx, r.cfg.PauseBetweenPasses) {
 			return
 		}
 	}
 }
 
-// pass sends every hash range the node owns, retrying a range until it is sent or ctx is done.
-func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log logger.Logger) {
+// pass sends every hash range the node owns, retrying a range until it is sent or ctx is done, and returns true once
+// every range is sent. Unless throttled, it ignores the budget.
+func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log logger.Logger, throttled bool) bool {
 	r.s.mu.RLock() // the hasher is swapped under the write lock when the degraded nodes change
 	ranges := slices.Sorted(maps.Keys(r.s.getCurrentRanges()))
 	r.s.mu.RUnlock()
@@ -233,16 +239,18 @@ func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log 
 	for i, hashRange := range ranges {
 		for failures := 0; ; {
 			// a paused copy must not even scan: wait before opening the range
-			if err := r.budget.waitNonZero(ctx); err != nil {
-				return
+			if throttled {
+				if err := r.budget.waitNonZero(ctx); err != nil {
+					return false
+				}
 			}
-			n, err := r.sendRange(ctx, shadow, hashRange)
+			n, err := r.sendRange(ctx, shadow, hashRange, throttled)
 			if err == nil {
 				passBytes += n
 				break
 			}
 			if ctx.Err() != nil {
-				return
+				return false
 			}
 			if errors.Is(err, errBudgetPaused) {
 				continue // the range was given up so as not to hold it open while paused, it starts over once resumed
@@ -257,7 +265,7 @@ func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log 
 				obskit.Error(err),
 			)
 			if !sleepCtx(ctx, delay) {
-				return
+				return false
 			}
 		}
 		r.update(func(p *ReplicationStatus) { p.CurrentPassRangesDone = i + 1 })
@@ -274,11 +282,40 @@ func (r *replicator) pass(ctx context.Context, shadow pb.NodeServiceClient, log 
 		logger.NewIntField("bytes", passBytes),
 		logger.NewDurationField("duration", end.Sub(start)),
 	)
+	return true
 }
 
-// sendRange streams the changes of one hash range since the shadow's marker, and returns the bytes it charged to the
-// budget. They are counted as they go, so that progress shows during a long pass.
-func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient, hashRange int64) (int64, error) {
+// handover sends one last pass to the node taking this node's index over, after stopping the job, so that it holds
+// every write this node acknowledged (see Service.Handover).
+func (r *replicator) handover(ctx context.Context, successor string) {
+	r.switchTarget(ctx, "") // with handingOver set, nothing starts the job again
+	log := r.s.logger.Withn(logger.NewStringField("successor", successor))
+	if r.cfg.MaxBytesPerSecond() <= 0 {
+		log.Warnn("Skipping the handover, replication is paused")
+		return
+	}
+	conn, node, err := r.s.connectToNode(successor)
+	if err != nil {
+		log.Errorn("Connecting to the successor for the handover", obskit.Error(err))
+		return
+	}
+	defer r.s.closeNodeConnection(conn)
+	log.Infon("Handing the node's index over")
+	start := r.s.now()
+	if !r.pass(ctx, node, log, false) {
+		log.Errorn("The handover didn't finish, the successor lacks what it didn't send",
+			logger.NewDurationField("duration", r.s.now().Sub(start)), obskit.Error(ctx.Err()))
+		return
+	}
+	log.Infon("Handed the node's index over", logger.NewDurationField("duration", r.s.now().Sub(start)))
+}
+
+// sendRange streams the changes of one hash range since the shadow's marker, and returns the bytes it read. Unless
+// throttled, it doesn't wait for the budget. The bytes are counted as they go, so that progress shows during a long
+// pass.
+func (r *replicator) sendRange(
+	ctx context.Context, shadow pb.NodeServiceClient, hashRange int64, throttled bool,
+) (int64, error) {
 	ctx, cancel := context.WithCancel(ctx) // cancelling it abandons the stream on errors
 	defer cancel()
 
@@ -305,8 +342,10 @@ func (r *replicator) sendRange(ctx context.Context, shadow pb.NodeServiceClient,
 		CompressionLevel: replicationCompressionLevel,
 		BatchSize:        replicationBatchSize,
 		Wait: func(ctx context.Context, bytes int) error {
-			if err := r.budget.Wait(ctx, bytes); err != nil {
-				return err
+			if throttled {
+				if err := r.budget.Wait(ctx, bytes); err != nil {
+					return err
+				}
 			}
 			charged += int64(bytes)
 			r.metrics.bytes.Count(bytes)

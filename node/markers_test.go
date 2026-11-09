@@ -152,7 +152,7 @@ func TestFirstRangeIgnoresLeftoverMarkers(t *testing.T) {
 	require.NoError(t, shadow.setSnapshotTimestamp(0, leftover))
 	require.NoError(t, source.cache.Put(map[int64][]string{0: {"above"}}, time.Hour))
 
-	_, err = source.replication.sendRange(ctx, nodeClient(t, shadowAddress), 0)
+	_, err = source.replication.sendRange(ctx, nodeClient(t, shadowAddress), 0, true)
 	require.NoError(t, err)
 
 	keysByHashRange, indexes, err := shadow.GetKeysByHashRangeWithIndexes([]string{"below", "above"})
@@ -290,6 +290,7 @@ func TestShadowGetNodeInfoDuringReceive(t *testing.T) {
 	t.Run("a shadow that became active refuses writes until the receive ends", func(t *testing.T) {
 		actives.set(address)
 		shadows.set("")
+		s.predecessor.Store(nil) // and the node it was filled from is gone (see awaitPredecessor)
 		resp, err := s.Put(ctx, &pb.PutRequest{Keys: []string{"k"}, TtlSeconds: 60})
 		require.NoError(t, err)
 		require.Equal(t, pb.ErrorCode_NOT_READY, resp.ErrorCode)
@@ -392,6 +393,7 @@ func TestShadowPromotedMidRange(t *testing.T) {
 	// the move completes while the range is half loaded, then the rest of the range arrives
 	actives.set(address)
 	shadows.set("")
+	s.predecessor.Store(nil) // and the node it was filled from is gone (see awaitPredecessor)
 	_ = stream.Send(&pb.SnapshotChunk{
 		HashRange: 0, Timestamp: 1, SourceAddress: "active:1", Data: snapshot[len(snapshot)/2:], IsLast: true,
 	})
@@ -456,6 +458,7 @@ func TestShadowPromotedWaitingForTheLocks(t *testing.T) {
 
 	actives.set(address)
 	shadows.set("")
+	s.predecessor.Store(nil) // and the node it was filled from is gone (see awaitPredecessor)
 	release()
 
 	resp, err = stream.CloseAndRecv()

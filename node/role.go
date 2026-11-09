@@ -1,8 +1,10 @@
 package node
 
-// isShadow returns true when this pod is listed as the shadow for its own node index.
+// isShadow returns true when this pod is listed as the shadow for its own node index, and after a promotion until the
+// node it was filled from is gone, as that node may still be handing its index over (see awaitPredecessor).
 func (s *Service) isShadow() bool {
-	return s.config.AdvertisedAddress != "" && s.shadowAddress() == s.config.AdvertisedAddress
+	return s.config.AdvertisedAddress != "" &&
+		(s.shadowAddress() == s.config.AdvertisedAddress || s.predecessor.Load() != nil)
 }
 
 // replaced returns true when the configuration gives this pod's node index to another pod and doesn't list this pod

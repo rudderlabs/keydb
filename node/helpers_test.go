@@ -91,8 +91,8 @@ func freeAddress(t testing.TB) string {
 	return "localhost:" + strconv.Itoa(port)
 }
 
-// serveTestService serves the service on the given address until the test ends.
-func serveTestService(t testing.TB, service *Service, address string) {
+// serveTestService serves the service on the given address until the test ends, or until the returned server stops.
+func serveTestService(t testing.TB, service *Service, address string) *grpc.Server {
 	t.Helper()
 	server := grpc.NewServer()
 	pb.RegisterNodeServiceServer(server, service)
@@ -100,6 +100,7 @@ func serveTestService(t testing.TB, service *Service, address string) {
 	require.NoError(t, err)
 	go func() { _ = server.Serve(lis) }()
 	t.Cleanup(server.Stop)
+	return server
 }
 
 // nodeClient returns a raw gRPC client for the node at the given address.
