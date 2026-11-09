@@ -513,11 +513,14 @@ func (p *replicationPair) onShadow(t *testing.T, keys ...string) bool {
 	return true
 }
 
-// existsOn returns true when key exists on the service's cache
+// existsOn returns true when key exists on the service's cache. It waits for a load in progress, as a read during
+// one races with it (see loadMu).
 func existsOn(t *testing.T, s *Service, key string) bool {
 	t.Helper()
 	keysByHashRange, indexes, err := s.GetKeysByHashRangeWithIndexes([]string{key})
 	require.NoError(t, err)
+	s.loadMu.RLock()
+	defer s.loadMu.RUnlock()
 	exists, err := s.cache.Get(keysByHashRange, indexes)
 	require.NoError(t, err)
 	return exists[0]
