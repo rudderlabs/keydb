@@ -382,3 +382,57 @@ func TestShutdownCancelsInFlight(t *testing.T) {
 	_, err = stream.CloseAndRecv()
 	require.Error(t, err, "the in-flight stream must be cancelled")
 }
+
+// TestStopWaitsForHandlers checks that stopping the node's server waits for the handlers still running, since the
+// cache is closed right after: a Put that reaches a closed cache hangs, and a Get fails.
+func TestStopWaitsForHandlers(t *testing.T) {
+	server := newNodeServer(config.New(), stats.NOP, logger.NOP)
+	handler := &blockingNodeService{started: make(chan struct{}), release: make(chan struct{})}
+	pb.RegisterNodeServiceServer(server, handler)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = server.Serve(lis) }()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	go func() {
+		_, _ = pb.NewNodeServiceClient(conn).Put(context.Background(), &pb.PutRequest{Keys: []string{"k"}})
+	}()
+	select {
+	case <-handler.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Put never reached its handler")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		server.Stop()
+		close(stopped)
+	}()
+	isStopped := func() bool {
+		select {
+		case <-stopped:
+			return true
+		default:
+			return false
+		}
+	}
+	require.Never(t, isStopped, 500*time.Millisecond, 10*time.Millisecond, "Stop returned while a handler was running")
+	close(handler.release)
+	require.Eventually(t, isStopped, 10*time.Second, 10*time.Millisecond, "Stop never returned")
+}
+
+// blockingNodeService is a node service whose Put runs until released, ignoring its context like a Put already
+// writing to the cache
+type blockingNodeService struct {
+	pb.UnimplementedNodeServiceServer
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingNodeService) Put(context.Context, *pb.PutRequest) (*pb.PutResponse, error) {
+	close(s.started)
+	<-s.release
+	return &pb.PutResponse{Success: true}, nil
+}

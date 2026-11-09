@@ -266,53 +266,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 	conf.RegisterObserver(degradedNodesObserver)
 
-	// Configure gRPC server keepalive parameters
-	grpcKeepaliveMinTime := conf.GetDurationVar(10, time.Second, "grpc.keepalive.minTime")
-	grpcKeepalivePermitWithoutStream := conf.GetBoolVar(true, "grpc.keepalive.permitWithoutStream")
-	grpcKeepaliveTime := conf.GetDurationVar(60, time.Second, "grpc.keepalive.time")
-	grpcKeepaliveTimeout := conf.GetDurationVar(20, time.Second, "grpc.keepalive.timeout")
-
-	log.Infon("gRPC server keepalive configuration",
-		logger.NewDurationField("enforcementMinTime", grpcKeepaliveMinTime),
-		logger.NewBoolField("enforcementPermitWithoutStream", grpcKeepalivePermitWithoutStream),
-		logger.NewDurationField("serverTime", grpcKeepaliveTime),
-		logger.NewDurationField("serverTimeout", grpcKeepaliveTimeout),
-	)
-
-	// create a gRPC server with latency interceptors and keepalive parameters
-	server := grpc.NewServer(
-		// Keepalive enforcement policy - controls what the server requires from clients
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             grpcKeepaliveMinTime,
-			PermitWithoutStream: grpcKeepalivePermitWithoutStream,
-		}),
-		// Keepalive parameters - controls server's own keepalive behavior
-		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    grpcKeepaliveTime,
-			Timeout: grpcKeepaliveTimeout,
-		}),
-		// Unary interceptor to record latency for unary RPCs
-		grpc.UnaryInterceptor(
-			func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (
-				any, error,
-			) {
-				start := time.Now()
-				resp, err := handler(ctx, req)
-				success := err != nil
-				if err == nil {
-					if keyDBResp, ok := resp.(keyDBResponse); ok && !keyDBResp.GetSuccess() {
-						success = false
-					}
-				}
-				stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{
-					"method":  info.FullMethod,
-					"success": strconv.FormatBool(success),
-				}).Since(start)
-				return resp, err
-			},
-		),
-	)
-
+	server := newNodeServer(conf, stat, log)
 	pb.RegisterNodeServiceServer(server, service)
 	// Also expose the health service on the main port so in-cluster clients that dial
 	// 50051 can use gRPC health checks without a round-trip to the health port.
@@ -363,7 +317,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		// Kubernetes removes this pod from Service endpoints before we stop serving.
 		healthServer.Shutdown()
 		// Stop cancels in-flight calls instead of waiting for them: clients retry them, and after a node move the
-		// retries land on the node that replaced this one. Badger is closed only once no handler is running.
+		// retries land on the node that replaced this one. It waits for their handlers to return, so Badger is
+		// closed only once no handler is running.
 		server.Stop()
 		_ = lis.Close()
 		service.Close()
@@ -386,6 +341,57 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	case err := <-healthErrCh:
 		return err
 	}
+}
+
+// newNodeServer creates the node's gRPC server, with keepalive parameters and a latency interceptor. Its Stop waits
+// for the handlers still running, because the cache is closed right after: a Put reaching a closed cache hangs.
+func newNodeServer(conf *config.Config, stat stats.Stats, log logger.Logger) *grpc.Server {
+	// Configure gRPC server keepalive parameters
+	grpcKeepaliveMinTime := conf.GetDurationVar(10, time.Second, "grpc.keepalive.minTime")
+	grpcKeepalivePermitWithoutStream := conf.GetBoolVar(true, "grpc.keepalive.permitWithoutStream")
+	grpcKeepaliveTime := conf.GetDurationVar(60, time.Second, "grpc.keepalive.time")
+	grpcKeepaliveTimeout := conf.GetDurationVar(20, time.Second, "grpc.keepalive.timeout")
+
+	log.Infon("gRPC server keepalive configuration",
+		logger.NewDurationField("enforcementMinTime", grpcKeepaliveMinTime),
+		logger.NewBoolField("enforcementPermitWithoutStream", grpcKeepalivePermitWithoutStream),
+		logger.NewDurationField("serverTime", grpcKeepaliveTime),
+		logger.NewDurationField("serverTimeout", grpcKeepaliveTimeout),
+	)
+
+	return grpc.NewServer(
+		grpc.WaitForHandlers(true),
+		// Keepalive enforcement policy - controls what the server requires from clients
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             grpcKeepaliveMinTime,
+			PermitWithoutStream: grpcKeepalivePermitWithoutStream,
+		}),
+		// Keepalive parameters - controls server's own keepalive behavior
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    grpcKeepaliveTime,
+			Timeout: grpcKeepaliveTimeout,
+		}),
+		// Unary interceptor to record latency for unary RPCs
+		grpc.UnaryInterceptor(
+			func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (
+				any, error,
+			) {
+				start := time.Now()
+				resp, err := handler(ctx, req)
+				success := err != nil
+				if err == nil {
+					if keyDBResp, ok := resp.(keyDBResponse); ok && !keyDBResp.GetSuccess() {
+						success = false
+					}
+				}
+				stat.NewTaggedStat("keydb_grpc_req_latency_seconds", stats.TimerType, stats.Tags{
+					"method":  info.FullMethod,
+					"success": strconv.FormatBool(success),
+				}).Since(start)
+				return resp, err
+			},
+		),
+	)
 }
 
 // getNodeID extracts the node ID from a pod name.
