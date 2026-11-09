@@ -526,7 +526,8 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 // StreamSnapshot writes the entries of one hash range with a version above since to w, as LoadSnapshot reads them.
 // Unlike CreateSnapshots it reads the range with a single iterator and writes small batches as it goes, so it never
 // holds more than a batch in memory, and a pass over unchanged data allocates next to nothing.
-// Expired keys are skipped. It returns the highest version written. With nothing to write, w gets no bytes and it
+// Expired keys are skipped when since is 0. With a since they are written, as the receiver may hold an older version
+// of them that they must hide. It returns the highest version written. With nothing to write, w gets no bytes and it
 // returns 0.
 func (c *Cache) StreamSnapshot(
 	ctx context.Context, hashRange int64, since uint64, w io.Writer, opts StreamOptions,
@@ -641,7 +642,12 @@ func (c *Cache) streamRange(
 			continue
 		}
 		lastKey = item.KeyCopy(lastKey)
-		if item.IsDeletedOrExpired() || (item.ExpiresAt() > 0 && item.ExpiresAt() <= now) {
+		expired := item.ExpiresAt() > 0 && item.ExpiresAt() <= now
+		// Past the first pass an expired entry is still streamed: the receiver may hold an older, live version of the
+		// key, which only this newer entry hides. The first pass has nothing to hide, so it skips them, and not
+		// copying most of the expired data is what keeps a new disk small. Deleted entries are always skipped: the
+		// node deletes internal keys only, which are never streamed.
+		if (expired && since == 0) || (!expired && item.IsDeletedOrExpired()) {
 			if err := skip(lastKey); err != nil {
 				return 0, err
 			}

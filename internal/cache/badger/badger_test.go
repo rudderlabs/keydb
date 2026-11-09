@@ -608,6 +608,49 @@ func TestStreamSnapshotSince(t *testing.T) {
 	})
 }
 
+// The first pass skips expired keys, as not copying them is what keeps a new disk small, but a later pass must stream
+// an expired newer version: it is what hides the older live version the receiver holds.
+func TestStreamSnapshotExpiredVersions(t *testing.T) {
+	ctx := context.Background()
+	source := newStreamTestCache(t, true)
+	require.NoError(t, source.Put(map[int64][]string{0: {"updated", "stays"}}, time.Hour))
+	require.NoError(t, source.Put(map[int64][]string{0: {"expired-early"}}, time.Second))
+
+	time.Sleep(2100 * time.Millisecond) // "expired-early" expires
+	var first bytes.Buffer
+	since, err := source.StreamSnapshot(ctx, 0, 0, &first, StreamOptions{})
+	require.NoError(t, err)
+	receiver := newStreamTestCache(t, true)
+	require.NoError(t, receiver.LoadSnapshot(ctx, &first))
+	require.Equal(t, []bool{true, true}, existsIn(t, receiver, 0, "updated", "stays"))
+
+	onlyExpired := newStreamTestCache(t, false)
+	require.NoError(t, onlyExpired.Put(map[int64][]string{0: {"gone"}}, time.Second))
+	time.Sleep(2100 * time.Millisecond)
+	var skipped bytes.Buffer
+	_, err = onlyExpired.StreamSnapshot(ctx, 0, 0, &skipped, StreamOptions{})
+	require.NoError(t, err)
+	require.Zero(t, skipped.Len(), "the first pass must not copy expired keys")
+
+	require.NoError(t, source.Put(map[int64][]string{0: {"updated"}}, time.Second))
+	time.Sleep(2100 * time.Millisecond)
+	require.Equal(t, []bool{false, true}, existsIn(t, source, 0, "updated", "stays"))
+
+	var next bytes.Buffer
+	version, err := source.StreamSnapshot(ctx, 0, since, &next, StreamOptions{})
+	require.NoError(t, err)
+	require.Greater(t, version, since, "the marker must move past the expired version")
+	require.NoError(t, receiver.LoadSnapshot(ctx, &next))
+	require.Equal(t, []bool{false, true}, existsIn(t, receiver, 0, "updated", "stays"),
+		"the receiver must stop answering for a key that expired on the source")
+
+	var again bytes.Buffer
+	version, err = source.StreamSnapshot(ctx, 0, version, &again, StreamOptions{})
+	require.NoError(t, err)
+	require.Zero(t, version)
+	require.Zero(t, again.Len(), "an expired version is streamed once")
+}
+
 func TestStreamSnapshotBatchesBounded(t *testing.T) {
 	// a range much bigger than a batch
 	source := newStreamTestCache(t, false)

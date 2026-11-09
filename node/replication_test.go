@@ -386,6 +386,33 @@ func TestGCSkippedOnShadow(t *testing.T) {
 	}, 300*time.Millisecond, 20*time.Millisecond, "a shadow must not run garbage collection, even between receives")
 }
 
+// A key copied live and then re-put with a short TTL that has expired must stop existing on the shadow: the source
+// answers false for it, and so must the shadow once a later pass has run.
+func TestReplicationIncrementalExpiredUpdateHidesOlderVersion(t *testing.T) {
+	var paused atomic.Bool
+	p := newReplicationPair(t, fastReplication(&paused), stats.NOP)
+	p.put(t, "K", "other")
+	p.shadows.set(p.shadowAddress)
+	require.Eventually(t, func() bool { return p.onShadow(t, "K", "other") }, 10*time.Second, 20*time.Millisecond,
+		"the shadow never received the first copy")
+
+	// no pass may see the new version before it expires
+	paused.Store(true)
+	time.Sleep(300 * time.Millisecond)
+	keysByHashRange, err := p.source.GetKeysByHashRange([]string{"K"})
+	require.NoError(t, err)
+	require.NoError(t, p.source.cache.Put(keysByHashRange, time.Second))
+	time.Sleep(2100 * time.Millisecond)
+	require.False(t, existsOn(t, p.source, "K"), "the source must answer false for an expired key")
+
+	passes := p.source.ReplicationStatus().PassesCompleted
+	paused.Store(false)
+	require.Eventually(t, func() bool { return p.source.ReplicationStatus().PassesCompleted >= passes+2 },
+		10*time.Second, 20*time.Millisecond)
+	require.False(t, existsOn(t, p.shadow, "K"), "the shadow still holds the older live version of K")
+	require.True(t, existsOn(t, p.shadow, "other"), "an untouched key must stay")
+}
+
 // shadowList is a shadow address list that tests can change while the nodes run
 type shadowList struct{ v atomic.Pointer[[]string] }
 
@@ -484,6 +511,16 @@ func (p *replicationPair) onShadow(t *testing.T, keys ...string) bool {
 		}
 	}
 	return true
+}
+
+// existsOn returns true when key exists on the service's cache
+func existsOn(t *testing.T, s *Service, key string) bool {
+	t.Helper()
+	keysByHashRange, indexes, err := s.GetKeysByHashRangeWithIndexes([]string{key})
+	require.NoError(t, err)
+	exists, err := s.cache.Get(keysByHashRange, indexes)
+	require.NoError(t, err)
+	return exists[0]
 }
 
 // loadCountingCache counts the loads the service starts on its cache
