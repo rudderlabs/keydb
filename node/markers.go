@@ -1,14 +1,23 @@
 package node
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
 	obskit "github.com/rudderlabs/rudder-observability-kit/go/labels"
 )
 
-// shadowSourceKey is the internal key where a shadow remembers the node it is being filled from
+// shadowSourceKey is the internal key where a shadow remembers the node it is being filled from, as sourceID
 const shadowSourceKey = "_shadow_source"
+
+// sourceID is how a shadow remembers its source: 8 bytes, because the value log purge relies on keydb storing no
+// value longer than that (see purgeValueLog), and an address can be longer than the value threshold.
+func sourceID(source string) []byte {
+	sum := sha256.Sum256([]byte(source))
+	return sum[:8]
+}
 
 // advanceSnapshotTimestamp stores the timestamp for a hash range, never moving an existing marker backwards.
 func (s *Service) advanceSnapshotTimestamp(hashRange int64, timestamp uint64) error {
@@ -43,8 +52,8 @@ func (s *Service) checkShadowSource(source string) error {
 		return fmt.Errorf("reading the shadow source: %w", err)
 	}
 	if found {
-		if string(value) != source {
-			return fmt.Errorf("leftover disk: it holds data from %q, refusing data from %q", string(value), source)
+		if !bytes.Equal(value, sourceID(source)) {
+			return fmt.Errorf("leftover disk: it holds data from another source, refusing data from %q", source)
 		}
 		return nil
 	}
@@ -59,7 +68,7 @@ func (s *Service) checkShadowSource(source string) error {
 	if err := s.forgetSnapshotTimestamps(); err != nil {
 		return err
 	}
-	if err := s.cache.PutValue(shadowSourceKey, internalKeysHashRange, []byte(source), 0); err != nil {
+	if err := s.cache.PutValue(shadowSourceKey, internalKeysHashRange, sourceID(source), 0); err != nil {
 		return fmt.Errorf("storing the shadow source: %w", err)
 	}
 	return nil

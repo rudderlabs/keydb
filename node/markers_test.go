@@ -99,6 +99,33 @@ func TestLeftoverDiskGuard(t *testing.T) {
 
 // A disk whose data expired keeps the markers of the node that filled it. The first range must not be streamed from
 // one of them: the shadow would then store a higher marker, and never get the keys of that range below the old one.
+// TestShadowSourceSurvivesValueLogPurge checks that a shadow still recognises its source after restarts that purge
+// the value log, which drops any value stored there: a source address is longer than some valid value thresholds.
+func TestShadowSourceSurvivesValueLogPurge(t *testing.T) {
+	ctx := context.Background()
+	const source = "keydb-0-0.keydb-headless.namespace.svc.cluster.local:50051"
+	conf := newTestConf(t)
+	conf.Set("BadgerDB.Dedup.valueThreshold", 32)
+	conf.Set("BadgerDB.Dedup.purgeValueLog", true)
+	nodeConfig := Config{
+		NodeID:            0,
+		Addresses:         staticList("active:1"),
+		AdvertisedAddress: "shadow:1",
+		ShadowAddresses:   staticList("shadow:1"),
+	}
+
+	s := newTestService(ctx, t, nodeConfig, conf)
+	require.NoError(t, s.checkShadowSource(source))
+	require.NoError(t, s.cache.Put(map[int64][]string{0: {"copied"}}, time.Hour))
+	s.Close()
+	for range 2 { // every open adds a value log file, and the purge keeps only the last one
+		newTestService(ctx, t, nodeConfig, conf).Close()
+	}
+
+	s = newTestService(ctx, t, nodeConfig, conf)
+	require.NoError(t, s.checkShadowSource(source), "the shadow must still accept its own source")
+}
+
 func TestFirstRangeIgnoresLeftoverMarkers(t *testing.T) {
 	ctx := context.Background()
 	sourceAddress, shadowAddress := freeAddress(t), freeAddress(t)
