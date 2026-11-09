@@ -658,6 +658,58 @@ func TestStreamSnapshotIncrementalAllocations(t *testing.T) {
 	require.Less(t, allocated, uint64(8<<20), "an incremental pass over unchanged data must stay cheap")
 }
 
+// A range that is mostly expired must not be scanned to its end without consulting Wait: a pause or the latency brake
+// that starts mid-scan has to stop the scan, though no batch is ever written.
+func TestStreamSnapshotScanConsultsWait(t *testing.T) {
+	source := newStreamTestCache(t, false)
+	keys := make([]string, 200_000)
+	for i := range keys {
+		keys[i] = "an-expired-key-with-a-realistic-length-" + strconv.Itoa(i)
+	}
+	require.NoError(t, source.Put(map[int64][]string{0: keys}, time.Second))
+	time.Sleep(2100 * time.Millisecond)
+
+	t.Run("wait is called while skipping", func(t *testing.T) {
+		var calls, waited int
+		_, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
+			Wait: func(_ context.Context, n int) error {
+				calls++
+				waited += n
+				return nil
+			},
+		})
+		require.NoError(t, err)
+		require.Positive(t, calls, "a scan over expired keys never consulted wait")
+		require.Positive(t, waited)
+	})
+
+	t.Run("a pause stops the scan", func(t *testing.T) {
+		paused := errors.New("paused")
+		var buf bytes.Buffer
+		_, err := source.StreamSnapshot(context.Background(), 0, 0, &buf, StreamOptions{
+			Wait: func(context.Context, int) error { return paused },
+		})
+		require.ErrorIs(t, err, paused, "the scan ran to the end despite the pause")
+		require.Zero(t, buf.Len(), "no empty batch is written")
+	})
+
+	t.Run("a pause starting mid-scan stops it early", func(t *testing.T) {
+		paused := errors.New("paused")
+		var calls int
+		_, err := source.StreamSnapshot(context.Background(), 0, 0, io.Discard, StreamOptions{
+			Wait: func(context.Context, int) error {
+				calls++
+				if calls > 3 {
+					return paused
+				}
+				return nil
+			},
+		})
+		require.ErrorIs(t, err, paused)
+		require.Equal(t, 4, calls, "the scan must stop at the first refused wait")
+	})
+}
+
 // fastForwardCommitTs commits a single entry at timestamp 1e9 so that the commit timestamps of a
 // database opened later in dir have at least 10 decimal digits.
 func fastForwardCommitTs(t *testing.T, dir string) {

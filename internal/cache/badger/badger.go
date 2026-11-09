@@ -42,6 +42,10 @@ const (
 
 	// defaultStreamBatchSize is the size at which StreamSnapshot writes a batch of entries
 	defaultStreamBatchSize = 256 << 10
+	// entryOverheadBytes is what StreamSnapshot charges per entry on top of its key and value
+	entryOverheadBytes = 24
+	// skipWaitBytes is how much skipped data StreamSnapshot accumulates before it calls Wait for it
+	skipWaitBytes = 64 << 10
 )
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
@@ -61,6 +65,8 @@ type StreamOptions struct {
 	// BatchSize is the size in bytes at which a batch of entries is written, 256 KiB when zero
 	BatchSize int
 	// Wait is called with the size of each batch before it is written, so callers can apply a byte budget.
+	// It is also called, with the key sizes plus a fixed overhead per entry, as the scan skips expired or superseded
+	// entries, so that a scan that writes little still goes through the budget and a pause stops it.
 	// An error stops the stream. Nil means no budget.
 	Wait func(ctx context.Context, bytes int) error
 }
@@ -579,15 +585,32 @@ func (c *Cache) streamRange(
 	iterOpts.Prefix = []byte(getKeyPrefix(hashRange))
 	iterOpts.SinceTs = since
 	iterOpts.PrefetchValues = false
+	// Badger drops expired and deleted entries inside Next without returning to us, so a range that is mostly expired
+	// could be scanned to its end without ever consulting wait. Reading every version hands them all to the loop.
+	iterOpts.AllVersions = true
 	it := txn.NewIterator(iterOpts)
 	defer it.Close()
 
 	var (
-		maxVersion uint64
-		batch      = &pb.KVList{}
-		batchBytes int
-		now        = uint64(time.Now().Unix())
+		maxVersion   uint64
+		batch        = &pb.KVList{}
+		batchBytes   int
+		skippedBytes int // what the loop skipped since wait last ran
+		lastKey      []byte
+		now          = uint64(time.Now().Unix())
 	)
+	// skip charges an entry that is read but not streamed, so that a scan of mostly expired data still goes through
+	// the budget and the brake, and a pause stops it. It counts the key and the per-entry overhead, like streamed
+	// entries do, in chunks, as wait is not free.
+	skip := func(key []byte) error {
+		skippedBytes += len(key) + entryOverheadBytes
+		if wait == nil || skippedBytes < skipWaitBytes {
+			return nil
+		}
+		n := skippedBytes
+		skippedBytes = 0
+		return wait(ctx, n)
+	}
 	flush := func() error {
 		if len(batch.Kv) == 0 {
 			return nil
@@ -610,7 +633,18 @@ func (c *Cache) streamRange(
 			return 0, err
 		}
 		item := it.Item()
+		if bytes.Equal(item.Key(), lastKey) {
+			// an older version of a key already seen: the newest one decides
+			if err := skip(lastKey); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		lastKey = item.KeyCopy(lastKey)
 		if item.IsDeletedOrExpired() || (item.ExpiresAt() > 0 && item.ExpiresAt() <= now) {
+			if err := skip(lastKey); err != nil {
+				return 0, err
+			}
 			continue
 		}
 		value, err := item.ValueCopy(nil)
@@ -625,7 +659,7 @@ func (c *Cache) streamRange(
 			UserMeta:  []byte{item.UserMeta()},
 		}
 		batch.Kv = append(batch.Kv, kv)
-		batchBytes += len(kv.Key) + len(kv.Value) + 24
+		batchBytes += len(kv.Key) + len(kv.Value) + entryOverheadBytes
 		maxVersion = max(maxVersion, kv.Version)
 		if batchBytes >= batchSize {
 			if err := flush(); err != nil {
