@@ -34,7 +34,7 @@ RUN go build \
     -o ./keydb-scaler ./cmd/scaler
 
 # Final stage
-FROM alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6
+FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4
 
 # The version floor changes this instruction, so an old cached layer is not reused.
 # apk fails here when the repository serves an older bundle.
