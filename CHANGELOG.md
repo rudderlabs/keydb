@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.6.0](https://github.com/rudderlabs/keydb/compare/v1.5.2...v1.6.0) (2026-11-11)
+
+
+### Features
+
+* move a node to a new disk through a shadow node ([#257](https://github.com/rudderlabs/keydb/issues/257)) ([7c598d4](https://github.com/rudderlabs/keydb/commit/7c598d45751963c53bca586099871604cf3e56f3))
+
+
+### Miscellaneous
+
+* **ci:** move the PR title check to check-pr-title v2.0.3 ([#261](https://github.com/rudderlabs/keydb/issues/261)) ([ad9bd2b](https://github.com/rudderlabs/keydb/commit/ad9bd2bf53c7cd36651181b64623a92f043a4ca8))
+* **ci:** remove codecov ([#268](https://github.com/rudderlabs/keydb/issues/268)) ([6274ec7](https://github.com/rudderlabs/keydb/commit/6274ec7b2c3096243114c776c4b583a528042190))
+* **deps:** bump alpine from 3.24.3 to 3.24.4 in the docker-deps group ([#264](https://github.com/rudderlabs/keydb/issues/264)) ([4dca28f](https://github.com/rudderlabs/keydb/commit/4dca28f70b2ceacbb03c78e0af6d43f8e4683028))
+* **deps:** bump golang from `b8c9b82` to `fa3d596` in the golang group across 1 directory ([#258](https://github.com/rudderlabs/keydb/issues/258)) ([f34a9e0](https://github.com/rudderlabs/keydb/commit/f34a9e0d24a8bf5ff3e4723a91b2dc2e8ba9d577))
+* **deps:** bump step-security/harden-runner from 2.22.2 to 2.22.3 in the actions-deps group across 1 directory ([#262](https://github.com/rudderlabs/keydb/issues/262)) ([8bbccef](https://github.com/rudderlabs/keydb/commit/8bbccef0fda13d95c16e5c44ecf5f7eb0bb218d6))
+* **deps:** bump the go-deps group across 1 directory with 2 updates ([#266](https://github.com/rudderlabs/keydb/issues/266)) ([83e4e29](https://github.com/rudderlabs/keydb/commit/83e4e2900a0976a37c68aa547ff865516d374bdf))
+
 ## [1.5.2](https://github.com/rudderlabs/keydb/compare/v1.5.1...v1.5.2) (2026-11-05)
 
 
