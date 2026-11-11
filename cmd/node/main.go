@@ -25,6 +25,7 @@ import (
 
 	"github.com/rudderlabs/rudder-go-kit/config"
 	"github.com/rudderlabs/rudder-go-kit/filemanager"
+	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	_ "github.com/rudderlabs/rudder-go-kit/maxprocs"
 	"github.com/rudderlabs/rudder-go-kit/profiler"
@@ -42,8 +43,9 @@ var (
 	// legacyPodNameRegex matches single statefulset pod names like keydb-0, keydb-1, etc.
 	legacyPodNameRegex = regexp.MustCompile(`^keydb-(\d+)$`)
 
-	// podNameRegex matches multi-statefulset pod names with fixed -0 suffix like keydb-0-0, keydb-1-0, etc.
-	podNameRegex = regexp.MustCompile(`^keydb-(\d+)-0$`)
+	// podNameRegex matches multi-statefulset pod names with fixed -0 suffix like keydb-0-0, keydb-1-0, etc., and
+	// those of a node's second slot, used by node moves, like keydb-0-b-0
+	podNameRegex = regexp.MustCompile(`^keydb-(\d+)(?:-b)?-0$`)
 )
 
 const (
@@ -139,6 +141,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		return fmt.Errorf("no node addresses provided")
 	}
 	degradedNodes := conf.GetReloadableStringVar("", degradedNodesConfKey)
+	// shadowNodeAddresses is reloadable so that a shadow becomes active without a restart when a move is completed
+	shadowNodeAddresses := conf.GetReloadableStringVar("", "shadowNodeAddresses")
 
 	nodeConfig := node.Config{
 		NodeID:          nodeID,
@@ -150,13 +154,7 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		GarbageCollectionInterval: conf.GetDurationVar( // node.DefaultGarbageCollectionInterval will be used
 			0, time.Nanosecond, "gcInterval",
 		),
-		Addresses: func() []string {
-			raw := strings.TrimSpace(nodeAddresses.Load())
-			if raw == "" {
-				return nil
-			}
-			return strings.Split(raw, ",")
-		},
+		Addresses: func() []string { return splitAddresses(nodeAddresses.Load()) },
 		DegradedNodes: func() []bool {
 			raw := strings.TrimSpace(degradedNodes.Load())
 			if raw == "" {
@@ -176,13 +174,27 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		CheckL0StallInterval:      conf.GetDurationVar(5, time.Second, "checkL0StallInterval"),
 		LogTableStructureDuration: conf.GetDurationVar(10, time.Minute, "logTableStructureDuration"),
 		BackupFolderName:          conf.GetStringVar("", "KUBE_NAMESPACE"),
+		AdvertisedAddress:         strings.TrimSpace(conf.GetStringVar("", "advertisedAddress")),
+		ShadowAddresses:           func() []string { return splitAddresses(shadowNodeAddresses.Load()) },
+		// both change at runtime, without restarting the copy: 0 bytes per second pauses it
+		Replication: node.ReplicationConfig{
+			MaxBytesPerSecond: conf.GetReloadableInt64Var(
+				node.DefaultReplicationMaxBytesPerSecond, 1, "replication.maxBytesPerSecond",
+			).Load,
+			MaxRequestLatency: conf.GetReloadableDurationVar(
+				int64(node.DefaultReplicationMaxRequestLatency/time.Millisecond), time.Millisecond,
+				"replication.maxRequestLatency",
+			).Load,
+		},
 	}
 
 	port := conf.GetIntVar(50051, 1, "port")
 	healthPort := conf.GetIntVar(50052, 1, "healthPort")
+	adminPort := conf.GetIntVar(8080, 1, "adminPort")
 	log = log.Withn(
 		logger.NewIntField("port", int64(port)),
 		logger.NewIntField("healthPort", int64(healthPort)),
+		logger.NewIntField("adminPort", int64(adminPort)),
 		logger.NewIntField("nodeId", nodeConfig.NodeID),
 		logger.NewIntField("totalHashRanges", nodeConfig.TotalHashRanges),
 	)
@@ -254,6 +266,92 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 	}
 	conf.RegisterObserver(degradedNodesObserver)
 
+	server := newNodeServer(conf, stat, log)
+	pb.RegisterNodeServiceServer(server, service)
+	// Also expose the health service on the main port so in-cluster clients that dial
+	// 50051 can use gRPC health checks without a round-trip to the health port.
+	healthpb.RegisterHealthServer(server, healthServer)
+
+	// Start listening
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return fmt.Errorf("listening on port %d: %w", port, err)
+	}
+
+	log.Infon("Starting node service server",
+		logger.NewStringField("addresses", strings.Join(addresses, ",")),
+		logger.NewStringField("degradedNodes", degradedNodes.Load()),
+	)
+
+	adminServer := &http.Server{
+		Addr:              fmt.Sprintf(":%d", adminPort),
+		Handler:           service.AdminHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	wg.Go(func() {
+		defer log.Infon("Admin server terminated")
+		if err := httputil.ListenAndServe(ctx, adminServer); err != nil {
+			log.Warnn("Admin server failed", obskit.Error(err))
+		}
+	})
+
+	wg.Go(func() {
+		defer log.Infon("Profiler server terminated")
+		if err := profiler.StartServer(ctx, conf.GetIntVar(7777, 1, "Profiler.Port")); err != nil {
+			log.Warnn("Profiler server failed", obskit.Error(err))
+			return
+		}
+	})
+
+	serverErrCh := make(chan error, 1)
+	wg.Go(func() {
+		if err := server.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErrCh <- fmt.Errorf("server error: %w", err)
+		}
+	})
+
+	wg.Go(func() {
+		<-ctx.Done()
+		log.Infon("Terminating service")
+		// Flip health status to NOT_SERVING first so readiness probes fail and
+		// Kubernetes removes this pod from Service endpoints before we stop serving.
+		healthServer.Shutdown()
+		// A node being moved hands its index over first, while it still answers: it stops acknowledging writes and
+		// sends what changed since its last pass to the node taking over, which waits for it before serving.
+		handoverCtx, cancelHandover := context.WithTimeout(context.Background(),
+			conf.GetDurationVar(10, time.Second, "handoverTimeout"))
+		service.Handover(handoverCtx)
+		cancelHandover()
+		// Stop cancels in-flight calls instead of waiting for them: clients retry them, and after a node move the
+		// retries land on the node that replaced this one. It waits for their handlers to return, so Badger is
+		// closed only once no handler is running.
+		server.Stop()
+		_ = lis.Close()
+		service.Close()
+		// Stop the dedicated health server last so probes can still be answered
+		// (with NOT_SERVING) while the main server is draining.
+		healthGrpcServer.GracefulStop()
+		_ = healthLis.Close()
+	})
+
+	// Main server is now serving -> mark NodeService ready so readiness probes
+	// pass and Kubernetes starts routing traffic to this pod.
+	healthServer.SetServingStatus(pb.NodeService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
+
+	select {
+	case <-ctx.Done():
+		log.Infon("Shutting down GRPC server")
+		return ctx.Err()
+	case err := <-serverErrCh:
+		return err
+	case err := <-healthErrCh:
+		return err
+	}
+}
+
+// newNodeServer creates the node's gRPC server, with keepalive parameters and a latency interceptor. Its Stop waits
+// for the handlers still running, because the cache is closed right after: a Put reaching a closed cache hangs.
+func newNodeServer(conf *config.Config, stat stats.Stats, log logger.Logger) *grpc.Server {
 	// Configure gRPC server keepalive parameters
 	grpcKeepaliveMinTime := conf.GetDurationVar(10, time.Second, "grpc.keepalive.minTime")
 	grpcKeepalivePermitWithoutStream := conf.GetBoolVar(true, "grpc.keepalive.permitWithoutStream")
@@ -267,8 +365,8 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 		logger.NewDurationField("serverTimeout", grpcKeepaliveTimeout),
 	)
 
-	// create a gRPC server with latency interceptors and keepalive parameters
-	server := grpc.NewServer(
+	return grpc.NewServer(
+		grpc.WaitForHandlers(true),
 		// Keepalive enforcement policy - controls what the server requires from clients
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             grpcKeepaliveMinTime,
@@ -300,70 +398,11 @@ func run(ctx context.Context, cancel func(), conf *config.Config, stat stats.Sta
 			},
 		),
 	)
-
-	pb.RegisterNodeServiceServer(server, service)
-	// Also expose the health service on the main port so in-cluster clients that dial
-	// 50051 can use gRPC health checks without a round-trip to the health port.
-	healthpb.RegisterHealthServer(server, healthServer)
-
-	// Start listening
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return fmt.Errorf("listening on port %d: %w", port, err)
-	}
-
-	log.Infon("Starting node service server",
-		logger.NewStringField("addresses", strings.Join(addresses, ",")),
-		logger.NewStringField("degradedNodes", degradedNodes.Load()),
-	)
-
-	wg.Go(func() {
-		defer log.Infon("Profiler server terminated")
-		if err := profiler.StartServer(ctx, conf.GetIntVar(7777, 1, "Profiler.Port")); err != nil {
-			log.Warnn("Profiler server failed", obskit.Error(err))
-			return
-		}
-	})
-
-	serverErrCh := make(chan error, 1)
-	wg.Go(func() {
-		if err := server.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErrCh <- fmt.Errorf("server error: %w", err)
-		}
-	})
-
-	wg.Go(func() {
-		<-ctx.Done()
-		log.Infon("Terminating service")
-		// Flip health status to NOT_SERVING first so readiness probes fail and
-		// Kubernetes removes this pod from Service endpoints before we stop serving.
-		healthServer.Shutdown()
-		service.Close()
-		server.GracefulStop()
-		_ = lis.Close()
-		// Stop the dedicated health server last so probes can still be answered
-		// (with NOT_SERVING) while the main server is draining.
-		healthGrpcServer.GracefulStop()
-		_ = healthLis.Close()
-	})
-
-	// Main server is now serving -> mark NodeService ready so readiness probes
-	// pass and Kubernetes starts routing traffic to this pod.
-	healthServer.SetServingStatus(pb.NodeService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
-
-	select {
-	case <-ctx.Done():
-		log.Infon("Shutting down GRPC server")
-		return ctx.Err()
-	case err := <-serverErrCh:
-		return err
-	case err := <-healthErrCh:
-		return err
-	}
 }
 
 // getNodeID extracts the node ID from a pod name.
-// Supports both multi-statefulset format (keydb-{nodeId}-0) and legacy format (keydb-{nodeId}).
+// Supports the multi-statefulset format (keydb-{nodeId}-0 or, for the second slot used by node moves,
+// keydb-{nodeId}-b-0) and the legacy format (keydb-{nodeId}).
 func getNodeID(podName string) (int64, error) {
 	// Try matching the multi-statefulset pattern first (keydb-0-0, keydb-1-0, etc.)
 	if matches := podNameRegex.FindStringSubmatch(podName); matches != nil {
@@ -384,7 +423,19 @@ func getNodeID(podName string) (int64, error) {
 		return nodeID, nil
 	}
 
-	return 0, fmt.Errorf("invalid pod name %q, expected format: keydb-<nodeId>-0 or keydb-<nodeId>", podName)
+	return 0, fmt.Errorf(
+		"invalid pod name %q, expected format: keydb-<nodeId>-0, keydb-<nodeId>-b-0 or keydb-<nodeId>", podName,
+	)
+}
+
+// splitAddresses splits a comma-separated address list, keeping empty entries so that indexes match node IDs.
+// It returns nil when the list is empty.
+func splitAddresses(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, ",")
 }
 
 type configObserver struct {

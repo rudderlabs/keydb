@@ -10,6 +10,11 @@ var defaultHistogramBuckets = []float64{
 }
 
 var customBuckets = map[string][]float64{
+	"keydb_replication_pass_duration_seconds": {
+		// a first full pass of a big node takes hours, an incremental one seconds
+		// 1s, 5s, 10s, 30s, 1m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 16h, 24h
+		1, 5, 10, 30, 60, 300, 900, 1800, 3600, 7200, 14400, 28800, 57600, 86400,
+	},
 	"keydb_gc_duration_seconds": {
 		// 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 20s, 30s, 1m, 5m, 10m, 30m
 		0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 300, 600, 1800,

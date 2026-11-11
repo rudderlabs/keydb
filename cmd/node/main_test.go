@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/rudderlabs/rudder-go-kit/config"
+	"github.com/rudderlabs/rudder-go-kit/httputil"
 	"github.com/rudderlabs/rudder-go-kit/logger"
 	"github.com/rudderlabs/rudder-go-kit/stats"
 	"github.com/rudderlabs/rudder-go-kit/testhelper"
@@ -51,6 +53,24 @@ func TestGetNodeID(t *testing.T) {
 			podName:     "keydb-1234-0",
 			expectedID:  1234,
 			expectError: false,
+		},
+		// Slot b format tests (shadow and moved nodes)
+		{
+			name:        "valid slot b pod name - node 0",
+			podName:     "keydb-0-b-0",
+			expectedID:  0,
+			expectError: false,
+		},
+		{
+			name:        "valid slot b pod name - node 3",
+			podName:     "keydb-3-b-0",
+			expectedID:  3,
+			expectError: false,
+		},
+		{
+			name:        "invalid slot pod name",
+			podName:     "keydb-3-c-0",
+			expectError: true,
 		},
 		// Legacy format tests (backward compatibility)
 		{
@@ -147,6 +167,14 @@ func TestGetNodeID(t *testing.T) {
 //   - readiness ("keydb.NodeService") becomes SERVING once NodeService is registered
 //   - the main gRPC port also serves the health service
 //   - SIGTERM / context cancel flips everything to NOT_SERVING and shuts down cleanly
+func TestSplitAddresses(t *testing.T) {
+	require.Nil(t, splitAddresses(""))
+	require.Nil(t, splitAddresses("  "))
+	require.Equal(t, []string{"a:1"}, splitAddresses(" a:1 "))
+	require.Equal(t, []string{"a:1", "b:1"}, splitAddresses("a:1,b:1"))
+	require.Equal(t, []string{"", "b:1", ""}, splitAddresses(",b:1,"), "empty entries keep the node indexes")
+}
+
 func TestRunWith_HealthEndpoints(t *testing.T) {
 	mainPort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
@@ -154,10 +182,13 @@ func TestRunWith_HealthEndpoints(t *testing.T) {
 	require.NoError(t, err)
 	profilerPort, err := testhelper.GetFreePort()
 	require.NoError(t, err)
+	adminPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
 
 	conf := config.New()
 	conf.Set("port", mainPort)
 	conf.Set("healthPort", healthPort)
+	conf.Set("adminPort", adminPort)
 	conf.Set("Profiler.Port", profilerPort)
 	conf.Set("nodeId", "keydb-1-0")
 	conf.Set("nodeAddresses", "localhost:"+strconv.Itoa(mainPort)+",localhost:"+strconv.Itoa(mainPort))
@@ -243,6 +274,18 @@ func TestRunWith_HealthEndpoints(t *testing.T) {
 		require.Equal(t, int64(1), resp.NodeId)
 	})
 
+	t.Run("admin port serves the replication status", func(t *testing.T) {
+		statusCode := func() int {
+			resp, err := http.Get("http://localhost:" + strconv.Itoa(adminPort) + "/replication/status")
+			if err != nil {
+				return 0
+			}
+			defer func() { httputil.CloseResponse(resp) }()
+			return resp.StatusCode
+		}
+		require.Eventually(t, func() bool { return statusCode() == http.StatusOK }, 10*time.Second, 50*time.Millisecond)
+	})
+
 	// Step 2: simulate SIGTERM via context cancel. The shutdown handler must
 	// flip everything to NOT_SERVING *before* the health server stops, so
 	// readiness probes drain endpoints cleanly rather than hit a closed port.
@@ -280,4 +323,116 @@ func TestRunWith_HealthEndpoints(t *testing.T) {
 			_ = lis.Close()
 		}
 	})
+}
+
+// TestShutdownCancelsInFlight checks that shutdown cancels in-flight calls instead of waiting for them.
+// A client keeps a ReceiveSnapshot stream open, which a graceful stop would wait for until the shutdown timeout.
+func TestShutdownCancelsInFlight(t *testing.T) {
+	mainPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	healthPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	profilerPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+	adminPort, err := testhelper.GetFreePort()
+	require.NoError(t, err)
+
+	mainAddr := "localhost:" + strconv.Itoa(mainPort)
+	conf := config.New()
+	conf.Set("port", mainPort)
+	conf.Set("healthPort", healthPort)
+	conf.Set("adminPort", adminPort)
+	conf.Set("Profiler.Port", profilerPort)
+	conf.Set("nodeId", "keydb-0-0")
+	conf.Set("nodeAddresses", mainAddr)
+	conf.Set("BadgerDB.Dedup.Path", t.TempDir())
+	conf.Set("shutdownTimeout", "10s")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- run(ctx, cancel, conf, stats.NOP, logger.NOP, &mockedCloudStorage{})
+	}()
+
+	conn, err := grpc.NewClient(mainAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	nodeClient := pb.NewNodeServiceClient(conn)
+	require.Eventually(t, func() bool {
+		_, err := nodeClient.GetNodeInfo(context.Background(), &pb.GetNodeInfoRequest{})
+		return err == nil
+	}, 10*time.Second, 50*time.Millisecond, "node never became reachable")
+
+	stream, err := nodeClient.ReceiveSnapshot(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, stream.Send(&pb.SnapshotChunk{HashRange: 0, Data: []byte("partial")}))
+	time.Sleep(200 * time.Millisecond) // let the handler start waiting for the next chunk
+
+	shutdownStart := time.Now()
+	cancel()
+	select {
+	case <-runErrCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not return")
+	}
+	require.Less(t, time.Since(shutdownStart), 3*time.Second, "shutdown waited for the in-flight stream")
+
+	_, err = stream.CloseAndRecv()
+	require.Error(t, err, "the in-flight stream must be cancelled")
+}
+
+// TestStopWaitsForHandlers checks that stopping the node's server waits for the handlers still running, since the
+// cache is closed right after: a Put that reaches a closed cache hangs, and a Get fails.
+func TestStopWaitsForHandlers(t *testing.T) {
+	server := newNodeServer(config.New(), stats.NOP, logger.NOP)
+	handler := &blockingNodeService{started: make(chan struct{}), release: make(chan struct{})}
+	pb.RegisterNodeServiceServer(server, handler)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = server.Serve(lis) }()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	go func() {
+		_, _ = pb.NewNodeServiceClient(conn).Put(context.Background(), &pb.PutRequest{Keys: []string{"k"}})
+	}()
+	select {
+	case <-handler.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Put never reached its handler")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		server.Stop()
+		close(stopped)
+	}()
+	isStopped := func() bool {
+		select {
+		case <-stopped:
+			return true
+		default:
+			return false
+		}
+	}
+	require.Never(t, isStopped, 500*time.Millisecond, 10*time.Millisecond, "Stop returned while a handler was running")
+	close(handler.release)
+	require.Eventually(t, isStopped, 10*time.Second, 10*time.Millisecond, "Stop never returned")
+}
+
+// blockingNodeService is a node service whose Put runs until released, ignoring its context like a Put already
+// writing to the cache
+type blockingNodeService struct {
+	pb.UnimplementedNodeServiceServer
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingNodeService) Put(context.Context, *pb.PutRequest) (*pb.PutResponse, error) {
+	close(s.started)
+	<-s.release
+	return &pb.PutResponse{Success: true}, nil
 }

@@ -33,9 +33,19 @@ import (
 const (
 	defaultCompressionLevel = zstd.DefaultCompression
 
+	// internalHashRange is the hash range the node reserves for its internal keys, like since markers
+	internalHashRange = int64(-1)
+
 	// maxTxnMarkerSize is the length of the largest commit timestamp, a uint64, as a decimal string.
 	// Badger stores it as the value of each transaction finish marker.
 	maxTxnMarkerSize = 20
+
+	// defaultStreamBatchSize is the size at which StreamSnapshot writes a batch of entries
+	defaultStreamBatchSize = 256 << 10
+	// entryOverheadBytes is what StreamSnapshot charges per entry on top of its key and value
+	entryOverheadBytes = 24
+	// skipWaitBytes is how much skipped data StreamSnapshot accumulates before it calls Wait for it
+	skipWaitBytes = 64 << 10
 )
 
 var ErrSnapshotInProgress = errors.New("snapshotting already in progress")
@@ -46,6 +56,19 @@ type LevelInfo struct {
 	NumTables int
 	Size      int64
 	Score     float64
+}
+
+// StreamOptions configures StreamSnapshot
+type StreamOptions struct {
+	// CompressionLevel is the zstd level used when compression is enabled, the configured level when zero
+	CompressionLevel int
+	// BatchSize is the size in bytes at which a batch of entries is written, 256 KiB when zero
+	BatchSize int
+	// Wait is called with the size of each batch before it is written, so callers can apply a byte budget.
+	// It is also called, with the key sizes plus a fixed overhead per entry, as the scan skips expired or superseded
+	// entries, so that a scan that writes little still goes through the budget and a pause stops it.
+	// An error stops the stream. Nil means no budget.
+	Wait func(ctx context.Context, bytes int) error
 }
 
 type Cache struct {
@@ -332,6 +355,16 @@ func (c *Cache) PutValue(key string, hashRange int64, value []byte, ttl time.Dur
 	})
 }
 
+// DeleteValue removes a key, it is not an error if the key doesn't exist.
+func (c *Cache) DeleteValue(key string, hashRange int64) error {
+	return c.cache.Update(func(txn *badger.Txn) error {
+		if err := txn.Delete(getKey(key, hashRange)); err != nil {
+			return fmt.Errorf("deleting key %s: %w", key, err)
+		}
+		return nil
+	})
+}
+
 func (c *Cache) getTTL(ttl time.Duration) time.Duration {
 	if ttl > 0 && c.jitterEnabled && c.jitterDuration > 0 {
 		jitter := time.Duration(rand.Int63n(int64(c.jitterDuration)))
@@ -490,6 +523,162 @@ func (c *Cache) createStream(numGo int, hashRange int64, since uint64, writer *l
 	return stream, func() (uint64, bool) { return maxVersion, hasData }
 }
 
+// StreamSnapshot writes the entries of one hash range with a version above since to w, as LoadSnapshot reads them.
+// Unlike CreateSnapshots it reads the range with a single iterator and writes small batches as it goes, so it never
+// holds more than a batch in memory, and a pass over unchanged data allocates next to nothing.
+// Expired keys are skipped when since is 0. With a since they are written, as the receiver may hold an older version
+// of them that they must hide. It returns the highest version written. With nothing to write, w gets no bytes and it
+// returns 0.
+func (c *Cache) StreamSnapshot(
+	ctx context.Context, hashRange int64, since uint64, w io.Writer, opts StreamOptions,
+) (uint64, error) {
+	c.snapshottingLock.Lock()
+	if c.snapshotting {
+		c.snapshottingLock.Unlock()
+		return 0, ErrSnapshotInProgress
+	}
+	c.snapshotting = true
+	c.snapshottingLock.Unlock()
+	defer func() {
+		c.snapshottingLock.Lock()
+		c.snapshotting = false
+		c.snapshottingLock.Unlock()
+	}()
+
+	batchSize := opts.BatchSize
+	if batchSize <= 0 {
+		batchSize = defaultStreamBatchSize
+	}
+	level := opts.CompressionLevel
+	if level <= 0 {
+		level = c.compressionLevel
+	}
+	lw := &lockedWriter{writer: w}
+	write := func(batch *pb.KVList) error {
+		// the zstd frame starts with the first batch: an empty frame would make the receiver start a load
+		if c.compress && lw.closer == nil {
+			zw := zstd.NewWriterLevel(w, level)
+			lw.writer, lw.closer = zw, zw
+		}
+		return c.writeTo(batch, lw)
+	}
+
+	maxVersion, err := c.streamRange(ctx, hashRange, since, write, batchSize, opts.Wait)
+	if lw.closer != nil {
+		// flushes the zstd frame, the caller's writer is left open
+		if closeErr := lw.closer.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("closing compressed stream: %w", closeErr)
+		}
+	}
+	if err != nil {
+		return 0, fmt.Errorf("streaming hash range %d: %w", hashRange, err)
+	}
+	return maxVersion, nil
+}
+
+func (c *Cache) streamRange(
+	ctx context.Context, hashRange int64, since uint64, write func(*pb.KVList) error, batchSize int,
+	wait func(ctx context.Context, bytes int) error,
+) (uint64, error) {
+	txn := c.cache.NewTransaction(false)
+	defer txn.Discard()
+	iterOpts := badger.DefaultIteratorOptions
+	iterOpts.Prefix = []byte(getKeyPrefix(hashRange))
+	iterOpts.SinceTs = since
+	iterOpts.PrefetchValues = false
+	// Badger drops expired and deleted entries inside Next without returning to us, so a range that is mostly expired
+	// could be scanned to its end without ever consulting wait. Reading every version hands them all to the loop.
+	iterOpts.AllVersions = true
+	it := txn.NewIterator(iterOpts)
+	defer it.Close()
+
+	var (
+		maxVersion   uint64
+		batch        = &pb.KVList{}
+		batchBytes   int
+		skippedBytes int // what the loop skipped since wait last ran
+		lastKey      []byte
+		now          = uint64(time.Now().Unix())
+	)
+	// skip charges an entry that is read but not streamed, so that a scan of mostly expired data still goes through
+	// the budget and the brake, and a pause stops it. It counts the key and the per-entry overhead, like streamed
+	// entries do, in chunks, as wait is not free.
+	skip := func(key []byte) error {
+		skippedBytes += len(key) + entryOverheadBytes
+		if wait == nil || skippedBytes < skipWaitBytes {
+			return nil
+		}
+		n := skippedBytes
+		skippedBytes = 0
+		return wait(ctx, n)
+	}
+	flush := func() error {
+		if len(batch.Kv) == 0 {
+			return nil
+		}
+		if wait != nil {
+			// the batch is written as its size (8 bytes) followed by the marshalled list
+			if err := wait(ctx, 8+proto.Size(batch)); err != nil {
+				return err
+			}
+		}
+		if err := write(batch); err != nil {
+			return fmt.Errorf("writing a batch: %w", err)
+		}
+		batch, batchBytes = &pb.KVList{}, 0
+		return nil
+	}
+
+	for it.Rewind(); it.Valid(); it.Next() {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		item := it.Item()
+		if bytes.Equal(item.Key(), lastKey) {
+			// an older version of a key already seen: the newest one decides
+			if err := skip(lastKey); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		lastKey = item.KeyCopy(lastKey)
+		expired := item.ExpiresAt() > 0 && item.ExpiresAt() <= now
+		// Past the first pass an expired entry is still streamed: the receiver may hold an older, live version of the
+		// key, which only this newer entry hides. The first pass has nothing to hide, so it skips them, and not
+		// copying most of the expired data is what keeps a new disk small. Deleted entries are always skipped: the
+		// node deletes internal keys only, which are never streamed.
+		if (expired && since == 0) || (!expired && item.IsDeletedOrExpired()) {
+			if err := skip(lastKey); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		value, err := item.ValueCopy(nil)
+		if err != nil {
+			return 0, fmt.Errorf("reading value: %w", err)
+		}
+		kv := &pb.KV{
+			Key:       item.KeyCopy(nil),
+			Value:     value,
+			Version:   item.Version(),
+			ExpiresAt: item.ExpiresAt(),
+			UserMeta:  []byte{item.UserMeta()},
+		}
+		batch.Kv = append(batch.Kv, kv)
+		batchBytes += len(kv.Key) + len(kv.Value) + entryOverheadBytes
+		maxVersion = max(maxVersion, kv.Version)
+		if batchBytes >= batchSize {
+			if err := flush(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return 0, err
+	}
+	return maxVersion, nil
+}
+
 // LoadSnapshot reads the cache contents from the provided reader
 func (c *Cache) LoadSnapshot(_ context.Context, reader io.Reader) error {
 	// Use BadgerDB's built-in Load() function which properly handles transaction timestamps
@@ -497,10 +686,18 @@ func (c *Cache) LoadSnapshot(_ context.Context, reader io.Reader) error {
 
 	// The Load() method is not race safe so we have to load data sequentially
 	if c.compress {
-		reader = zstd.NewReader(reader)
+		zr := zstd.NewReader(reader)
+		defer func() { _ = zr.Close() }() // the decompressor lives in C, nothing else ever frees it
+		reader = zr
 	}
 	if err := c.cache.Load(reader, maxPendingWrites); err != nil {
-		return fmt.Errorf("failed to load snapshot: %w", err)
+		// Load moves the oracle's next timestamp forward for every key it sets, but marks those timestamps done
+		// only once it reaches the end of the stream. Cut short, it leaves every later transaction waiting for
+		// them forever. An empty Load marks them done. What was loaded stays, and the caller sends it again.
+		if settleErr := c.cache.Load(bytes.NewReader(nil), 1); settleErr != nil {
+			err = errors.Join(err, fmt.Errorf("settling transaction timestamps: %w", settleErr))
+		}
+		return fmt.Errorf("loading snapshot: %w", err)
 	}
 
 	// Force a sync to ensure data is committed
@@ -509,6 +706,31 @@ func (c *Cache) LoadSnapshot(_ context.Context, reader io.Reader) error {
 	}
 
 	return nil
+}
+
+// HasData returns true when the cache holds at least one key outside the internal keys
+func (c *Cache) HasData() (bool, error) {
+	internalPrefix := []byte(getKeyPrefix(internalHashRange))
+	var hasData bool
+	err := c.cache.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = []byte("hr")
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			if !bytes.HasPrefix(it.Item().Key(), internalPrefix) {
+				hasData = true
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("iterating keys: %w", err)
+	}
+	return hasData, nil
 }
 
 // Levels returns information about all LSM tree levels and true if L0 tables count is high enough to stall
